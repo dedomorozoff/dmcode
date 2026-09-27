@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"os"
@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"dmcode/internal/config"
 )
 
 // setupKeys drives the model the way the real event loop does, through the
@@ -37,7 +39,7 @@ func (d setupKeys) down() setupKeys  { return d.send(tea.KeyPressMsg{Code: tea.K
 // what the key mask is measured against.
 func newSetupModel(t *testing.T) *uiModel {
 	t.Helper()
-	m := initialModel(nil, nil, provider{label: "old", model: "old-model", api: apiChat}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil)
 	m.history = nil
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 34})
 	return m
@@ -99,12 +101,12 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 	}
 
 	// The change has to take effect now, not after a restart.
-	want := setupOptions()[0]
-	if m.prov.baseURL != want.baseURL || m.prov.model != want.model || m.prov.api != want.api {
+	want := config.SetupOptions()[0]
+	if m.prov.BaseURL != want.BaseURL || m.prov.Model != want.Model || m.prov.API != want.API {
 		t.Errorf("running provider is %q/%q/%v, want %q/%q/%v",
-			m.prov.baseURL, m.prov.model, m.prov.api, want.baseURL, want.model, want.api)
+			m.prov.BaseURL, m.prov.Model, m.prov.API, want.BaseURL, want.Model, want.API)
 	}
-	if os.Getenv("OPENAI_BASE_URL") != want.baseURL {
+	if os.Getenv("OPENAI_BASE_URL") != want.BaseURL {
 		t.Error("the new endpoint was not exported to the process")
 	}
 
@@ -187,7 +189,7 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 // Every option has to be readable in the overlay at the sizes people actually
 // use. A long label that gets cut off is an option that does not exist.
 func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
-	m := initialModel(nil, nil, provider{label: "old", model: "old-model", api: apiChat}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil)
 	m.history = nil
 
 	for _, size := range [][2]int{{100, 34}, {80, 24}, {72, 22}} {
@@ -195,9 +197,9 @@ func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
 		setupKeys{m}.type_("/setup").enter()
 		view := m.View().Content
 
-		for _, o := range setupOptions() {
+		for _, o := range config.SetupOptions() {
 			// Labels wrap, so check the first word that cannot be split.
-			head := strings.Fields(o.label)[0]
+			head := strings.Fields(o.Label)[0]
 			if !strings.Contains(view, head) {
 				t.Errorf("%dx%d: %q is missing from the overlay:\n%s", size[0], size[1], head, view)
 			}

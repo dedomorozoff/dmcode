@@ -1,4 +1,4 @@
-package main
+package tools
 
 import (
 	"context"
@@ -75,10 +75,36 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 			return writeFileResult{}, err
 		}
 	}
-	if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
+	if err := writeFileAtomic(in.Path, []byte(in.Content)); err != nil {
 		return writeFileResult{}, err
 	}
 	return writeFileResult{BytesWritten: len(in.Content)}, nil
+}
+
+// writeFileAtomic writes data through a temporary file in the target directory
+// and a rename, so an unexpected exit cannot leave a truncated or half-written
+// file behind. os.Rename replaces an existing destination on all platforms
+// dmcode supports.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".dmcode-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 type editFileArgs struct {
@@ -102,11 +128,16 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 	}
 
 	// 1. Try exact match
+	write := func(content string) (editFileResult, error) {
+		if err := writeFileAtomic(in.Path, []byte(content)); err != nil {
+			return editFileResult{}, err
+		}
+		return editFileResult{}, nil
+	}
 	if in.ReplaceAll {
 		n := strings.Count(src, in.OldString)
 		if n > 0 {
-			src = strings.ReplaceAll(src, in.OldString, in.NewString)
-			if err := os.WriteFile(in.Path, []byte(src), 0o644); err != nil {
+			if _, err := write(strings.ReplaceAll(src, in.OldString, in.NewString)); err != nil {
 				return editFileResult{}, err
 			}
 			return editFileResult{Replacements: n}, nil
@@ -117,8 +148,7 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if strings.Index(src[idx+1:], in.OldString) >= 0 {
 				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
 			}
-			src = src[:idx] + in.NewString + src[idx+len(in.OldString):]
-			if err := os.WriteFile(in.Path, []byte(src), 0o644); err != nil {
+			if _, err := write(src[:idx] + in.NewString + src[idx+len(in.OldString):]); err != nil {
 				return editFileResult{}, err
 			}
 			return editFileResult{Replacements: 1}, nil
@@ -138,7 +168,7 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if err := os.WriteFile(in.Path, []byte(normSrc), 0o644); err != nil {
+			if _, err := write(normSrc); err != nil {
 				return editFileResult{}, err
 			}
 			return editFileResult{Replacements: n}, nil
@@ -153,14 +183,137 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if err := os.WriteFile(in.Path, []byte(normSrc), 0o644); err != nil {
+			if _, err := write(normSrc); err != nil {
 				return editFileResult{}, err
 			}
 			return editFileResult{Replacements: 1}, nil
 		}
 	}
 
+	// 3. Fallback: whitespace-normalized, line-granular match. Models habitually
+	// reproduce a snippet with the file's tabs swapped for spaces or an
+	// indentation level off by one; the words are right, the spacing is not.
+	// The window whose lines agree once whitespace runs are collapsed is taken
+	// as the match, and new_string's indentation is replaced with the file's
+	// own, so the edit lands the way the file was formatted.
+	count, out, err := fuzzyReplace(src, in.OldString, in.NewString, in.ReplaceAll)
+	if err != nil {
+		return editFileResult{}, err
+	}
+	if count == 1 {
+		if _, err := write(out); err != nil {
+			return editFileResult{}, err
+		}
+		return editFileResult{Replacements: 1}, nil
+	}
+	if count > 1 && in.ReplaceAll {
+		if _, err := write(out); err != nil {
+			return editFileResult{}, err
+		}
+		return editFileResult{Replacements: count}, nil
+	}
+	if count > 1 {
+		return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+	}
 	return editFileResult{}, fmt.Errorf("old_string not found in %s", in.Path)
+}
+
+// leadingWS returns the indentation prefix of a single line.
+func leadingWS(line string) string {
+	i := 0
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return line[:i]
+}
+
+// fuzzyReplace finds matches of oldS in src where every line agrees once
+// whitespace runs are collapsed, and returns the file with each match replaced
+// by newS. Matching is whole-line: a window of consecutive file lines must
+// correspond line for line to old_string, which keeps surrounding text on the
+// first and last lines intact. Returned count is the number of matches found;
+// out is meaningful only when count is 1 or replaceAll was requested (count > 1).
+func fuzzyReplace(src, oldS, newS string, replaceAll bool) (int, string, error) {
+	if strings.TrimSpace(oldS) == "" {
+		return 0, "", fmt.Errorf("old_string is empty")
+	}
+	crlf := strings.Contains(src, "\r\n")
+	lines := strings.Split(src, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSuffix(lines[i], "\r")
+	}
+	split := func(s string) []string {
+		return strings.Split(strings.TrimSuffix(strings.ReplaceAll(s, "\r\n", "\n"), "\n"), "\n")
+	}
+	oldLines := split(oldS)
+	newLines := split(newS)
+
+	norm := make([]string, len(lines))
+	for i, l := range lines {
+		norm[i] = strings.Join(strings.Fields(l), " ")
+	}
+	normOld := make([]string, len(oldLines))
+	for i, l := range oldLines {
+		normOld[i] = strings.Join(strings.Fields(l), " ")
+	}
+
+	type span struct{ start, end int }
+	var spans []span
+	for i := 0; i+len(normOld) <= len(norm); i++ {
+		ok := true
+		for k := range normOld {
+			if norm[i+k] != normOld[k] {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			spans = append(spans, span{i, i + len(normOld)})
+			if !replaceAll {
+				if len(spans) > 1 {
+					break
+				}
+				i += len(normOld) - 1
+			} else {
+				i += len(normOld) - 1
+			}
+		}
+	}
+	if len(spans) == 0 {
+		return 0, "", nil
+	}
+
+	var out []string
+	prev := 0
+	for _, sp := range spans {
+		out = append(out, lines[prev:sp.start]...)
+		window := lines[sp.start:sp.end]
+		block := make([]string, len(newLines))
+		for k, nl := range newLines {
+			if strings.Join(strings.Fields(nl), " ") == "" {
+				block[k] = ""
+				continue
+			}
+			ws := ""
+			if k < len(window) {
+				ws = leadingWS(window[k])
+			}
+			if ws == "" {
+				// Expanding one file line into several: give the followers the
+				// indentation of the line they grow out of.
+				ws = leadingWS(window[0])
+			}
+			block[k] = ws + strings.TrimLeft(nl, " \t")
+		}
+		out = append(out, block...)
+		prev = sp.end
+	}
+	out = append(out, lines[prev:]...)
+	joined := strings.Join(out, "\n")
+	if crlf {
+		joined = strings.ReplaceAll(joined, "\n", "\r\n")
+	}
+	return len(spans), joined, nil
 }
 
 // isIgnoredDir returns true if directory should be skipped (VCS / vendor / caches).
@@ -494,7 +647,7 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	return result, nil
 }
 
-func makeTools() ([]tool.Tool, error) {
+func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
 		Description: "Reads a file. Optional offset_line and limit_lines for large files. Returns content, total line count and whether it was truncated.",
@@ -511,7 +664,7 @@ func makeTools() ([]tool.Tool, error) {
 	}
 	editFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "edit_file",
-		Description: "Replaces exact old_string with new_string in a file. old_string must be unique unless replace_all is true; otherwise returns an error.",
+		Description: "Replaces old_string with new_string in a file. old_string must be unique unless replace_all is true; otherwise returns an error. If the exact text is absent, a whitespace-tolerant match is tried: indentation and spacing differences are ignored and new_string adopts the file's indentation.",
 	}, editFile)
 	if err != nil {
 		return nil, err
@@ -545,4 +698,12 @@ func makeTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 	return []tool.Tool{readFileTool, writeFileTool, editFileTool, listDirTool, grepTool, globTool2, runCommandTool}, nil
+}
+
+// truncate shortens s to at most n bytes, marking the cut with an ellipsis.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }

@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"strings"
@@ -7,6 +7,8 @@ import (
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+
+	"dmcode/internal/config"
 )
 
 // lipgloss counts a style's Width/Height as the total block size with borders
@@ -18,7 +20,7 @@ func TestFrameFitsTerminalExactly(t *testing.T) {
 		{200, 60}, {140, 45}, {120, 40}, {100, 30}, {91, 24}, {90, 24},
 		{89, 24}, {80, 24}, {70, 20}, {60, 20}, {50, 15}, {40, 12}, {30, 10}, {20, 9},
 	}
-	models := []string{
+	Models := []string{
 		"gpt-4o-mini",
 		"openai/gpt-oss-120b",
 		"meta-llama/Llama-3.3-70B-Instruct:free-qwq",
@@ -27,7 +29,7 @@ func TestFrameFitsTerminalExactly(t *testing.T) {
 
 	for _, size := range sizes {
 		w, h := size[0], size[1]
-		for _, model := range models {
+		for _, model := range Models {
 			m := framedModel(w, h, model)
 			lines := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
 			// The frame is header + chat panel + status bar + input box, so it
@@ -62,7 +64,7 @@ func TestSidebarMatchesPanelHeight(t *testing.T) {
 // with an ellipsis so a cut-off panel is not read as a complete one.
 func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	m := &uiModel{
-		prov:      provider{model: "some/very/long/model/name", label: "Pollinations (без ключа)"},
+		prov:      config.Provider{Model: "some/very/long/model/name", Label: "Pollinations (без ключа)"},
 		sessionID: "sess-0123456789abcdef",
 		workDir:   "C:/cygwin64/home/alexl/dmcode",
 		toolNames: []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob", "run_command"},
@@ -204,8 +206,8 @@ func TestOverlayPanelsFitTerminal(t *testing.T) {
 		"google/gemini-2.5-pro", "x/y", "z", "a-very-long-provider-name/model-id-with-a-long-suffix",
 	}
 	for _, size := range [][2]int{{200, 60}, {120, 40}, {90, 24}, {70, 20}, {40, 12}} {
-		m := &uiModel{prov: provider{model: "gpt-4o-mini"}, width: size[0], height: size[1]}
-		m.picker = modelPicker{open: true, models: ids, selected: 3}
+		m := &uiModel{prov: config.Provider{Model: "gpt-4o-mini"}, width: size[0], height: size[1]}
+		m.picker = modelPicker{open: true, Models: ids, selected: 3}
 		m.palette = paletteState{open: true, query: "модел"}
 
 		for name, box := range map[string]string{"picker": m.modelPickerBox(), "palette": m.paletteBox()} {
@@ -223,7 +225,7 @@ func TestOverlayPanelsFitTerminal(t *testing.T) {
 // unbreakable words, Cyrillic, multi-row tool output and a busy status.
 func framedModel(w, h int, model string) *uiModel {
 	m := &uiModel{
-		prov:        provider{model: model, label: "Pollinations (без ключа)"},
+		prov:        config.Provider{Model: model, Label: "Pollinations (без ключа)"},
 		sessionID:   "sess-1234567890123",
 		workDir:     "C:/cygwin64/home/alexl/dmcode",
 		toolNames:   []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob", "run_command"},

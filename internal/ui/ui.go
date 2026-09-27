@@ -1,4 +1,4 @@
-package main
+package ui
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -18,7 +17,11 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 
-	"google.golang.org/adk/v2/agent"
+	dmagent "dmcode/internal/agent"
+	"dmcode/internal/config"
+	"dmcode/internal/llm"
+
+	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
@@ -121,14 +124,14 @@ type toolResMsg struct {
 type turnDoneMsg struct{ err error }
 
 type modelsListMsg struct {
-	models []string
+	Models []string
 	err    error
 }
 
 type modelSwitchedMsg struct {
 	name   string
 	runner *runner.Runner
-	pool   []provider
+	pool   []config.Provider
 	err    error
 }
 
@@ -140,8 +143,8 @@ func (e errMsg) Error() string { return string(e) }
 // rather than a direct history append because the switch happens on the turn
 // goroutine, and only Update may touch the transcript.
 type failoverMsg struct {
-	from   provider
-	to     provider
+	from   config.Provider
+	to     config.Provider
 	reason string
 }
 
@@ -151,8 +154,8 @@ type failoverMsg struct {
 type toolCheckMsg struct {
 	ok         bool
 	conclusive bool
-	model      string
-	label      string
+	Model      string
+	Label      string
 }
 
 type uiModel struct {
@@ -166,12 +169,12 @@ type uiModel struct {
 	sessionID string
 	runner    *runner.Runner
 	svc       session.Service
-	prov      provider
+	prov      config.Provider
 	// pool is every endpoint this session may use, in preference order. prov is
 	// the member currently answering, so a failover updates both and the next
 	// /model switch keeps the reserves instead of dropping back to a single
 	// endpoint.
-	pool      []provider
+	pool      []config.Provider
 	tools     []tool.Tool
 	prog      *tea.Program
 	toolNames []string
@@ -180,6 +183,13 @@ type uiModel struct {
 	setup     setupState
 	suggest   []string
 	stick     bool
+
+	// Prompt history: every prompt the user has sent, persisted in
+	// ~/.dmcode/history.jsonl and recalled with ↑/↓ like a shell. histPos ==
+	// len(promptHistory) means the input holds the live draft.
+	promptHistory []string
+	histPos       int
+	draft         string
 
 	// UX & state components
 	showSidebar   bool
@@ -200,7 +210,7 @@ type modelPicker struct {
 	open     bool
 	query    string
 	selected int
-	models   []string
+	Models   []string
 }
 
 type paletteState struct {
@@ -224,7 +234,7 @@ type setupState struct {
 	open     bool
 	stage    int
 	selected int
-	opt      setupOption
+	opt      config.SetupOption
 	buf      string
 }
 
@@ -269,12 +279,16 @@ func (m *uiModel) commands() []command {
 			m.historyDirty = true
 			return nil
 		}},
+		{name: "history", desc: "последние промпты (↑/↓ — вызвать)", run: func(m *uiModel) tea.Cmd {
+			m.showRecentPrompts()
+			return nil
+		}},
 		{name: "help", desc: "подсказки", run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
 				line{kindSys, "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ"},
-				line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
+				line{kindSys, "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл"},
 				line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
-				line{kindSys, "/setup, /models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /new, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -289,12 +303,12 @@ func (m *uiModel) commands() []command {
 	}
 }
 
-const logo = `  ██████╗ ███╗   ███╗ ██████╗ ██████╗ ██████╗ ███████╗
-  ██╔════╝ ████╗ ████║██╔════╝██╔═══██╗██╔══██╗██╔════╝
-  ██║  ███╗██╔████╔██║██║     ██║   ██║██║  ██║█████╗
-  ██║   ██║██║╚██╔╝██║██║     ██║   ██║██║  ██║██╔══╝
-  ╚██████╔╝██║ ╚═╝ ██║╚██████╗╚██████╔╝██████╔╝███████╗
-   ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝  coding agent`
+const logo = `  ███████╗ ███╗   ███╗ ██████╗ ██████╗ ███████╗ ██████╗
+  ██╔═══██║████╗ ████║██╔════╝██╔═══██╗██╔═══██╗██╔═══╝
+  ██║   ██║██╔████╔██║██║     ██║   ██║██║   ██║█████╗
+  ██║   ██║██║╚██╔╝██║██║     ██║   ██║██║   ██║██╔══╝
+  ███████╔╝██║ ╚═╝ ██║╚██████╗╚██████╔╝███████╔╝██████╗
+  ╚═════╝  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝`
 
 var styleLogo = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
 
@@ -302,7 +316,7 @@ func newSessionID() string {
 	return fmt.Sprintf("sess-%d", rand.Int63())
 }
 
-func initialModel(r *runner.Runner, svc session.Service, p provider, tools []tool.Tool, toolNames []string) *uiModel {
+func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, toolNames []string) *uiModel {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.Placeholder = "опиши задачу… (/help — команды, esc — отмена)"
@@ -324,7 +338,7 @@ func initialModel(r *runner.Runner, svc session.Service, p provider, tools []too
 		runner:       r,
 		svc:          svc,
 		prov:         p,
-		pool:         []provider{p},
+		pool:         []config.Provider{p},
 		tools:        tools,
 		toolNames:    toolNames,
 		showSidebar:  true,
@@ -335,8 +349,10 @@ func initialModel(r *runner.Runner, svc session.Service, p provider, tools []too
 		line{kindSys, ""},
 		line{kindLogo, logo},
 		line{kindSys, ""},
-		line{kindSys, "ctrl+p команды · ctrl+b панель · ctrl+y копировать · esc отмена"},
+		line{kindSys, "ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена"},
 		line{kindSys, ""})
+	m.promptHistory = loadPromptHistory()
+	m.histPos = len(m.promptHistory)
 	return m
 }
 
@@ -358,7 +374,7 @@ func (m *uiModel) Init() tea.Cmd {
 // switched models while the check was in flight, and an advisory about a model
 // they are no longer using is worse than none.
 func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
-	if msg.model != m.prov.model || msg.label != m.prov.label {
+	if msg.Model != m.prov.Model || msg.Label != m.prov.Label {
 		return
 	}
 	if !msg.conclusive {
@@ -370,18 +386,18 @@ func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
 	m.statusText = "провайдер без tools"
 	m.history = append(m.history, line{kindErr, fmt.Sprintf(
 		"⚠ %s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
-		msg.label, msg.model)})
+		msg.Label, msg.Model)})
 	m.historyDirty = true
 }
 
 func (m *uiModel) toolCheckCmd() tea.Cmd {
 	p := m.prov
-	if p.wire() != apiChat || p.model == "" {
+	if p.Wire() != config.APIChat || p.Model == "" {
 		return nil
 	}
 	return func() tea.Msg {
-		ok, conclusive := verifyTools(p.baseURL, p.apiKey, p.model, toolProbeTimeout)
-		return toolCheckMsg{ok: ok, conclusive: conclusive, model: p.model, label: p.label}
+		ok, conclusive := llm.VerifyTools(p.BaseURL, p.APIKey, p.Model, llm.ToolProbeTimeout)
+		return toolCheckMsg{ok: ok, conclusive: conclusive, Model: p.Model, Label: p.Label}
 	}
 }
 
@@ -396,23 +412,23 @@ func (m *uiModel) toolCheckCmd() tea.Cmd {
 // that just failed.
 func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	m.prov = msg.to
-	rest := make([]provider, 0, len(m.pool))
+	rest := make([]config.Provider, 0, len(m.pool))
 	rest = append(rest, msg.to)
 	for _, p := range m.pool {
-		if p.baseURL == msg.to.baseURL && p.model == msg.to.model {
+		if p.BaseURL == msg.to.BaseURL && p.Model == msg.to.Model {
 			continue
 		}
-		if p.baseURL == msg.from.baseURL && p.model == msg.from.model {
+		if p.BaseURL == msg.from.BaseURL && p.Model == msg.from.Model {
 			continue
 		}
 		rest = append(rest, p)
 	}
 	rest = append(rest, msg.from)
 	m.pool = rest
-	m.statusText = "запасной: " + msg.to.label
+	m.statusText = "запасной: " + msg.to.Label
 	m.history = append(m.history, line{kindSys, fmt.Sprintf(
 		"⚡ %s недоступен (%s) — ответил %s (%s)",
-		msg.from.label, msg.reason, msg.to.label, msg.to.model)})
+		msg.from.Label, msg.reason, msg.to.Label, msg.to.Model)})
 	m.historyDirty = true
 	// The reserve has not been checked for tool calling, and a host that
 	// ignores tools turns every turn into prose.
@@ -533,6 +549,28 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateSuggest()
 				return m, nil
 			}
+		case "up", "down":
+			if m.busy {
+				return m, nil
+			}
+			if msg.String() == "up" && len(m.promptHistory) > 0 && m.histPos > 0 {
+				if m.histPos == len(m.promptHistory) {
+					m.draft = m.input.Value()
+				}
+				m.histPos--
+				m.input.SetValue(m.promptHistory[m.histPos])
+				m.input.CursorEnd()
+			}
+			if msg.String() == "down" && m.histPos < len(m.promptHistory) {
+				m.histPos++
+				if m.histPos == len(m.promptHistory) {
+					m.input.SetValue(m.draft)
+				} else {
+					m.input.SetValue(m.promptHistory[m.histPos])
+				}
+				m.input.CursorEnd()
+			}
+			return m, nil
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
@@ -546,9 +584,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/help":
 				m.history = append(m.history,
 					line{kindSys, "ctrl+p — палитра команд · ctrl+b — панель · ctrl+y — копировать ответ"},
-					line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
+					line{kindSys, "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл"},
 					line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
-					line{kindSys, "/setup, /models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /new, /clear, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -562,6 +600,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/clear":
 				m.history = nil
 				m.historyDirty = true
+				m.followVP()
+				return m, nil
+			case "/history":
+				m.showRecentPrompts()
 				m.followVP()
 				return m, nil
 			case "/new":
@@ -594,6 +636,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyDirty = true
 			m.busy = true
 			m.followVP()
+			m.savePrompt(text)
 			return m, m.startTurn(text)
 		}
 	case spinner.TickMsg:
@@ -621,13 +664,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyDirty = true
 			m.followVP()
 		} else {
-			m.picker = modelPicker{open: true, models: msg.models}
+			m.picker = modelPicker{open: true, Models: msg.Models}
 		}
 	case modelSwitchedMsg:
 		if msg.err != nil {
-			m.history = append(m.history, line{kindErr, "model: " + msg.err.Error()})
+			m.history = append(m.history, line{kindErr, "Model: " + msg.err.Error()})
 		} else {
-			m.prov.model = msg.name
+			m.prov.Model = msg.name
 			m.runner = msg.runner
 			if len(msg.pool) > 0 {
 				m.pool = msg.pool
@@ -771,7 +814,7 @@ func (m *uiModel) updateSuggest() {
 	}
 	if id, ok := strings.CutPrefix(text, "/model "); ok {
 		q := strings.TrimSpace(id)
-		for _, id := range m.picker.models {
+		for _, id := range m.picker.Models {
 			if q == "" || strings.Contains(id, q) {
 				m.suggest = append(m.suggest, "/model "+id)
 			}
@@ -993,7 +1036,7 @@ func (m *uiModel) openSetup() tea.Cmd {
 // stage: a user who picked the wrong provider must never be trapped in a prompt
 // with no way out.
 func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	opts := setupOptions()
+	opts := config.SetupOptions()
 	switch msg.String() {
 	case "esc":
 		m.setup.reset()
@@ -1019,10 +1062,10 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.setup.opt = opts[m.setup.selected]
 			switch {
-			case !m.setup.opt.keyless:
+			case !m.setup.opt.Keyless:
 				m.setup.stage = setupKey
 				m.setup.buf = ""
-			case m.setup.opt.baseURL == "":
+			case m.setup.opt.BaseURL == "":
 				m.setup.stage = setupURL
 				m.setup.buf = ""
 			default:
@@ -1053,7 +1096,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.statusText = "base URL не введён"
 				return m, nil
 			}
-			m.setup.opt.baseURL = strings.TrimSpace(m.setup.buf)
+			m.setup.opt.BaseURL = strings.TrimSpace(m.setup.buf)
 			m.setup.stage = setupModel
 			m.setup.buf = ""
 			return m, nil
@@ -1071,7 +1114,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.statusText = "модель не введена"
 				return m, nil
 			}
-			m.setup.opt.model = strings.TrimSpace(m.setup.buf)
+			m.setup.opt.Model = strings.TrimSpace(m.setup.buf)
 			return m, m.applySetup()
 		case "backspace":
 			if r := []rune(m.setup.buf); len(r) > 0 {
@@ -1093,11 +1136,11 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // a secret.
 func (m *uiModel) applySetup() tea.Cmd {
 	opt := m.setup.opt
-	vars := setupVars(opt, strings.TrimSpace(m.setup.buf))
+	vars := config.SetupVars(opt, strings.TrimSpace(m.setup.buf))
 
 	// Merge into any existing .env rather than replacing it, so a key the user
 	// set for another provider is not silently dropped.
-	lines, err := readDotEnv()
+	lines, err := config.ReadDotEnv()
 	if err != nil {
 		m.statusText = "ошибка чтения .env"
 		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
@@ -1105,7 +1148,7 @@ func (m *uiModel) applySetup() tea.Cmd {
 		m.historyDirty = true
 		return nil
 	}
-	merged, _ := mergeDotEnv(lines, vars)
+	merged, _ := config.MergeDotEnv(lines, vars)
 
 	var sb strings.Builder
 	for _, l := range merged {
@@ -1118,28 +1161,28 @@ func (m *uiModel) applySetup() tea.Cmd {
 		m.historyDirty = true
 		return nil
 	}
-	for _, k := range sortedKeys(vars) {
+	for _, k := range config.SortedKeys(vars) {
 		os.Setenv(k, vars[k])
 	}
 
-	p := provider{
-		baseURL:   vars["OPENAI_BASE_URL"],
-		model:     orDefaultModel(vars["DMCODE_MODEL"]),
-		api:       opt.api,
-		label:     setupLabel(opt),
-		reasoning: vars["DMCODE_REASONING_EFFORT"],
+	p := config.Provider{
+		BaseURL:   vars["OPENAI_BASE_URL"],
+		Model:     config.OrDefaultModel(vars["DMCODE_MODEL"]),
+		API:       opt.API,
+		Label:     setupLabel(opt),
+		Reasoning: vars["DMCODE_REASONING_EFFORT"],
 	}
-	if !opt.keyless {
-		p.apiKey = vars[opt.envKey]
+	if !opt.Keyless {
+		p.APIKey = vars[opt.EnvKey]
 	}
 	m.prov = p
 	m.setup.reset()
-	m.statusText = "провайдер: " + p.label
-	m.history = append(m.history, line{kindSys, "провайдер сохранён в .env: " + p.label})
+	m.statusText = "провайдер: " + p.Label
+	m.history = append(m.history, line{kindSys, "провайдер сохранён в .env: " + p.Label})
 	m.historyDirty = true
 
 	ctx := context.Background()
-	a, berr := buildAgent(ctx, p, m.tools)
+	a, berr := dmagent.BuildAgent(ctx, p, m.tools)
 	if berr != nil {
 		m.history = append(m.history, line{kindErr, "setup: " + berr.Error()})
 		return nil
@@ -1160,11 +1203,11 @@ func (m *uiModel) applySetup() tea.Cmd {
 }
 
 // setupLabel names a wizard option for the sidebar, where the provider is shown.
-func setupLabel(opt setupOption) string {
-	if opt.baseURL == "" {
+func setupLabel(opt config.SetupOption) string {
+	if opt.BaseURL == "" {
 		return "Свой endpoint"
 	}
-	host := opt.baseURL
+	host := opt.BaseURL
 	if i := strings.Index(host, "://"); i >= 0 {
 		host = host[i+3:]
 	}
@@ -1173,79 +1216,6 @@ func setupLabel(opt setupOption) string {
 	}
 	return host
 }
-
-// readDotEnv parses .env into ordered lines, keeping comments and ordering so a
-// rewrite does not lose the user's notes.
-func readDotEnv() ([]string, error) {
-	data, err := os.ReadFile(".env")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n"), nil
-}
-
-// mergeDotEnv overlays vars onto existing .env lines. Keys the wizard does not
-// manage are preserved verbatim, so a real provider key is never clobbered and
-// switching back to it later costs nothing. Lines that are not assignments are
-// kept as they are.
-//
-// It returns the merged file in order, plus the values that were actually
-// written. The values are needed to build the provider, and the ordering is
-// needed to rewrite the file without shuffling the user's comments around.
-func mergeDotEnv(lines []string, vars map[string]string) ([]string, map[string]string) {
-	out := make([]string, 0, len(lines)+len(vars))
-	vals := make(map[string]string, len(vars))
-	applied := make(map[string]bool, len(vars))
-
-	for _, line := range lines {
-		k, _, ok := dotEnvPair(line)
-		if !ok {
-			out = append(out, line)
-			continue
-		}
-		if v, managed := vars[k]; managed {
-			out = append(out, k+"="+v)
-			vals[k] = v
-			applied[k] = true
-			continue
-		}
-		out = append(out, line)
-	}
-	for _, k := range sortedKeys(vars) {
-		if !applied[k] {
-			out = append(out, k+"="+vars[k])
-			vals[k] = vars[k]
-		}
-	}
-	return out, vals
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// dotEnvPair extracts a key from a .env line, reporting false for comments and
-// anything that is not an assignment.
-func dotEnvPair(line string) (string, string, bool) {
-	t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
-	if t == "" || strings.HasPrefix(t, "#") {
-		return "", "", false
-	}
-	k, v, ok := strings.Cut(t, "=")
-	if !ok {
-		return "", "", false
-	}
-	return strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`), true
-}
-
 func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	filtered := m.filteredModels()
 	switch msg.String() {
@@ -1290,7 +1260,7 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *uiModel) filteredModels() []string {
 	q := strings.ToLower(m.picker.query)
 	var out []string
-	for _, id := range m.picker.models {
+	for _, id := range m.picker.Models {
 		if q == "" || strings.Contains(strings.ToLower(id), q) {
 			out = append(out, id)
 		}
@@ -1301,8 +1271,8 @@ func (m *uiModel) filteredModels() []string {
 func (m *uiModel) fetchModelsCmd() tea.Cmd {
 	p := m.prov
 	return func() tea.Msg {
-		models, err := listModels(p)
-		return modelsListMsg{models: models, err: err}
+		Models, err := config.ListModels(p)
+		return modelsListMsg{Models: Models, err: err}
 	}
 }
 
@@ -1312,13 +1282,13 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 // nowhere to go.
 func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	p := m.prov
-	p.model = id
+	p.Model = id
 	// Retain this session's ordering: active host first, the one that just
 	// failed last. The pool member being edited is the one currently answering.
-	pool := make([]provider, 0, len(m.pool))
+	pool := make([]config.Provider, 0, len(m.pool))
 	edited := false
 	for _, member := range m.pool {
-		if !edited && member.baseURL == p.baseURL && member.apiKey == p.apiKey {
+		if !edited && member.BaseURL == p.BaseURL && member.APIKey == p.APIKey {
 			pool = append(pool, p)
 			edited = true
 			continue
@@ -1326,12 +1296,12 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		pool = append(pool, member)
 	}
 	if !edited {
-		pool = append([]provider{p}, pool...)
+		pool = append([]config.Provider{p}, pool...)
 	}
 	svc, tools := m.svc, m.tools
 	return func() tea.Msg {
 		ctx := context.Background()
-		a, err := buildPooledAgent(ctx, pool, tools, m.switchNotifier())
+		a, err := dmagent.BuildPooledAgent(ctx, pool, tools, m.switchNotifier())
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -1351,9 +1321,9 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 // switchNotifier hands a failover to the event loop. It is nil-safe: a switch
 // can only happen once a turn is running, and a program that is not up yet
 // cannot have one.
-func (m *uiModel) switchNotifier() func(SwitchEvent) {
+func (m *uiModel) switchNotifier() func(llm.SwitchEvent) {
 	prog := m.prog
-	return func(ev SwitchEvent) {
+	return func(ev llm.SwitchEvent) {
 		if prog == nil {
 			return
 		}
@@ -1371,8 +1341,8 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 	return func() tea.Msg {
 		userMsg := genai.NewContentFromText(text, genai.RoleUser)
 		prevText := ""
-		for ev, err := range r.Run(turnCtx, userID, sessionID, userMsg, agent.RunConfig{
-			StreamingMode: agent.StreamingModeSSE,
+		for ev, err := range r.Run(turnCtx, userID, sessionID, userMsg, adkagent.RunConfig{
+			StreamingMode: adkagent.StreamingModeSSE,
 		}) {
 			if err != nil {
 				return turnDoneMsg{err}
@@ -1455,9 +1425,9 @@ func (m *uiModel) sidebarView(height int) string {
 	}
 
 	row(styleSidebarLabel, "МОДЕЛЬ")
-	value(styleSidebarValue, " ", m.prov.model)
-	if m.prov.label != "" {
-		row(styleHint, truncate("via "+m.prov.label, sbInner))
+	value(styleSidebarValue, " ", m.prov.Model)
+	if m.prov.Label != "" {
+		row(styleHint, truncate("via "+m.prov.Label, sbInner))
 	}
 	b.WriteString("\n")
 
@@ -1562,7 +1532,7 @@ func (m *uiModel) statusBarView() string {
 		right = cand
 		return true
 	}
-	if fit(truncate(m.prov.model, avail)) {
+	if fit(truncate(m.prov.Model, avail)) {
 		for _, k := range statusHotkeys {
 			if !fit(k) {
 				break
@@ -1596,7 +1566,7 @@ func (m *uiModel) headerView() string {
 
 	// The session id is the less useful of the two on a narrow screen, so the
 	// model keeps the columns and the id is reduced to a readable stub.
-	model := truncate(m.prov.model, max(avail-ansi.StringWidth(sep)-8, 4))
+	model := truncate(m.prov.Model, max(avail-ansi.StringWidth(sep)-8, 4))
 	id := truncate(m.sessionID, max(avail-ansi.StringWidth(sep)-ansi.StringWidth(model), 4))
 
 	return styleTopBar.Width(width).Render(
@@ -1722,7 +1692,7 @@ func (m *uiModel) modelPickerBox() string {
 		switch {
 		case i == m.picker.selected:
 			marker, style = " ▸ ", lipgloss.NewStyle()
-		case id == m.prov.model:
+		case id == m.prov.Model:
 			marker, style = " ● ", styleTool
 		}
 		rows := wrapIndent(id, inner, marker, "     ")
@@ -1774,17 +1744,17 @@ func (m *uiModel) setupBox() string {
 		return m.floatingPanel("? модель", "", rows, 0)
 	}
 
-	opts := setupOptions()
+	opts := config.SetupOptions()
 	var entries [][]string
 	for i, o := range opts {
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
 		case i == m.setup.selected:
 			marker, style = " ? ", styleTool
-		case setupLabel(o) == m.prov.label:
+		case setupLabel(o) == m.prov.Label:
 			marker, style = " * ", styleTool
 		}
-		rows := wrapIndent(o.label, inner, marker, "     ")
+		rows := wrapIndent(o.Label, inner, marker, "     ")
 		if i != m.setup.selected {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
@@ -1850,20 +1820,20 @@ func (m *uiModel) View() tea.View {
 	return v
 }
 
-func runTUI(ctx context.Context, p provider, pool []provider, tools []tool.Tool, toolNames []string) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, tools []tool.Tool, toolNames []string) error {
 	if len(pool) == 0 {
-		pool = []provider{p}
+		pool = []config.Provider{p}
 	}
 	// The notifier needs the program, which needs the model, which needs the
 	// agent: the program is wired in afterwards, and a failover cannot happen
 	// before the first turn anyway.
-	m := initialModel(nil, nil, p, tools, toolNames)
+	m := InitialModel(nil, nil, p, tools, toolNames)
 	m.pool = pool
 
 	prog := tea.NewProgram(m)
 	m.prog = prog
 
-	a, err := buildPooledAgent(ctx, pool, tools, m.switchNotifier())
+	a, err := dmagent.BuildPooledAgent(ctx, pool, tools, m.switchNotifier())
 	if err != nil {
 		return err
 	}

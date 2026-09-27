@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
@@ -57,7 +56,7 @@ func TestChatModelStreamingToolCall(t *testing.T) {
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a.go\"}"}}]}}]}`,
 	}, `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
 
-	m := newChatModel(srv.URL+"/v1", "", "test-coder")
+	m := NewChatModel(srv.URL+"/v1", "", "test-coder")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "read a.go"}}}},
 		Config: &genai.GenerateContentConfig{
@@ -108,7 +107,7 @@ func TestChatModelStreamingToolCall(t *testing.T) {
 // TestBuildChatRequestToolShape guards the JSON Schema conversion: genai spells
 // types in uppercase, and a chat endpoint rejects "OBJECT".
 func TestBuildChatRequestToolShape(t *testing.T) {
-	m := newChatModel("http://example.invalid/v1", "", "m")
+	m := NewChatModel("http://example.invalid/v1", "", "m")
 	req := &model.LLMRequest{
 		Config: &genai.GenerateContentConfig{
 			SystemInstruction: &genai.Content{Parts: []*genai.Part{{Text: "be brief"}}},
@@ -157,7 +156,7 @@ func TestChatModelStreamingText(t *testing.T) {
 		[]string{`{"model":"m","choices":[{"delta":{"content":"При"}}]}`},
 		`{"model":"m","choices":[{"delta":{"content":"вет"},"finish_reason":"stop"}],"usage":{"total_tokens":7}}`)
 
-	m := newChatModel(srv.URL+"/v1", "dmcode", "test-coder")
+	m := NewChatModel(srv.URL+"/v1", "dmcode", "test-coder")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hi"}}}},
 	}
@@ -228,7 +227,7 @@ func TestChatModelTruncatedToolCall(t *testing.T) {
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"index.html\",\"content\":\"<html>"}}]}}]}`,
 	}, `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
 
-	m := newChatModel(srv.URL+"/v1", "", "openai-fast")
+	m := NewChatModel(srv.URL+"/v1", "", "openai-fast")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "напиши тетрис"}}}},
 	}
@@ -259,7 +258,7 @@ func TestBuildChatRequestReasoningEffort(t *testing.T) {
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hi"}}}},
 	}
 
-	plain := newChatModel("http://example.invalid/v1", "", "m")
+	plain := NewChatModel("http://example.invalid/v1", "", "m")
 	body, err := plain.buildChatRequest(req, false)
 	if err != nil {
 		t.Fatalf("buildChatRequest: %v", err)
@@ -272,7 +271,7 @@ func TestBuildChatRequestReasoningEffort(t *testing.T) {
 		t.Errorf("unset reasoning effort must not be sent, got %s", raw)
 	}
 
-	capped := newChatModel("http://example.invalid/v1", "", "m")
+	capped := NewChatModel("http://example.invalid/v1", "", "m")
 	capped.setReasoningEffort("low")
 	body, err = capped.buildChatRequest(req, false)
 	if err != nil {
@@ -284,67 +283,5 @@ func TestBuildChatRequestReasoningEffort(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"reasoning_effort":"low"`) {
 		t.Errorf("reasoning_effort missing from wire body: %s", raw)
-	}
-}
-
-func TestPickModelPrefersConfiguredThenCoding(t *testing.T) {
-	cand := freeCandidate{models: []string{"wanting", "test-coder"}}
-	if got := pickModel(cand, []string{"test-coder", "other"}); got != "test-coder" {
-		t.Fatalf("configured preference not honoured, got %q", got)
-	}
-	plain := freeCandidate{}
-	if got := pickModel(plain, []string{"other", "my-coder-model"}); got != "my-coder-model" {
-		t.Fatalf("coding model should outrank generic, got %q", got)
-	}
-	if got := pickModel(plain, nil); got != "" {
-		t.Fatalf("no models served should yield empty model, got %q", got)
-	}
-}
-
-func TestProbeRejectsDeadEndpoint(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	if _, ok := probe(freeCandidate{baseURL: srv.URL}, 2*time.Second); ok {
-		t.Fatal("endpoint returning 500 must not be reported as usable")
-	}
-}
-
-func TestDiscoverPrefersLocalOverHosted(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/models") {
-			fmt.Fprint(w, `{"data":[{"id":"local-coder"}]}`)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer local.Close()
-
-	// Shrink the candidate set to the single reachable local server so the
-	// test does not depend on what happens to be listening on the machine.
-	origLocal, origHosted := localCandidates, hostedCandidates
-	localCandidates = []freeCandidate{{name: "TestLocal", baseURL: local.URL + "/v1", local: true}}
-	hostedCandidates = nil
-	defer func() { localCandidates, hostedCandidates = origLocal, origHosted }()
-
-	p, ok := discoverFreeProvider()
-	if !ok {
-		t.Fatal("local server should have been discovered")
-	}
-	if p.model != "local-coder" {
-		t.Errorf("model = %q, want local-coder", p.model)
-	}
-	if p.wire() != apiChat {
-		t.Errorf("local servers speak the chat wire, got %q", p.wire())
-	}
-}
-
-func TestProviderWireDefaultsToResponses(t *testing.T) {
-	if got := (provider{}).wire(); got != apiResponses {
-		t.Errorf("empty provider should default to responses, got %q", got)
-	}
-	if got := (provider{api: apiChat}).wire(); got != apiChat {
-		t.Errorf("explicit chat wire lost, got %q", got)
 	}
 }

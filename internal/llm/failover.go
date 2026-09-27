@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"context"
@@ -8,31 +8,33 @@ import (
 	"sync"
 
 	"google.golang.org/adk/v2/model"
+
+	"dmcode/internal/config"
 )
 
-// poolMember is one endpoint in the failover pool: the provider it stands for
+// PoolMember is one endpoint in the failover pool: the provider it stands for
 // and the client that talks to it. Keeping the provider alongside the client is
 // what lets the UI be told which host is actually answering, and what lets a
 // later model switch rewrite the pool without re-probing anything.
-type poolMember struct {
-	prov provider
-	llm  model.LLM
+type PoolMember struct {
+	Prov config.Provider
+	LLM  model.LLM
 }
 
 // SwitchEvent records a failover that actually happened, so the transcript can
 // say which endpoint answered instead of leaving the user to wonder why the
 // answer quality just changed.
 type SwitchEvent struct {
-	From   provider
-	To     provider
+	From   config.Provider
+	To     config.Provider
 	Reason string // short form of the failure that forced the move
 }
 
-// backupSource produces the fallback endpoints. It is a function rather than a
+// BackupSource produces the fallback endpoints. It is a function rather than a
 // slice so the free-provider probe is never paid by a user whose own key works:
 // startup must not sit through a five-second scan of candidates that may never
 // be needed, and the scan inside a failing turn is already behind a spinner.
-type backupSource func(ctx context.Context) ([]poolMember, error)
+type BackupSource func(ctx context.Context) ([]PoolMember, error)
 
 // failoverModel presents several endpoints as one model.LLM and moves to the
 // next one when the current one cannot serve a call.
@@ -51,14 +53,14 @@ type backupSource func(ctx context.Context) ([]poolMember, error)
 // mid tool loop is safe — the failed call simply never happened.
 type failoverModel struct {
 	mu           sync.Mutex
-	members      []poolMember
-	backups      backupSource
+	members      []PoolMember
+	backups      BackupSource
 	backupsTried bool
 	active       int
 	onSwitch     func(SwitchEvent)
 }
 
-// newFailoverModel builds the pool for a session: the providers the user asked
+// NewFailoverModel builds the pool for a session: the providers the user asked
 // for, in order, with the free endpoints behind them as a lazily probed
 // reserve.
 //
@@ -66,33 +68,42 @@ type failoverModel struct {
 // precisely the case where the reserve is worth having. Returning the bare
 // client instead would make a working Groq key indistinguishable from a session
 // with nowhere to go when it starts returning 429s.
-func newFailoverModel(ctx context.Context, pool []provider, onSwitch func(SwitchEvent)) (model.LLM, error) {
-	members := make([]poolMember, 0, len(pool))
+// NewFailoverModel builds the pool for a session: the providers the user asked
+// for, in order, with a lazily probed reserve behind them.
+//
+// The wrapper is kept even for a single configured provider, because that is
+// precisely the case where the reserve is worth having. Returning the bare
+// client instead would make a working Groq key indistinguishable from a session
+// with nowhere to go when it starts returning 429s. backups may be nil: a pool
+// without a reserve simply reports the first failure instead of hunting for a
+// free endpoint mid-turn.
+func NewFailoverModel(ctx context.Context, pool []config.Provider, backups BackupSource, onSwitch func(SwitchEvent)) (model.LLM, error) {
+	members := make([]PoolMember, 0, len(pool))
 	for _, p := range pool {
-		llm, err := buildLLM(ctx, p)
+		LLM, err := BuildLLM(ctx, p)
 		if err != nil {
 			return nil, err
 		}
-		members = append(members, poolMember{prov: p, llm: llm})
+		members = append(members, PoolMember{Prov: p, LLM: LLM})
 	}
 	if len(members) == 0 {
 		return nil, fmt.Errorf("dmcode: пустой пул провайдеров")
 	}
-	return &failoverModel{members: members, backups: freeBackups, onSwitch: onSwitch}, nil
+	return &failoverModel{members: members, backups: backups, onSwitch: onSwitch}, nil
 }
 
 func (f *failoverModel) Name() string {
 	members := f.snapshot()
 	if i := f.current(); i < len(members) {
-		return members[i].llm.Name()
+		return members[i].LLM.Name()
 	}
 	return ""
 }
 
-func (f *failoverModel) snapshot() []poolMember {
+func (f *failoverModel) snapshot() []PoolMember {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]poolMember(nil), f.members...)
+	return append([]PoolMember(nil), f.members...)
 }
 
 func (f *failoverModel) current() int {
@@ -137,7 +148,7 @@ func (f *failoverModel) extend(ctx context.Context) error {
 		// starts with what the probe found, and a later re-probe sees it again.
 		// Listing it twice would spend a round trip re-failing on a host that
 		// has already been ruled out this turn.
-		if f.hasLocked(m.prov) {
+		if f.hasLocked(m.Prov) {
 			continue
 		}
 		f.members = append(f.members, m)
@@ -145,9 +156,9 @@ func (f *failoverModel) extend(ctx context.Context) error {
 	return nil
 }
 
-func (f *failoverModel) hasLocked(p provider) bool {
+func (f *failoverModel) hasLocked(p config.Provider) bool {
 	for _, m := range f.members {
-		if m.prov.baseURL == p.baseURL && m.prov.model == p.model && m.prov.apiKey == p.apiKey {
+		if m.Prov.BaseURL == p.BaseURL && m.Prov.Model == p.Model && m.Prov.APIKey == p.APIKey {
 			return true
 		}
 	}
@@ -177,8 +188,8 @@ func (f *failoverModel) GenerateContent(ctx context.Context, req *model.LLMReque
 				f.setActive(i)
 				if f.onSwitch != nil {
 					f.onSwitch(SwitchEvent{
-						From:   members[start].prov,
-						To:     m.prov,
+						From:   members[start].Prov,
+						To:     m.Prov,
 						Reason: shortReason(firstErr),
 					})
 				}
@@ -189,7 +200,7 @@ func (f *failoverModel) GenerateContent(ctx context.Context, req *model.LLMReque
 				emitted   bool
 				abandoned bool
 			)
-			for resp, err := range m.llm.GenerateContent(ctx, req, stream) {
+			for resp, err := range m.LLM.GenerateContent(ctx, req, stream) {
 				if err != nil {
 					callErr = err
 					break

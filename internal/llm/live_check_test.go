@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"context"
@@ -17,7 +17,7 @@ func TestLiveKeylessEndpoint(t *testing.T) {
 	if os.Getenv("DMCODE_LIVE") != "1" {
 		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
 	}
-	m := newChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Ответь одним словом: ok"}}}},
 	}
@@ -46,7 +46,7 @@ func TestLiveKeylessToolCall(t *testing.T) {
 	if os.Getenv("DMCODE_LIVE") != "1" {
 		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
 	}
-	m := newChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
 			{Text: "Сколько сейчас времени? Вызови инструмент get_time."},
@@ -91,7 +91,7 @@ func TestLiveKeylessBigToolCall(t *testing.T) {
 	if os.Getenv("DMCODE_LIVE") != "1" {
 		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
 	}
-	m := newChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
 	m.setReasoningEffort("low")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{

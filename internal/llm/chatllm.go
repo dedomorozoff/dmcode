@@ -1,4 +1,4 @@
-package main
+package llm
 
 import (
 	"bufio"
@@ -208,8 +208,8 @@ func toolCallsToParts(calls []chatToolCall, finish string) ([]*genai.Part, error
 }
 
 type chatModel struct {
-	baseURL string
-	apiKey  string
+	BaseURL string
+	APIKey  string
 	name    string
 	client  *http.Client
 	// reasoningEffort is sent as the OpenAI `reasoning_effort` field when set.
@@ -219,10 +219,10 @@ type chatModel struct {
 	reasoningEffort string
 }
 
-func newChatModel(baseURL, apiKey, name string) *chatModel {
+func NewChatModel(BaseURL, APIKey, name string) *chatModel {
 	return &chatModel{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
+		BaseURL: strings.TrimRight(BaseURL, "/"),
+		APIKey:  APIKey,
 		name:    name,
 		client:  &http.Client{Timeout: 0},
 	}
@@ -281,7 +281,7 @@ func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Resp
 	if err != nil {
 		return nil, fmt.Errorf("dmcode: не удалось собрать тело запроса: %w", err)
 	}
-	url := m.baseURL + "/chat/completions"
+	url := m.BaseURL + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(buf))
 	if err != nil {
 		return nil, err
@@ -289,8 +289,8 @@ func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Resp
 	req.Header.Set("Content-Type", "application/json")
 	// Some keyless endpoints (Pollinations) ignore the header but reject a
 	// request without one, so a placeholder is always sent.
-	if m.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+m.apiKey)
+	if m.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+m.APIKey)
 	} else {
 		req.Header.Set("Authorization", "Bearer dmcode")
 	}
@@ -343,9 +343,9 @@ func (e *providerError) retryable() bool {
 }
 
 // transportError reports an endpoint that could not be reached at all.
-func transportError(baseURL string, err error) error {
+func transportError(BaseURL string, err error) error {
 	return &providerError{
-		err:    fmt.Errorf("dmcode: %s: %w", baseURL, err),
+		err:    fmt.Errorf("dmcode: %s: %w", BaseURL, err),
 		reason: failTransport,
 	}
 }
@@ -435,12 +435,12 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp, err := m.doRequest(ctx, body)
 		if err != nil {
-			yield(nil, transportError(m.baseURL, err))
+			yield(nil, transportError(m.BaseURL, err))
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			yield(nil, httpError(m.baseURL, resp))
+			yield(nil, httpError(m.BaseURL, resp))
 			return
 		}
 
@@ -488,7 +488,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 			}
 			if chunk.Error != nil && chunk.Error.Message != "" {
 				yield(nil, &providerError{
-					err:    fmt.Errorf("%s: %s", m.baseURL, chunk.Error.Message),
+					err:    fmt.Errorf("%s: %s", m.BaseURL, chunk.Error.Message),
 					reason: failStream,
 				})
 				return
@@ -532,7 +532,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 			if ctx.Err() != nil {
 				return
 			}
-			yield(nil, transportError(m.baseURL, fmt.Errorf("обрыв потока: %w", err)))
+			yield(nil, transportError(m.BaseURL, fmt.Errorf("обрыв потока: %w", err)))
 		}
 	}
 }
@@ -555,25 +555,25 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp, err := m.doRequest(ctx, body)
 		if err != nil {
-			yield(nil, transportError(m.baseURL, err))
+			yield(nil, transportError(m.BaseURL, err))
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			yield(nil, httpError(m.baseURL, resp))
+			yield(nil, httpError(m.BaseURL, resp))
 			return
 		}
 		var parsed chatResponse
 		if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-			yield(nil, fmt.Errorf("dmcode: не удалось разобрать ответ %s: %w", m.baseURL, err))
+			yield(nil, fmt.Errorf("dmcode: не удалось разобрать ответ %s: %w", m.BaseURL, err))
 			return
 		}
 		if parsed.Error != nil && parsed.Error.Message != "" {
-			yield(nil, fmt.Errorf("%s: %s", m.baseURL, parsed.Error.Message))
+			yield(nil, fmt.Errorf("%s: %s", m.BaseURL, parsed.Error.Message))
 			return
 		}
 		if len(parsed.Choices) == 0 {
-			yield(nil, fmt.Errorf("%s: провайдер вернул пустой ответ", m.baseURL))
+			yield(nil, fmt.Errorf("%s: провайдер вернул пустой ответ", m.BaseURL))
 			return
 		}
 		ch := parsed.Choices[0]
@@ -668,4 +668,12 @@ type chatResponse struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 	} `json:"error"`
+}
+
+// truncate shortens s to at most n runes, marking the cut with an ellipsis.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
