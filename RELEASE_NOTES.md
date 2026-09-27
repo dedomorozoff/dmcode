@@ -1,7 +1,7 @@
-# dmCode v0.1.1
+# dmCode v0.1.2
 
-First tagged release. Single static binary, no runtime dependencies, and no
-API key required to get started.
+The interface now speaks English by default, with Russian one keystroke away.
+Also adds `make install`, and replaces the previous `v0.1.1` release.
 
 ## Install
 
@@ -15,28 +15,33 @@ curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh
 irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
 ```
 
-Or build from source (Go 1.26+):
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
 
 ```bash
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-## Highlights
+## What's new since v0.1.1
 
-- **Provider auto-discovery.** On startup dmCode finds an endpoint that
-  actually answers: local servers (Ollama, LM Studio, llama.cpp, vLLM, Jan) are
-  probed first, then keyless hosted endpoints, then anything already present in
-  `.env`. If the active provider dies mid-session, the turn fails over to the
-  next working one instead of erroring out.
-- **Interactive `/setup`.** No configuration to write by hand. Pick a provider,
-  paste the key, it lands in `.env`. Options with no key at all, plus custom
-  OpenAI-compatible endpoints, are offered alongside the usual hosted ones.
-- **Packaged layout.** The monolithic `main` package is now split into
-  `internal/{agent,config,discover,llm,tools,ui}`.
-- **New tools and tests.** `tools`, `history` rendering, provider verification
-  and the config/discover packages gained their own test suites.
-- **Reproducible release tooling.** `Makefile` with cross-compilation for the
-  full GOOS/GOARCH matrix and targets for deb, rpm, Arch, termux and Windows zip.
+- **English is the default interface.** The TUI, sidebar, status bar, setup
+  wizard and provider labels are all English now. English strings are the
+  source language, so an untranslated string falls back to readable English
+  rather than rendering blank.
+- **Russian via `/lang`.** A command in the palette switches the language
+  immediately and saves the choice to `~/.dmcode/settings.json`, so the next
+  start comes up in the same language. `DMCODE_LANG=ru` overrides it for a
+  single run.
+- **`make install` and `make uninstall`.** Install into `$(go env GOBIN)`,
+  falling back to `GOPATH/bin` — both writable without root and both present on
+  Windows. Pass `PREFIX=/usr/local` for a system-wide install.
+- **README in English**, covering install, the tools, the hotkeys and the
+  language setting.
 
 ## Assets
 
