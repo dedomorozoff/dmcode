@@ -1,0 +1,16 @@
+# Build, packaging and shell files are consumed by tools that reject CRLF
+# outright: rpmbuild errors with "line 34: $'\r': command not found" and
+# makepkg refuses to source a CRLF PKGBUILD. Normalise on commit so a Windows
+# checkout can't break the release pipeline.
+* text=auto eol=lf
+
+# Windows-only script: keep CRLF, PowerShell is happier with it.
+*.ps1 text eol=crlf
+
+*.go  text eol=lf
+*.md  text eol=lf
+Makefile      text eol=lf
+PKGBUILD      text eol=lf
+*.spec        text eol=lf
+*.sh          text eol=lf
+*.yml         text eol=lf
