@@ -16,9 +16,9 @@ provider failover and file/shell tools.
 
 %install
 mkdir -p %{buildroot}%{_bindir}
-# rpmbuild runs %install with the cwd set to the buildroot, not the checkout,
-# so the prebuilt binary has to be named by an absolute path. The Makefile
-# passes srcdir in.
+# rpmbuild runs this section with the cwd set to the buildroot, not the
+# checkout, so the prebuilt binary has to be named by an absolute path. The
+# Makefile passes the checkout location in as srcdir.
 cp -f %{srcdir}/dist/dmcode-linux-amd64 %{buildroot}%{_bindir}/dmcode
 
 %files

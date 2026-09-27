@@ -105,6 +105,7 @@ jobs:
             dist/*.rpm
             dist/rpm/RPMS/**/*.rpm
             dist/*.pkg.tar.zst
+            dist/*.tar.gz
             dist/*.zip
           if-no-files-found: error
 
