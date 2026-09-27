@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -94,6 +96,20 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 
 // Long values must be cut on rune boundaries: a byte cut lands mid-rune and the
 // terminal prints replacement characters.
+// chdir moves into a temp directory for the duration of the test, so a test that
+// writes .env cannot touch the real one in the repository.
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+}
+
 func TestOneLineFlattensPastedText(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"sk-abc", "sk-abc"},
@@ -186,6 +202,89 @@ func TestSetupLabelUsesHostName(t *testing.T) {
 	// as "Custom endpoint" rather than an empty host.
 	if got := setupLabel(config.SetupOption{}); got == "" {
 		t.Error("setupLabel returned an empty label for a custom endpoint")
+	}
+}
+
+// A rejected key must not reach .env. Writing it there would overwrite the
+// working OPENAI_API_KEY and the user would only find out on the next message.
+func TestRejectedKeyLeavesDotEnvUntouched(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	// A working configuration is already in place.
+	existing := "OPENAI_BASE_URL=https://opencode.ai/zen/v1\nOPENAI_API_KEY=oc_sk_good\n"
+	if err := os.WriteFile(".env", []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opt := config.SetupOption{
+		Label:   "OpenRouter",
+		BaseURL: "https://openrouter.ai/api/v1",
+		Model:   "deepseek/deepseek-chat-v3.1:free",
+		EnvKey:  "OPENAI_API_KEY",
+		API:     config.APIChat,
+		Signup:  "https://openrouter.ai/keys",
+	}
+	m := &uiModel{}
+	m.setup = setupState{open: true, stage: setupKey, opt: opt, buf: "oc_sk_wrong_provider"}
+
+	// The endpoint rejects the key.
+	_ = m.handleSetupCheck(setupCheckMsg{
+		vars: config.SetupVars(opt, "oc_sk_wrong_provider"),
+		opt:  opt,
+		err:  errors.New("401 Unauthorized: Missing Authentication header"),
+	})
+
+	got, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatalf("reading .env: %v", err)
+	}
+	if string(got) != existing {
+		t.Errorf(".env was modified by a rejected key:\n got %q\nwant %q", got, existing)
+	}
+
+	// The wizard goes back to the key prompt, cleared, and offers a bypass.
+	if m.setup.stage != setupKey {
+		t.Errorf("stage = %d, want the key prompt (%d)", m.setup.stage, setupKey)
+	}
+	if m.setup.buf != "" {
+		t.Errorf("the rejected key was kept in the buffer: %q", m.setup.buf)
+	}
+	if !m.setup.force {
+		t.Error("a retry after a rejection should be able to save anyway")
+	}
+}
+
+// The transcript must say the configuration was not written, or the user is
+// left believing the provider changed.
+func TestRejectedKeyExplainsNothingWasSaved(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, dir)
+
+	opt := config.SetupOption{Label: "OpenRouter", BaseURL: "https://openrouter.ai/api/v1", EnvKey: "OPENAI_API_KEY"}
+	m := &uiModel{}
+	m.setup = setupState{open: true, stage: setupKey, opt: opt, buf: "bad"}
+
+	_ = m.handleSetupCheck(setupCheckMsg{
+		vars: config.SetupVars(opt, "bad"),
+		opt:  opt,
+		err:  errors.New("401 Unauthorized"),
+	})
+
+	joined := ""
+	for _, l := range m.history {
+		joined += l.text + "\n"
+	}
+	if !strings.Contains(joined, "rejected the key") {
+		t.Errorf("no mention of the rejection in:\n%s", joined)
+	}
+	if !strings.Contains(joined, "unchanged") {
+		t.Errorf("no mention that .env was left alone in:\n%s", joined)
+	}
+	// The signup URL is the whole point of a failed check: it is where the
+	// correct key comes from.
+	if !strings.Contains(joined, opt.Signup) && opt.Signup != "" {
+		t.Errorf("the signup URL was not shown:\n%s", joined)
 	}
 }
 

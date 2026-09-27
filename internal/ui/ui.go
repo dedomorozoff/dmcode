@@ -140,6 +140,20 @@ type errMsg string
 
 func (e errMsg) Error() string { return string(e) }
 
+// setupCheckMsg reports whether the endpoint accepted the key before it was
+// written to .env. Saving an unverified key is worse than not saving it at all:
+// a wrong key for the chosen provider overwrites the working OPENAI_API_KEY, and
+// the failure only surfaces on the next message, by which point the previous
+// configuration is gone.
+type setupCheckMsg struct {
+	vars map[string]string
+	opt  config.SetupOption
+	err  error
+	// forced is set when the user asked to save despite a failed check, for
+	// endpoints that do not implement /models and cannot be probed.
+	forced bool
+}
+
 // failoverMsg announces that a turn moved to another endpoint. It is a message
 // rather than a direct history append because the switch happens on the turn
 // goroutine, and only Update may touch the transcript.
@@ -245,6 +259,10 @@ type setupState struct {
 	selected int
 	opt      config.SetupOption
 	buf      string
+	// force saves the configuration even though the endpoint rejected the key.
+	// It is only set after a failed check, so a bad key is still one retry away
+	// from being saved on the first attempt.
+	force bool
 }
 
 func (s *setupState) reset() {
@@ -712,6 +730,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.picker = modelPicker{open: true, Models: msg.Models}
 		}
+	case setupCheckMsg:
+		cmd := m.handleSetupCheck(msg)
+		return m, cmd
 	case modelSwitchedMsg:
 		if msg.err != nil {
 			m.history = append(m.history, line{kindErr, "Model: " + msg.err.Error()})
@@ -1227,14 +1248,68 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applySetup persists the chosen provider to .env, exports it for this process,
-// and rebuilds the agent so the change takes effect without a restart. The key
-// is never echoed into the transcript, and the write is 0600 because .env holds
-// a secret.
+// applySetup validates the chosen provider and then persists it to .env,
+// exports it for this process, and rebuilds the agent so the change takes
+// effect without a restart. The key is never echoed into the transcript, and
+// the write is 0600 because .env holds a secret.
+//
+// A provider that needs a key is probed first. Writing an unverified key would
+// overwrite whatever OPENAI_API_KEY held — commonly a working one — and the
+// 401 would only appear on the next message, by which point the previous
+// configuration is unrecoverable without retyping it.
 func (m *uiModel) applySetup() tea.Cmd {
 	opt := m.setup.opt
 	vars := config.SetupVars(opt, strings.TrimSpace(m.setup.buf))
 
+	// Keyless endpoints were just chosen from a list known to work, and a
+	// custom endpoint may not implement /models at all, so only a provider with
+	// a real key is worth probing.
+	if opt.Keyless || opt.EnvKey == "" || m.setup.force {
+		return m.commitSetup(opt, vars)
+	}
+
+	m.statusText = i18n.T("checking the key…")
+	probe := config.Provider{
+		BaseURL: vars["OPENAI_BASE_URL"],
+		APIKey:  vars[opt.EnvKey],
+		Model:   config.OrDefaultModel(vars["DMCODE_MODEL"]),
+		API:     opt.API,
+	}
+	return func() tea.Msg {
+		_, err := config.ListModels(probe)
+		return setupCheckMsg{vars: vars, opt: opt, err: err}
+	}
+}
+
+// handleSetupCheck acts on the key probe. A rejection keeps the wizard open at
+// the key prompt with .env untouched, so the user can paste the right key
+// instead of discovering later that the working one is gone.
+func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
+	if msg.err == nil {
+		return m.commitSetup(msg.opt, msg.vars)
+	}
+
+	name := setupLabel(msg.opt)
+	m.history = append(m.history,
+		line{kindErr, i18n.T("the endpoint rejected the key: ") + name + " — " + msg.err.Error()},
+		line{kindSys, i18n.T(".env was left unchanged.")})
+	// Back to the key prompt, cleared, so the rejected key is not resubmitted by
+	// accident on the next attempt.
+	m.setup.stage = setupKey
+	m.setup.buf = ""
+	m.setup.force = true
+	m.statusText = i18n.T("key rejected")
+	if msg.opt.Signup != "" {
+		m.history = append(m.history, line{kindSys, i18n.T("Get a key here: ") + msg.opt.Signup})
+	}
+	m.history = append(m.history, line{kindSys, i18n.T("press enter on an empty field to save it anyway")})
+	m.historyDirty = true
+	m.followVP()
+	return nil
+}
+
+// commitSetup writes the validated provider to .env and rebuilds the agent.
+func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) tea.Cmd {
 	// Merge into any existing .env rather than replacing it, so a key the user
 	// set for another provider is not silently dropped.
 	lines, err := config.ReadDotEnv()

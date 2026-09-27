@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"runtime"
 	"strings"
@@ -15,11 +16,14 @@ import (
 // setupKeys drives the model the way the real event loop does, through the
 // tea.Model interface, so these tests exercise the same dispatch path a
 // terminal takes rather than calling wizard internals directly.
-type setupKeys struct{ m *uiModel }
+type setupKeys struct {
+	m   *uiModel
+	cmd tea.Cmd
+}
 
 func (d setupKeys) send(msg tea.KeyPressMsg) setupKeys {
 	var model tea.Model = d.m
-	model, _ = model.Update(msg)
+	model, d.cmd = model.Update(msg)
 	return d
 }
 
@@ -69,7 +73,7 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 	}
 
 	m := newSetupModel(t)
-	d := setupKeys{m}.type_("/setup").enter()
+	d := setupKeys{m: m}.type_("/setup").enter()
 	if !m.setup.open || m.setup.stage != setupPick {
 		t.Fatalf("/setup did not open: open=%v stage=%d", m.setup.open, m.setup.stage)
 	}
@@ -129,7 +133,7 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	inTempDir(t)
 	m := newSetupModel(t)
-	d := setupKeys{m}.type_("/setup").enter().down().down().enter() // OpenRouter
+	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter() // OpenRouter
 	if m.setup.stage != setupKey {
 		t.Fatalf("a keyed provider skipped the key stage (stage=%d)", m.setup.stage)
 	}
@@ -143,6 +147,14 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	}
 
 	d = d.type_("sk-test-123").enter()
+	// Entering a key now starts a network check rather than a write, so the
+	// provider is only saved once the check comes back clean. The command is not
+	// executed here: it would hit openrouter.ai for real. Instead the clean
+	// verdict is fed in directly, which is what the loop would deliver.
+	_, _ = m.Update(setupCheckMsg{
+		vars: config.SetupVars(m.setup.opt, "sk-test-123"),
+		opt:  m.setup.opt,
+	})
 	if m.setup.open {
 		t.Error("wizard stayed open after a valid key")
 	}
@@ -152,13 +164,44 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	}
 }
 
+// A keyed provider must be verified before .env is touched, so a wrong key
+// cannot replace a working one.
+func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
+	inTempDir(t)
+	existing := "OPENAI_BASE_URL=https://opencode.ai/zen/v1\nOPENAI_API_KEY=oc_sk_working\n"
+	if err := os.WriteFile(".env", []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newSetupModel(t)
+	setupKeys{m: m}.type_("/setup").enter().down().down().enter().type_("oc_sk_for_openrouter").enter()
+
+	// The rejection arrives: nothing may have been written yet.
+	_, _ = m.Update(setupCheckMsg{
+		vars: config.SetupVars(m.setup.opt, "oc_sk_for_openrouter"),
+		opt:  m.setup.opt,
+		err:  errors.New("401 Unauthorized: Missing Authentication header"),
+	})
+
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != existing {
+		t.Errorf("a rejected key overwrote the working configuration:\n%s", data)
+	}
+	if !m.setup.open {
+		t.Error("the wizard closed on a rejected key instead of offering a retry")
+	}
+}
+
 // TestSetupKeyIsNeverRendered is a security test: the prompt says the input is
 // hidden, so the overlay must not contain the secret on a screen share, and the
 // transcript must not keep it either.
 func TestSetupKeyIsNeverRendered(t *testing.T) {
 	inTempDir(t)
 	m := newSetupModel(t)
-	d := setupKeys{m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}
@@ -194,7 +237,7 @@ func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
 
 	for _, size := range [][2]int{{100, 34}, {80, 24}, {72, 22}} {
 		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
-		setupKeys{m}.type_("/setup").enter()
+		setupKeys{m: m}.type_("/setup").enter()
 		view := m.View().Content
 
 		for _, o := range config.SetupOptions() {
@@ -235,7 +278,7 @@ func TestMaskedKeyFitsPanel(t *testing.T) {
 func TestSetupEscapeLeavesEveryStage(t *testing.T) {
 	inTempDir(t)
 	m := newSetupModel(t)
-	d := setupKeys{m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}
