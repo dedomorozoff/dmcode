@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
@@ -26,17 +27,36 @@ var version = "dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print the dmcode version and exit")
+	dir := flag.String("C", "", "work as if dmcode was started in this directory")
+	flag.StringVar(dir, "dir", "", "alias for -C")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("dmcode", version)
 		return
 	}
-	if err := run(); err != nil {
+	if err := run(*dir); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run() error {
+// run starts the session, optionally relocated to dir.
+//
+// The move has to happen before LoadDotEnv: the provider lives in the .env of
+// the directory the user pointed us at, and reading the old one first would
+// configure the session against the wrong project. Chdir also keeps the tools —
+// which address files relative to the process directory — in step with what the
+// user asked for, instead of leaving the two disagreeing.
+func run(dir string) error {
+	if dir != "" {
+		if err := os.Chdir(dir); err != nil {
+			return fmt.Errorf("cannot start in %s: %w", dir, err)
+		}
+	}
+	// Confines every tool path to the session's directory. A failure here is not
+	// fatal: the agent still works, it simply is not fenced in.
+	if err := tools.SetRoot(mustGetwd()); err != nil {
+		fmt.Fprintln(os.Stderr, "dmcode: "+err.Error())
+	}
 	config.LoadDotEnv()
 	// Before anything renders, so even the setup wizard speaks the saved language.
 	i18n.Init()
@@ -51,13 +71,26 @@ func run() error {
 	if err != nil {
 		return err
 	}
-
-	var toolNames []string
-	for _, t := range agentTools {
-		toolNames = append(toolNames, t.Name())
+	// The read-only set is built once up front so switching into plan mode is
+	// instant and cannot fail halfway through a turn.
+	readOnlyTools, err := tools.MakeReadOnlyTools()
+	if err != nil {
+		return err
 	}
+
+	toolNames := tools.ToolNames(agentTools)
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, toolNames)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames)
+}
+
+// mustGetwd returns the current directory, or "." when the platform refuses to
+// say — SetRoot then resolves it against the same directory the tools use.
+func mustGetwd() string {
+	wd, err := os.Getwd()
+	if err != nil || wd == "" {
+		return "."
+	}
+	return wd
 }

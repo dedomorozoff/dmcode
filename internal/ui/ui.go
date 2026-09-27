@@ -15,12 +15,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/llm"
+	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"
@@ -44,6 +46,29 @@ const (
 type line struct {
 	kind lineKind
 	text string
+}
+
+// kindName labels a line kind for the /debug output. A reply showing up under
+// the wrong name here is what identifies it as never having reached the
+// markdown renderer.
+func kindName(k lineKind) string {
+	switch k {
+	case kindUser:
+		return "user"
+	case kindAgent:
+		return "agent"
+	case kindTool:
+		return "tool"
+	case kindToolRes:
+		return "toolres"
+	case kindSys:
+		return "sys"
+	case kindErr:
+		return "err"
+	case kindLogo:
+		return "logo"
+	}
+	return "?"
 }
 
 var (
@@ -113,7 +138,83 @@ const (
 // narrows, so the model name survives longest.
 var statusHotkeys = []string{"ctrl+p", "ctrl+b", "ctrl+y", "esc"}
 
-type deltaMsg struct{ text string }
+// deltaMsg carries one text part of a round to the event loop. It is a spoken
+// rather than a wrapper of one, so the field names read the same on both sides
+// of the goroutine boundary.
+type deltaMsg = spoken
+
+// turnText folds one LLM round's event stream into what the transcript still
+// has to be told about.
+//
+// The model speaks twice about the same words: once as a run of partial deltas
+// while it writes, and once in the finalised response that closes the round and
+// lets the runner dispatch tools. Appending the final text on top of what the
+// partials already delivered doubles the reply — glued together without a line
+// break, which is what turned "## Done" into "## Done## Done" and left a table
+// with no delimiter row, so the markdown stopped being recognised on every turn
+// that used a tool.
+//
+// The accumulator is therefore per round, not per turn, and the closing response
+// replaces the round rather than extending it. Replacement rather than append is
+// what also covers a provider whose finalised text is not a prefix-extension of
+// its deltas at all — there is nothing to trim, and appending the whole thing
+// would duplicate the reply again.
+type turnText struct{ streamed string }
+
+// spoken is what one text part asks the transcript to do.
+type spoken struct {
+	// text is what to write. It is a delta unless replace is set.
+	text string
+	// replace makes text the whole of the round so far rather than an addition
+	// to it, which is how a closing response corrects its own deltas.
+	replace bool
+}
+
+// nothing is what a text part that adds nothing to the transcript asks for.
+var nothing = spoken{}
+
+// add reports what to do with one text part. A partial is always new. A
+// finalised response closes the round: it is a no-op when the deltas already
+// carried the text, a delta of the missing suffix when the provider appended
+// something at the end, and a replacement of the round when the two disagree.
+func (t *turnText) add(text string, partial bool) spoken {
+	if partial {
+		if text == "" {
+			return nothing
+		}
+		t.streamed += text
+		return spoken{text: text}
+	}
+	// The round ends here, whatever the comparison below decides — including
+	// when the response carried no text at all, which is what a round that was
+	// nothing but a tool call looks like. Skipping the reset in that case would
+	// leave the next round comparing itself against this one's prose.
+	streamed := t.streamed
+	t.streamed = ""
+	if text == "" {
+		return nothing
+	}
+	switch {
+	case streamed == text:
+		return nothing
+	case streamed == "":
+		// Nothing was streamed, so this is the only copy there will be.
+		return spoken{text: text}
+	case strings.HasPrefix(text, streamed):
+		return spoken{text: text[len(streamed):]}
+	default:
+		return spoken{text: text, replace: true}
+	}
+}
+
+// toolPart is a tool call or a tool result an event carried alongside its text.
+// The text is dispatched before these, so a model that explains itself and calls
+// a tool in the same breath is read in that order.
+type toolPart struct {
+	call *genai.FunctionCall
+	resp *genai.FunctionResponse
+}
+
 type toolCallMsg struct {
 	name string
 	args string
@@ -213,8 +314,26 @@ type uiModel struct {
 	turnCount     int
 	toolCallCount int
 	lastTool      string
+
+	// workDir is the absolute directory the session is scoped to, and
+	// workDirShort its last path element for the one-line display. The full
+	// path is kept because the tools act on absolute paths: showing only the
+	// folder name left the user unable to tell which of two identically named
+	// projects the agent was editing.
+	workDir      string
+	workDirShort string
+
+	// readOnlyTools is the plan-mode instrument set, kept alongside the full
+	// one so a Tab press can swap them without rebuilding anything.
+	readOnlyTools []tool.Tool
+	mouseEnabled  bool
 	statusText    string
-	workDir       string
+
+	// ctx outlives Init so a mode switch can rebuild the agent on the same
+	// context the session started on, instead of handing the pool a fresh
+	// background that nothing can cancel.
+	ctx  context.Context
+	mode agentMode
 
 	// History render cache for streaming performance
 	cachedHistory string
@@ -293,6 +412,16 @@ func (m *uiModel) commands() []command {
 			m.followVP()
 			return nil
 		}},
+		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
+			return m.toggleMode()
+		}},
+		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
+			return m.changeDir("")
+		}},
+		{name: "mouse", desc: i18n.T("toggle mouse wheel scrolling"), run: func(m *uiModel) tea.Cmd {
+			m.mouseEnabled = !m.mouseEnabled
+			return nil
+		}},
 		{name: "new", desc: i18n.T("start a new session"), run: func(m *uiModel) tea.Cmd {
 			m.sessionID = newSessionID()
 			m.turnCount = 0
@@ -346,7 +475,7 @@ func newSessionID() string {
 	return fmt.Sprintf("sess-%d", rand.Int63())
 }
 
-func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, toolNames []string) *uiModel {
+func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, readOnly []tool.Tool, toolNames []string) *uiModel {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.Placeholder = i18n.T("describe the task… (/help for commands, esc to cancel)")
@@ -354,26 +483,32 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	vp := viewport.New(viewport.WithHeight(10))
 
-	wd, _ := os.Getwd()
+	// tools.Root() is the boundary the tools enforce, so the sidebar reports
+	// the same directory the agent is actually confined to rather than a second
+	// independently-derived answer that could drift from it.
+	wd := dmtools.Root()
 	if wd == "" {
-		wd = "."
+		wd, _ = os.Getwd()
 	}
 
 	m := &uiModel{
-		input:        ti,
-		spin:         sp,
-		vp:           vp,
-		stick:        true,
-		sessionID:    newSessionID(),
-		runner:       r,
-		svc:          svc,
-		prov:         p,
-		pool:         []config.Provider{p},
-		tools:        tools,
-		toolNames:    toolNames,
-		showSidebar:  true,
-		workDir:      filepath.Base(wd),
-		historyDirty: true,
+		input:         ti,
+		spin:          sp,
+		vp:            vp,
+		stick:         true,
+		sessionID:     newSessionID(),
+		runner:        r,
+		svc:           svc,
+		prov:          p,
+		pool:          []config.Provider{p},
+		tools:         tools,
+		readOnlyTools: readOnly,
+		toolNames:     toolNames,
+		showSidebar:   true,
+		mouseEnabled:  true,
+		workDir:       wd,
+		workDirShort:  filepath.Base(wd),
+		historyDirty:  true,
 	}
 	m.printWelcome()
 	m.promptHistory = loadPromptHistory()
@@ -395,6 +530,28 @@ func (m *uiModel) printWelcome() {
 
 func (m *uiModel) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd())
+}
+
+// upgradeColorProfile asks the terminal what it actually supports.
+//
+// Bubble Tea starts from an assumed profile and only refines it when asked, so
+// without this the app renders in the conservative base palette — and a
+// conservative profile is what made bold and bright text look flat, because
+// there was no foreground to set or brighten in the first place.
+//
+// The request is only sent for a profile that is not already truecolor: some
+// terminals (Apple Terminal.app among them) answer these queries wrongly and
+// can garble the output, so a terminal that is already good enough is left
+// alone. The reply arrives as tea.ColorProfileMsg and is ignored here — the
+// renderer applies it.
+func upgradeColorProfile(p colorprofile.Profile) tea.Cmd {
+	if p == colorprofile.TrueColor {
+		return nil
+	}
+	return tea.Batch(
+		tea.RequestCapability("RGB"),
+		tea.RequestCapability("Tc"),
+	)
 }
 
 // toolCheckCmd verifies in the background that the chosen provider can emit a
@@ -502,6 +659,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// batched with the textinput's own command at the tail.
 	var extra tea.Cmd
 	switch msg := msg.(type) {
+	case tea.ColorProfileMsg:
+		// The renderer has already adopted the reported profile; all that is left
+		// is to ask for the finer capabilities when this one is not enough.
+		return m, upgradeColorProfile(msg.Profile)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		// No followVP here on purpose: the tail of Update re-syncs the viewport
@@ -518,6 +679,27 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pasteInto(string(msg.Content))
 			return m, nil
 		}
+	case tea.MouseWheelMsg:
+		// The wheel is routed through the viewport's own handler, which already
+		// knows the shift-modifier horizontal case. What it cannot know is that
+		// scrolling up must release the follow-the-tail stick: without this the
+		// tail of Update would call followVP and snap straight back to the
+		// bottom on the very next frame, making the wheel look dead.
+		if !m.mouseEnabled {
+			break
+		}
+		switch msg.Button {
+		case tea.MouseWheelDown:
+			m.scrollBy(m.vp.MouseWheelDelta)
+		case tea.MouseWheelUp:
+			m.scrollBy(-m.vp.MouseWheelDelta)
+		default:
+			// Left/right wheel and the horizontal modifiers stay with the
+			// viewport, which scrolls sideways without touching the stick.
+			m.vp, _ = m.vp.Update(msg)
+			m.syncVP()
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if m.setup.open {
 			model, cmd := m.setupKey(msg)
@@ -588,14 +770,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.copyLastResponse()
 			return m, nil
 		case "pgup":
-			m.vp.ScrollUp(10)
-			m.stick = false
-			m.syncVP()
+			m.scrollBy(-10)
 			return m, nil
 		case "pgdown":
-			m.vp.ScrollDown(10)
-			m.stick = m.vp.AtBottom()
-			m.syncVP()
+			m.scrollBy(10)
 			return m, nil
 		case "home", "ctrl+home":
 			m.vp.GotoTop()
@@ -608,11 +786,15 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncVP()
 			return m, nil
 		case "tab":
-			if len(m.suggest) > 0 {
+			// Tab keeps its old job inside a command, where a suggestion is the
+			// whole point of typing; everywhere else it switches the mode, which
+			// is the key a user reaches for without thinking about it.
+			if len(m.suggest) > 0 && strings.HasPrefix(strings.TrimSpace(m.input.Value()), "/") {
 				m.input.SetValue(m.suggest[0])
 				m.updateSuggest()
 				return m, nil
 			}
+			return m, m.toggleMode()
 		case "up", "down":
 			if m.busy {
 				return m, nil
@@ -649,8 +831,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.history = append(m.history,
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
-					line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /new, /clear, /quit"})
+					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new, /clear, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -688,6 +870,51 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, m.fetchModelsCmd()
+			case "/mouse":
+				m.mouseEnabled = !m.mouseEnabled
+				if m.mouseEnabled {
+					m.statusText = i18n.T("mouse on — the wheel scrolls")
+				} else {
+					m.statusText = i18n.T("mouse off — the wheel is ignored")
+				}
+				return m, nil
+			}
+			if arg, ok := strings.CutPrefix(text, "/mode"); ok {
+				if m.busy {
+					return m, nil
+				}
+				return m, m.setMode(strings.TrimPrefix(strings.TrimSpace(arg), " "))
+			}
+			if arg, ok := strings.CutPrefix(text, "/cd"); ok {
+				if m.busy {
+					return m, nil
+				}
+				return m, m.changeDir(strings.TrimSpace(arg))
+			}
+			if strings.HasPrefix(text, "/debug") {
+				// Diagnostics for the transcript pipeline: which line kind the
+				// reply is stored under, and whether the markdown renderer saw
+				// it. A reply that renders as raw markup is stored under some
+				// kind other than kindAgent, so every non-empty line is listed
+				// rather than guessed at.
+				m.history = append(m.history, line{kindSys, fmt.Sprintf(
+					"width=%d renderCalls=%d lines=%d",
+					m.contentWidth(), renderCalls, len(m.history))})
+				shown := 0
+				for i := len(m.history) - 1; i >= 0 && shown < 6; i-- {
+					l := m.history[i]
+					if strings.TrimSpace(l.text) == "" {
+						continue
+					}
+					row := m.rowStyle(l.kind)
+					m.history = append(m.history, line{kindSys, fmt.Sprintf(
+						"  [%d] %-7s md=%-5v %q",
+						i, kindName(l.kind), row.markdown, truncate(oneLine(l.text), 46))})
+					shown++
+				}
+				m.historyDirty = true
+				m.followVP()
+				return m, nil
 			}
 			if id, ok := strings.CutPrefix(text, "/model "); ok {
 				id = strings.TrimSpace(id)
@@ -708,7 +935,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 	case deltaMsg:
-		m.appendAgentText(msg.text)
+		m.applyAgentText(msg)
 	case toolCallMsg:
 		m.lastTool = msg.name
 		m.toolCallCount++
@@ -838,6 +1065,44 @@ func (m *uiModel) layout() {
 	m.historyDirty = true
 }
 
+// applyAgentText does what a round's text part asks for: append a delta, or
+// replace the reply of the round in progress when the closing response disagrees
+// with the deltas that were streamed for it.
+//
+// A replacement rewrites the last agent line and drops the unbroken agent lines
+// behind it, which were the earlier deltas of the same round arriving after a
+// tool line had already split them off. It stops at the first non-agent line: a
+// tool result the user has already read is not this round's text and stays where
+// it is.
+func (m *uiModel) applyAgentText(s spoken) {
+	if s.text == "" {
+		return
+	}
+	if s.replace {
+		if i := m.lastAgentLine(); i >= 0 {
+			m.history[i].text = s.text
+			end := i + 1
+			for end < len(m.history) && m.history[end].kind == kindAgent {
+				end++
+			}
+			m.history = append(m.history[:i+1], m.history[end:]...)
+			m.historyDirty = true
+			return
+		}
+	}
+	m.appendAgentText(s.text)
+}
+
+// lastAgentLine is the index of the newest agent line, or -1 when there is none.
+func (m *uiModel) lastAgentLine() int {
+	for i := len(m.history) - 1; i >= 0; i-- {
+		if m.history[i].kind == kindAgent {
+			return i
+		}
+	}
+	return -1
+}
+
 func (m *uiModel) appendAgentText(delta string) {
 	if delta == "" {
 		return
@@ -852,6 +1117,22 @@ func (m *uiModel) appendAgentText(delta string) {
 
 func (m *uiModel) syncVP() {
 	m.vp.SetContent(m.renderHistory())
+}
+
+// scrollBy moves the transcript n rows and keeps the follow-the-tail stick in
+// step with where that left the view.
+//
+// One helper for keys and the wheel: the stick is what decides whether a new
+// token pulls the view to the bottom, so any scroll that forgets to update it
+// silently undoes itself on the next streamed message.
+func (m *uiModel) scrollBy(n int) {
+	if n < 0 {
+		m.vp.ScrollUp(-n)
+	} else {
+		m.vp.ScrollDown(n)
+	}
+	m.stick = m.vp.AtBottom()
+	m.syncVP()
 }
 
 func (m *uiModel) followVP() {
@@ -903,6 +1184,9 @@ type transcriptRow struct {
 	// verbatim marks pre-formatted art (the logo), which keeps its own line
 	// breaks: re-wrapping box-drawing runes would scramble the picture.
 	verbatim bool
+	// markdown marks text the model produced, which is rendered as markdown
+	// rather than as literal prose.
+	markdown bool
 }
 
 func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
@@ -914,7 +1198,7 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 	case kindToolRes:
 		return transcriptRow{style: styleToolRes, first: "  ⎿ ", rest: "    "}
 	case kindAgent:
-		return transcriptRow{style: styleAgent}
+		return transcriptRow{style: styleAgent, markdown: true}
 	case kindSys:
 		return transcriptRow{style: styleSys}
 	case kindErr:
@@ -931,6 +1215,16 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 // edge, or broken across rows, reads as corruption rather than as a logo. The
 // header names the app regardless, so losing the art costs nothing.
 func rowRows(text string, width int, row transcriptRow) []string {
+	// Markdown is only applied where the model produced it. Tool output and the
+	// user's own prompts are literal text — a path or a JSON payload that happens
+	// to contain "**" must survive untouched.
+	if row.markdown {
+		rows := renderMarkdown(text, width, row.style)
+		for i, r := range rows {
+			rows[i] = row.first + r
+		}
+		return rows
+	}
 	if !row.verbatim {
 		return wrapIndent(text, width, row.first, row.rest)
 	}
@@ -952,6 +1246,12 @@ func (m *uiModel) renderHistory() string {
 	for _, l := range m.history {
 		row := m.rowStyle(l.kind)
 		for _, r := range rowRows(l.text, w, row) {
+			// A markdown row arrives already styled by the renderer; wrapping it
+			// again would nest the escapes and break the width accounting.
+			if row.markdown {
+				b.WriteString(r + "\n")
+				continue
+			}
 			b.WriteString(row.style.Render(r) + "\n")
 		}
 	}
@@ -1470,10 +1770,10 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	if !edited {
 		pool = append([]config.Provider{p}, pool...)
 	}
-	svc, tools := m.svc, m.tools
+	svc, ts := m.svc, m.activeTools()
 	return func() tea.Msg {
 		ctx := context.Background()
-		a, err := dmagent.BuildPooledAgent(ctx, pool, tools, m.switchNotifier())
+		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.mode.agentMode())
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -1512,7 +1812,9 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 	m.statusText = i18n.T("generating a reply…")
 	return func() tea.Msg {
 		userMsg := genai.NewContentFromText(text, genai.RoleUser)
-		prevText := ""
+		// The accumulator is per LLM round, and a round ends at every
+		// finalised response — see turnText.
+		var tt turnText
 		for ev, err := range r.Run(turnCtx, userID, sessionID, userMsg, adkagent.RunConfig{
 			StreamingMode: adkagent.StreamingModeSSE,
 		}) {
@@ -1522,21 +1824,32 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 			if ev.LLMResponse.Content == nil {
 				continue
 			}
+			// The text of one event is dispatched as a unit, before the tool
+			// parts it shares the event with: the accumulator has to be reset
+			// once per event, and a finalised response carrying both text and
+			// a function call would otherwise close the round twice.
+			var said strings.Builder
+			var parts []toolPart
 			for _, part := range ev.LLMResponse.Content.Parts {
 				switch {
 				case part.Text != "":
-					if ev.LLMResponse.Partial {
-						p.Send(deltaMsg{part.Text})
-						prevText += part.Text
-					} else if part.Text != prevText {
-						p.Send(deltaMsg{part.Text})
-						prevText = ""
-					}
+					said.WriteString(part.Text)
 				case part.FunctionCall != nil:
-					args, _ := json.Marshal(part.FunctionCall.Args)
-					p.Send(toolCallMsg{name: part.FunctionCall.Name, args: truncate(string(args), 160)})
+					parts = append(parts, toolPart{call: part.FunctionCall})
 				case part.FunctionResponse != nil:
-					p.Send(toolResMsg{name: part.FunctionResponse.Name, output: renderToolResponse(part.FunctionResponse)})
+					parts = append(parts, toolPart{resp: part.FunctionResponse})
+				}
+			}
+			if s := tt.add(said.String(), ev.LLMResponse.Partial); s.text != "" {
+				p.Send(deltaMsg(s))
+			}
+			for _, tp := range parts {
+				switch {
+				case tp.call != nil:
+					args, _ := json.Marshal(tp.call.Args)
+					p.Send(toolCallMsg{name: tp.call.Name, args: truncate(string(args), 160)})
+				case tp.resp != nil:
+					p.Send(toolResMsg{name: tp.resp.Name, output: renderToolResponse(tp.resp)})
 				}
 			}
 		}
@@ -1610,7 +1923,9 @@ func (m *uiModel) sidebarView(height int) string {
 	b.WriteString("\n")
 
 	row(styleSidebarLabel, i18n.T("FOLDER"))
-	value(styleSidebarValue, " ", m.workDir)
+	// The full path, trimmed from the left: a Windows path is far wider than the
+	// panel, and the tail is the part that identifies the project.
+	value(styleSidebarValue, " ", shortenPath(m.workDir, sbInner-1))
 	b.WriteString("\n")
 
 	if m.lastTool != "" {
@@ -1620,7 +1935,7 @@ func (m *uiModel) sidebarView(height int) string {
 	}
 
 	row(styleSidebarLabel, i18n.T("TOOLS"))
-	for _, t := range m.toolNames {
+	for _, t := range m.activeToolNames() {
 		row(styleHint, " · "+t)
 	}
 	b.WriteString("\n")
@@ -1629,6 +1944,7 @@ func (m *uiModel) sidebarView(height int) string {
 	row(styleHint, i18n.T(" ctrl+p  commands"))
 	row(styleHint, i18n.T(" ctrl+b  hide panel"))
 	row(styleHint, i18n.T(" ctrl+y  copy reply"))
+	row(styleHint, i18n.T(" tab     plan/act"))
 	row(styleHint, i18n.T(" esc     stop turn"))
 	row(styleHint, i18n.T(" pgup/dn scroll"))
 
@@ -1682,12 +1998,19 @@ func (m *uiModel) statusBarView() string {
 		statusDesc = m.spin.View() + " " + statusDesc
 	}
 
-	left := badge + "  " + statusDesc
+	left := badge + "  " + m.modeBadge() + "  " + statusDesc
 	// Two columns are always held back as the gutter between the two halves, so
 	// the gap can never collapse to zero and push the row over the wrap point.
 	avail := inner - ansi.StringWidth(left) - 2
 	if avail < 8 {
-		return styleStatusBar.Width(width).Render(truncate(left, inner))
+		// Too narrow for two columns: the mode badge is the one piece of state
+		// that must never be the thing to disappear, so it is kept and the
+		// free-text status goes instead.
+		compact := badge + "  " + m.modeBadge()
+		if ansi.StringWidth(compact) <= inner {
+			return styleStatusBar.Width(width).Render(compact)
+		}
+		return styleStatusBar.Width(width).Render(truncate(badge, inner))
 	}
 
 	// Right half, assembled most- to least-important so the hotkeys are what
@@ -2071,41 +2394,74 @@ func (m *uiModel) View() tea.View {
 
 	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	v.AltScreen = true
-	// Note: We deliberately do NOT set v.MouseMode = tea.MouseModeCellMotion.
-	// This enables native terminal mouse text selection and copying without blocking user selection!
+	// Cell motion is what makes the terminal report the wheel at all; without it
+	// no MouseWheelMsg is ever produced and scrolling cannot work. The cost is
+	// that drag-select no longer works in the terminal itself, which is why
+	// /mouse can turn this back off for anyone who needs to copy by hand.
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeCellMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
 	return v
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, tools []tool.Tool, toolNames []string) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
 	// The notifier needs the program, which needs the model, which needs the
 	// agent: the program is wired in afterwards, and a failover cannot happen
 	// before the first turn anyway.
-	m := InitialModel(nil, nil, p, tools, toolNames)
+	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames)
 	m.pool = pool
+	m.ctx = ctx
 
 	prog := tea.NewProgram(m)
 	m.prog = prog
 
-	a, err := dmagent.BuildPooledAgent(ctx, pool, tools, m.switchNotifier())
-	if err != nil {
-		return err
-	}
-	svc := session.InMemoryService()
-	r, err := runner.New(runner.Config{
-		AppName:           "dmcode",
-		Agent:             a,
-		SessionService:    svc,
-		AutoCreateSession: true,
-	})
+	r, err := m.newRunner(pool, agentTools, modeAct)
 	if err != nil {
 		return err
 	}
 	m.runner = r
-	m.svc = svc
 
 	_, err = prog.Run()
 	return err
+}
+
+// newRunner assembles the agent and the session runner for a tool set.
+//
+// The session service is created once and reused across mode switches: keeping
+// it is what preserves the conversation, so flipping to plan and back does not
+// cost the user the context they had built up.
+func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMode) (*runner.Runner, error) {
+	a, err := dmagent.BuildPooledAgent(m.ctx, pool, ts, m.switchNotifier(), mode.agentMode())
+	if err != nil {
+		return nil, err
+	}
+	if m.svc == nil {
+		m.svc = session.InMemoryService()
+	}
+	return runner.New(runner.Config{
+		AppName:           "dmcode",
+		Agent:             a,
+		SessionService:    m.svc,
+		AutoCreateSession: true,
+	})
+}
+
+// rebuildRunner re-creates the agent for the current mode and directory, keeping
+// the session id and the session service so the conversation survives.
+func (m *uiModel) rebuildRunner() tea.Cmd {
+	if m.pool == nil {
+		return nil
+	}
+	r, err := m.newRunner(m.pool, m.activeTools(), m.mode)
+	if err != nil {
+		m.statusText = err.Error()
+		return nil
+	}
+	m.runner = r
+	return nil
 }

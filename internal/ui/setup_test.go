@@ -43,7 +43,7 @@ func (d setupKeys) down() setupKeys  { return d.send(tea.KeyPressMsg{Code: tea.K
 // what the key mask is measured against.
 func newSetupModel(t *testing.T) *uiModel {
 	t.Helper()
-	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil, nil)
 	m.history = nil
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 34})
 	return m
@@ -232,7 +232,7 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 // Every option has to be readable in the overlay at the sizes people actually
 // use. A long label that gets cut off is an option that does not exist.
 func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
-	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil, nil)
 	m.history = nil
 
 	for _, size := range [][2]int{{100, 34}, {80, 24}, {72, 22}} {

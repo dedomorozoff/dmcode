@@ -13,10 +13,28 @@
   - `runner` (`runner.Runner`): executes turns, streams events (`StreamingModeSSE`), manages session states.
   - `session` (`session.Service`): tracks conversation history and context window.
 - **TUI Framework:** Charmbracelet's `bubbletea/v2`, `bubbles/v2`, `lipgloss/v2`.
-- **Key Modules:**
-  - `main.go`: Startup, `.env` discovery, provider wizard, LLM agent wiring.
-  - `tools.go`: Agent tool definitions (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`).
-  - `ui.go`: Bubble Tea TUI, event streaming, viewport rendering, palette, model selector.
+- **Key Modules:** the code is already split into `internal/` packages:
+  - `main.go`: startup only — flag parsing, `-C` relocation, then chaining the packages below.
+  - `internal/config`: provider config and the `.env` file.
+  - `internal/discover`: which providers the session can run on.
+  - `internal/llm`: the OpenAI-compatible wire and the failover pool.
+  - `internal/agent`: the system instruction (act and plan variants) and agent construction.
+  - `internal/tools`: the instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`) **and the workspace boundary** they are confined to.
+  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar), `markdown.go` (reply rendering), `mode.go` (plan/act), `history.go` (prompt history, `/cd`).
+  - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
+
+### Workspace boundary
+
+`tools.SetRoot` is called once at startup (and again on `/cd`) and every tool
+path goes through `tools.resolve`. A path resolving outside the root is refused
+with an error naming both directories. Two consequences to keep in mind:
+
+- Relative paths are resolved against the **root**, not the process directory.
+  They coincide in a normal session, but resolving against the root is what stops
+  `/cd` and the boundary from disagreeing.
+- The check is lexical. A symlink *inside* the tree is the known soft spot:
+  `write_file` has to be allowed to create files that do not exist yet, so they
+  cannot be resolved first.
 
 ---
 
@@ -71,12 +89,36 @@ Always verify compilation and run `go test ./...` after any code modification.
 
 If you are asked to fix or improve `dmcode`, be aware of these known architectural pitfalls:
 
-- **Monolithic main package:** All files currently reside in `package main`. Move towards modular packages:
-  - `internal/agent` — agent construction and prompt definitions
-  - `internal/tools` — tool implementations and permission checks
-  - `internal/ui` — Bubbletea components and rendering
-  - `internal/config` — provider configuration, env, and settings
-- **Cancellation:** Turns currently run on `context.Background()` with no way to interrupt an active tool call or LLM streaming loop.
-- **Model Switching Context Bug:** Switching models currently allocates a `newSessionID()`, wiping conversation history despite UI stating otherwise.
-- **String Replacement Rigidity:** `edit_file` only supports strict literal matches, failing when whitespace or line endings differ slightly.
-- **Render History Performance:** `renderHistory()` re-renders and re-wraps the entire history on every frame/token. Large sessions cause UI lag.
+- **Cancellation:** Turns run on `context.Background()` with no way to interrupt an active tool call or LLM streaming loop. `Esc` sets a flag the turn only checks between events.
+- **Model Switching Context Bug:** Switching models currently allocates a `newSessionID()`, wiping conversation history despite UI stating otherwise. The mode switch and `/cd` deliberately **do not** do this — they reuse the session service, and a regression test covers the tool set but not yet the session id.
+- **Render History Performance:** `renderHistory()` re-renders and re-wraps the entire history on every frame/token. Large sessions cause UI lag, and the markdown renderer made this more expensive. The cache is a single whole-transcript string, so it is invalidated on every streamed token; an incremental per-line cache is the obvious next step.
+- **Workspace boundary is lexical:** a symlink inside the workspace can still reach outside it. See §1.
+- **`tab` is overloaded:** it completes a suggestion inside a `/` command and switches mode everywhere else. A user who expected a tab character in a prompt gets a mode switch instead.
+
+### Diagnosing "the TUI shows X but my test says otherwise"
+
+A stale process is the first thing to rule out, not the last. Overwriting
+`dist/dmcode.exe` fails with "being used by another process" while a *previous*
+build keeps running, and a session started from that old binary shows output no
+amount of rebuilding will change. When output disagrees with a passing test,
+confirm which binary the session is running before reading any more code.
+
+`/debug` exists for the same reason: it prints the line kind, the markdown flag
+and the width of the last transcript lines. A reply that renders as raw markup
+is a routing problem (the text is stored under a kind whose `rowStyle` has
+`markdown: false`) rather than a parsing problem, and the counter tells the two
+apart in one line.
+
+Already fixed, and worth not regressing:
+
+- Monolithic `package main` — split into `internal/*` (see §1).
+- No path confinement — `tools.SetRoot`/`tools.resolve`.
+- `edit_file` rigidity — a whitespace-tolerant match was added.
+- **Markdown "working every other time"** — the per-turn text accumulator was never
+  reset at the end of an LLM round, so a turn that used a tool had its second
+  round's closing response appended on top of the deltas already shown. The
+  duplicate landed without a line break, which is what turned `## Done` into
+  `## Done## Done` and left a table without its delimiter row. `turnText` in
+  `internal/ui/ui.go` now owns the accumulator per *round* and either trims the
+  already-streamed prefix or replaces the round; `applyAgentText` applies the
+  result. Tests live in `internal/ui/turn_text_test.go`.

@@ -116,6 +116,28 @@ var catalog = map[Lang]map[string]string{
 		// Boot.
 		"dmcode is starting…": "dmcode загружается…",
 
+		// Modes, folder and mouse.
+		"ACT":                      "РАБОТА",
+		"PLAN":                     "ПЛАН",
+		"mode":                     "режим",
+		"already in plan mode":     "уже в режиме плана",
+		"already in act mode":      "уже в режиме работы",
+		"already in ":              "уже в ",
+		" mode":                    " режиме",
+		"usage: /mode plan|act":    "использование: /mode plan|act",
+		"plan mode is unavailable": "режим плана недоступен",
+		"wait for the turn to finish before switching mode": "дождитесь окончания хода перед сменой режима",
+		"switch plan/act mode (tab)":                        "переключить режим план/работа (tab)",
+		"change the working folder":                         "сменить рабочую папку",
+		"toggle mouse wheel scrolling":                      "включить/выключить прокрутку колесом",
+		"current folder: ":                                  "текущая папка: ",
+		"folder changed to: ":                               "рабочая папка изменена: ",
+		"cannot enter that folder: ":                        "не удалось перейти в папку: ",
+		"mouse on — the wheel scrolls":                      "мышь включена — колесо прокручивает",
+		"mouse off — the wheel is ignored":                  "мышь выключена — колесо не работает",
+		" tab     plan/act":                                 " tab    план/работа",
+		"tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel": "tab — режим план/работа · колесо — скролл · /mouse — переключить мышь",
+
 		// Provider options.
 		"No key — Pollinations (OpenAI-compatible, anonymous)":                       "Без ключа — Pollinations (OpenAI-совместимый, анонимно)",
 		"Local — Ollama (http://127.0.0.1:11434/v1)":                                 "Локально — Ollama (http://127.0.0.1:11434/v1)",

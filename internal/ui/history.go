@@ -8,7 +8,11 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
+
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	"github.com/dedomorozoff/dmcode/internal/tools"
 )
 
 // maxPromptHistory is how many prompts stay in memory for ↑/↓ recall, and how
@@ -113,6 +117,67 @@ func appendPromptHistory(text string) {
 	}
 	defer f.Close()
 	f.Write(append(rec, '\n'))
+}
+
+// shortenPath trims a path from the left so it fits n cells, marking the cut
+// with an ellipsis. The last elements are the ones that identify a project, so
+// the tail is what survives — "…\projects\dmcode" reads correctly where
+// "C:\Users\…\dmcode-main" would not distinguish two checkouts.
+func shortenPath(p string, n int) string {
+	if n <= 1 || ansi.StringWidth(p) <= n {
+		return p
+	}
+	// Windows separators are kept alongside the slash so a path stays copyable.
+	seps := "/\\"
+	runes := []rune(p)
+	keep := n - 1
+	if keep > len(runes) {
+		keep = len(runes)
+	}
+	tail := string(runes[len(runes)-keep:])
+	if cut := len(p) - keep; cut > 0 {
+		if strings.ContainsAny(p[:cut], seps) {
+			return "…" + tail
+		}
+	}
+	// No separator in the discarded part means the tail alone is ambiguous, so
+	// show the whole thing and let the caller's truncate() mark it instead.
+	return p
+}
+
+// changeDir moves the session to path and re-fences the tools there.
+//
+// os.Chdir is what actually moves the agent: the tools address files relative
+// to the process directory, so changing the boundary without changing the
+// directory — or the reverse — would leave the two disagreeing about which
+// project is being edited.
+func (m *uiModel) changeDir(path string) tea.Cmd {
+	target := strings.TrimSpace(path)
+	if target == "" {
+		m.history = append(m.history, line{kindSys, i18n.T("current folder: ") + m.workDir})
+		m.historyDirty = true
+		return nil
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.workDir, target)
+	}
+	if err := tools.SetRoot(target); err != nil {
+		m.history = append(m.history, line{kindErr, i18n.T("cannot enter that folder: ") + err.Error()})
+		m.historyDirty = true
+		return nil
+	}
+	if err := os.Chdir(target); err != nil {
+		m.history = append(m.history, line{kindErr, i18n.T("cannot enter that folder: ") + err.Error()})
+		m.historyDirty = true
+		return nil
+	}
+	m.workDir = tools.Root()
+	m.workDirShort = filepath.Base(m.workDir)
+	m.history = append(m.history, line{kindSys, i18n.T("folder changed to: ") + m.workDir})
+	m.historyDirty = true
+	// The agent is told where it is through its instruction, so a stale one
+	// would have it reasoning about the previous directory.
+	return m.rebuildRunner()
 }
 
 // savePrompt records a sent prompt for ↑/↓ recall and persists it to disk.
