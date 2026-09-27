@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 // freeCandidate is a provider dmcode can use without the user configuring
@@ -37,8 +41,11 @@ var localCandidates = []freeCandidate{
 // hostedCandidates need no key. Pollinations serves an OpenAI-compatible
 // /chat/completions API anonymously; "dmcode" is used as the bearer token
 // because the endpoint rejects a request that carries no Authorization header.
+//
+// openai-fast and openai are aliases of the same anonymous model (GPT-OSS 20B),
+// so listing both would only make the probe try the same thing twice.
 var hostedCandidates = []freeCandidate{
-	{name: "Pollinations (без ключа)", baseURL: "https://text.pollinations.ai/openai", apiKey: "dmcode", models: []string{"openai-fast", "openai"}},
+	{name: "Pollinations (без ключа)", baseURL: "https://text.pollinations.ai/openai", apiKey: "dmcode", models: []string{"openai-fast"}},
 }
 
 // preferKeywords rank model ids returned by /v1/models: coding-tuned models
@@ -126,19 +133,76 @@ func pickModel(cand freeCandidate, served []string) string {
 	return ranked[0]
 }
 
-// probe checks that a candidate is reachable and usable, returning the model
-// to drive it with. A candidate that answers /models but lists nothing is
-// treated as unusable, since there would be no model to run.
+// toolProbeTimeout bounds the tool-calling check. The anonymous Pollinations
+// backend cold-starts its model, and the first request after an idle spell has
+// been observed taking ~18s, so this has to be generous. It is only ever paid
+// once per run, in the background, and the UI stays usable meanwhile.
+const toolProbeTimeout = 45 * time.Second
+
+// verifyTools asks a candidate to call a dummy tool and reports whether it
+// complied. Answering /models proves nothing about tool support, and a host
+// that ignores the tools array turns every single turn into prose — the user
+// only finds out after typing a real task, when dmcode is already useless.
+//
+// conclusive is false when the check could not reach a verdict (transport
+// failure, timeout, truncated stream). Callers must not treat that as a
+// failure: a slow endpoint says nothing about its tool support.
+func verifyTools(baseURL, apiKey, modelName string, timeout time.Duration) (ok, conclusive bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+			{Text: "Вызови инструмент probe_ok, ничего больше не нужно."},
+		}}},
+		Config: &genai.GenerateContentConfig{
+			MaxOutputTokens: 64,
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name:        "probe_ok",
+				Description: "Проверочный инструмент. Вызови его.",
+				Parameters:  &genai.Schema{Type: genai.TypeObject},
+			}}}},
+		},
+	}
+
+	// The real client is used on purpose, not a hand-rolled request: keyless
+	// hosts (Pollinations) answer 404 to a non-streaming call, so a probe that
+	// skipped the adapter would reject a provider that works perfectly.
+	var final *model.LLMResponse
+	for resp, err := range newChatModel(baseURL, apiKey, modelName).GenerateContent(ctx, req, true) {
+		if err != nil {
+			return false, false
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil {
+		return false, false
+	}
+	for _, p := range final.Content.Parts {
+		if p != nil && p.FunctionCall != nil && p.FunctionCall.Name == "probe_ok" {
+			return true, true
+		}
+	}
+	// A complete answer that contains no call is a real "no".
+	return false, true
+}
+
+// probe checks that a candidate is reachable and lists a model to run, which
+// is the fast half of the decision. Whether that model can actually call tools
+// is a separate, slower question answered off the startup path — see
+// verifyTools, which the UI runs in the background.
 func probe(cand freeCandidate, timeout time.Duration) (string, bool) {
 	served, err := fetchModels(cand.baseURL, cand.apiKey, timeout)
 	if err != nil {
 		return "", false
 	}
-	model := pickModel(cand, served)
-	if model == "" {
+	modelName := pickModel(cand, served)
+	if modelName == "" {
 		return "", false
 	}
-	return model, true
+	return modelName, true
 }
 
 // discoverFreeProvider looks for a usable free provider, preferring a local
@@ -187,6 +251,7 @@ func discoverFreeProvider() (provider, bool) {
 }
 
 // freeProviderHint is shown when nothing was auto-detected, so the user knows
-// the no-key path exists.
+// the no-key path exists. It names only things that actually work: /setup is a
+// real command, and a local server really is picked up on its own.
 const freeProviderHint = "подними локально Ollama (ollama serve) или LM Studio — dmcode подхватит её сам; " +
-	"либо укажи любой OpenAI-совместимый endpoint через /setup"
+	"либо выполни /setup в приложении и выбери провайдера"

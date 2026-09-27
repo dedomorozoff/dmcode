@@ -26,10 +26,12 @@ func detectProvider() (provider, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	modelName := os.Getenv("DMCODE_MODEL")
 
-	// An explicit endpoint always wins: the user configured it on purpose.
-	// DMCODE_API=chat forces the /chat/completions wire for endpoints that
-	// speak both, or that only speak chat.
-	if baseURL != "" && apiKey != "" {
+	// An explicit endpoint always wins: the user configured it on purpose. The
+	// key may legitimately be absent — keyless hosts and a local Ollama need
+	// none, and requiring one would push those users to write a dummy secret
+	// into .env. DMCODE_API=chat forces the /chat/completions wire for
+	// endpoints that speak both, or that only speak chat.
+	if baseURL != "" {
 		return provider{
 			baseURL: baseURL,
 			apiKey:  apiKey,
@@ -121,21 +123,53 @@ type setupOption struct {
 	keyless bool
 }
 
-func setupWizard() error {
-	opts := []setupOption{
-		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", envKey: "OPENAI_API_KEY", api: apiChat, keyless: true},
-		{label: "Локально — Ollama (http://127.0.0.1:11434/v1)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", envKey: "OPENAI_API_KEY", api: apiChat, keyless: true},
+// setupOptions is the single list of providers offered by both the interactive
+// setup wizard and the TUI's /setup command, so the two can never drift apart.
+//
+// A keyless option deliberately names no key variable. Writing a placeholder
+// into OPENAI_API_KEY would destroy a real key the user already had, and dmcode
+// talks to keyless hosts without any key anyway.
+func setupOptions() []setupOption {
+	return []setupOption{
+		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", api: apiChat, keyless: true},
+		{label: "Локально — Ollama (http://127.0.0.1:11434/v1)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", api: apiChat, keyless: true},
 		{label: "OpenRouter — бесплатные модели (deepseek и др.)", signup: "https://openrouter.ai/keys", baseURL: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat-v3.1:free", envKey: "OPENAI_API_KEY", api: apiChat},
 		{label: "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", signup: "https://opencode.ai/auth", baseURL: "https://opencode.ai/zen/v1", model: "nemotron-3-ultra-free", envKey: "OPENCODE_API_KEY", api: apiResponses},
 		{label: "Groq — бесплатно, быстро, tool calling работает", signup: "https://console.groq.com/keys", baseURL: "https://api.groq.com/openai/v1", model: "qwen/qwen3-32b", envKey: "GROQ_API_KEY", api: apiResponses},
 		{label: "Свой OpenAI-совместимый endpoint", envKey: "OPENAI_API_KEY", api: apiChat},
 	}
-	fmt.Println("\nБесплатный провайдер не настроен. Выбери:")
-	for i, o := range opts {
-		fmt.Printf("  %d) %s\n", i+1, o.label)
+}
+
+// setupVars is the .env content a chosen option produces. It is shared by the
+// stdin wizard and /setup so the two cannot write different things.
+func setupVars(opt setupOption, key string) map[string]string {
+	vars := map[string]string{"DMCODE_API": opt.api}
+	if opt.baseURL != "" {
+		vars["OPENAI_BASE_URL"] = opt.baseURL
+		vars["DMCODE_MODEL"] = opt.model
 	}
-	fmt.Print("номер [1]: ")
-	reader := bufio.NewReader(os.Stdin)
+	if !opt.keyless && opt.envKey != "" {
+		vars[opt.envKey] = key
+	}
+	return vars
+}
+
+func setupWizard() error {
+	return setupWizardWith(os.Stdin, os.Stdout)
+}
+
+// setupWizardWith is the wizard with its input and output injected, so the
+// prompt sequence can be tested without a terminal. The validation below is the
+// only guard against writing a half-filled custom endpoint, so it has to be
+// reachable from a test.
+func setupWizardWith(r io.Reader, w io.Writer) error {
+	opts := setupOptions()
+	fmt.Fprintf(w, "\nБесплатный провайдер не настроен. Выбери:\n")
+	for i, o := range opts {
+		fmt.Fprintf(w, "  %d) %s\n", i+1, o.label)
+	}
+	fmt.Fprint(w, "номер [1]: ")
+	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil && line == "" {
 		return fmt.Errorf("не удалось прочитать выбор (stdin не терминал?): %s", freeProviderHint)
@@ -149,12 +183,12 @@ func setupWizard() error {
 	}
 	opt := opts[idx-1]
 
-	key := "dmcode"
+	key := ""
 	if !opt.keyless {
 		if opt.signup != "" {
-			fmt.Println("Возьми ключ тут:", opt.signup)
+			fmt.Fprintln(w, "Возьми ключ тут:", opt.signup)
 		}
-		fmt.Print("ключ: ")
+		fmt.Fprint(w, "ключ: ")
 		keyLine, err := reader.ReadString('\n')
 		if err != nil && strings.TrimSpace(keyLine) == "" {
 			return fmt.Errorf("ключ не введён")
@@ -165,35 +199,39 @@ func setupWizard() error {
 		}
 	}
 
-	vars := map[string]string{opt.envKey: key, "DMCODE_API": opt.api}
-	if opt.baseURL != "" {
-		vars["OPENAI_BASE_URL"] = opt.baseURL
-		vars["DMCODE_MODEL"] = opt.model
-	}
-	if opt.envKey == "OPENCODE_API_KEY" {
-		vars["OPENCODE_API_KEY"] = key
-	}
-
 	// кастомный endpoint: доп. ввод
 	if opt.baseURL == "" {
-		fmt.Print("base URL (напр. http://localhost:1234/v1): ")
+		fmt.Fprint(w, "base URL (напр. http://localhost:1234/v1): ")
 		urlLine, _ := reader.ReadString('\n')
-		if u := strings.TrimSpace(urlLine); u != "" {
-			vars["OPENAI_BASE_URL"] = u
+		opt.baseURL = strings.TrimSpace(urlLine)
+		if opt.baseURL == "" {
+			return fmt.Errorf("base URL не введён")
 		}
-		fmt.Print("модель: ")
+		fmt.Fprint(w, "модель: ")
 		mLine, _ := reader.ReadString('\n')
-		if m := strings.TrimSpace(mLine); m != "" {
-			vars["DMCODE_MODEL"] = m
+		opt.model = strings.TrimSpace(mLine)
+		if opt.model == "" {
+			return fmt.Errorf("модель не введена")
 		}
 	}
 
+	vars := setupVars(opt, key)
+	// Merge rather than truncate: picking a free provider must not delete a real
+	// key the user already had for a paid one.
+	existing, err := readDotEnv()
+	if err != nil {
+		return err
+	}
+	merged, _ := mergeDotEnv(existing, vars)
+
 	var sb strings.Builder
-	for k, v := range vars {
-		if err := os.Setenv(k, v); err != nil {
+	for _, l := range merged {
+		sb.WriteString(l + "\n")
+	}
+	for _, k := range sortedKeys(vars) {
+		if err := os.Setenv(k, vars[k]); err != nil {
 			return err
 		}
-		sb.WriteString(k + "=" + v + "\n")
 	}
 	return os.WriteFile(".env", []byte(sb.String()), 0o600)
 }

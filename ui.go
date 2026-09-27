@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -134,6 +135,16 @@ type errMsg string
 
 func (e errMsg) Error() string { return string(e) }
 
+// toolCheckMsg reports the result of the background tool-calling check. A free
+// endpoint that lists models but cannot call tools makes every turn prose, so
+// the user is told rather than left to discover it mid-task.
+type toolCheckMsg struct {
+	ok         bool
+	conclusive bool
+	model      string
+	label      string
+}
+
 type uiModel struct {
 	history   []line
 	input     textinput.Model
@@ -151,6 +162,7 @@ type uiModel struct {
 	toolNames []string
 	palette   paletteState
 	picker    modelPicker
+	setup     setupState
 	suggest   []string
 	stick     bool
 
@@ -182,6 +194,29 @@ type paletteState struct {
 	selected int
 }
 
+// setup stages, walked in order by /setup.
+const (
+	setupPick = iota
+	setupKey
+	setupURL
+	setupModel
+)
+
+// setupState drives /setup inside the TUI. The wizard used to exist only as a
+// stdin prompt, while the error message that points at it promised a command
+// that was never there; the two now share one option list and one apply path.
+type setupState struct {
+	open     bool
+	stage    int
+	selected int
+	opt      setupOption
+	buf      string
+}
+
+func (s *setupState) reset() {
+	*s = setupState{}
+}
+
 type command struct {
 	name string
 	desc string
@@ -190,6 +225,9 @@ type command struct {
 
 func (m *uiModel) commands() []command {
 	return []command{
+		{name: "setup", desc: "выбрать провайдера (бесплатно, без ключа)", run: func(m *uiModel) tea.Cmd {
+			return m.openSetup()
+		}},
 		{name: "models", desc: "список моделей", run: func(m *uiModel) tea.Cmd {
 			return m.fetchModelsCmd()
 		}},
@@ -221,7 +259,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ"},
 				line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
 				line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
-				line{kindSys, "/models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -287,7 +325,48 @@ func initialModel(r *runner.Runner, svc session.Service, p provider, tools []too
 }
 
 func (m *uiModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize)
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd())
+}
+
+// toolCheckCmd verifies in the background that the chosen provider can emit a
+// tool call, because a host that ignores the tools array turns every turn into
+// prose and dmcode is then useless. It never blocks startup: the keyless
+// backend can take ~18s to cold-start, and the user must be able to type while
+// that happens.
+//
+// Only the chat wire is checked. Providers on the /v1/responses wire are
+// key-based and go through ADK's own client, which is not what verifyTools
+// speaks, and their tool support is not in doubt.
+// handleToolCheck reports a failed tool-calling check, and stays quiet on a
+// pass or an inconclusive run. A stale result is dropped: the user may have
+// switched models while the check was in flight, and an advisory about a model
+// they are no longer using is worse than none.
+func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
+	if msg.model != m.prov.model || msg.label != m.prov.label {
+		return
+	}
+	if !msg.conclusive {
+		return
+	}
+	if msg.ok {
+		return
+	}
+	m.statusText = "провайдер без tools"
+	m.history = append(m.history, line{kindErr, fmt.Sprintf(
+		"⚠ %s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
+		msg.label, msg.model)})
+	m.historyDirty = true
+}
+
+func (m *uiModel) toolCheckCmd() tea.Cmd {
+	p := m.prov
+	if p.wire() != apiChat || p.model == "" {
+		return nil
+	}
+	return func() tea.Msg {
+		ok, conclusive := verifyTools(p.baseURL, p.apiKey, p.model, toolProbeTimeout)
+		return toolCheckMsg{ok: ok, conclusive: conclusive, model: p.model, label: p.label}
+	}
 }
 
 func (m *uiModel) lastAgentText() string {
@@ -316,6 +395,9 @@ func (m *uiModel) copyLastResponse() {
 }
 
 func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// extra carries a follow-up command a case wants to run after the switch,
+	// batched with the textinput's own command at the tail.
+	var extra tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -324,6 +406,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// width. Calling it twice would render the whole history twice.
 		m.layout()
 	case tea.KeyPressMsg:
+		if m.setup.open {
+			model, cmd := m.setupKey(msg)
+			return model, cmd
+		}
 		if m.palette.open {
 			model, cmd := m.paletteKey(msg)
 			return model, cmd
@@ -412,10 +498,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, "ctrl+p — палитра команд · ctrl+b — панель · ctrl+y — копировать ответ"},
 					line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
 					line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
-					line{kindSys, "/models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
+			case "/setup":
+				cmd := m.openSetup()
+				m.followVP()
+				return m, cmd
 			case "/copy":
 				m.copyLastResponse()
 				return m, nil
@@ -490,8 +580,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prov.model = msg.name
 			m.runner = msg.runner
 			// Preserve m.sessionID so conversation context is retained!
-			m.history = append(m.history, line{kindSys, "модель переключена: " + msg.name + " (контекст сохранён)"})
+			m.history = append(m.history, line{kindSys, "модель активирована: " + msg.name + " (контекст сохранён)"})
+			// A different model may or may not support tools, so check again.
+			extra = m.toolCheckCmd()
 		}
+
 		m.historyDirty = true
 	case turnDoneMsg:
 		m.busy = false
@@ -514,12 +607,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = "ошибка"
 		m.history = append(m.history, line{kindErr, "error: " + msg.Error()})
 		m.historyDirty = true
+	case toolCheckMsg:
+		m.handleToolCheck(msg)
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.updateSuggest()
 	m.followVP()
-	return m, cmd
+	return m, tea.Batch(cmd, extra)
 }
 
 // sidebarVisible reports whether the sidebar is actually on screen. Having it
@@ -603,7 +698,7 @@ func (m *uiModel) followVP() {
 
 func (m *uiModel) updateSuggest() {
 	m.suggest = nil
-	if m.palette.open || m.picker.open {
+	if m.palette.open || m.picker.open || m.setup.open {
 		return
 	}
 	text := m.input.Value()
@@ -829,6 +924,270 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.palette.selected = 0
 	}
 	return m, nil
+}
+
+// openSetup starts /setup at the provider list.
+func (m *uiModel) openSetup() tea.Cmd {
+	m.setup.reset()
+	m.setup.open = true
+	m.statusText = "/setup"
+	return nil
+}
+
+// setupKey walks the wizard. Escape always backs out, including from a text
+// stage: a user who picked the wrong provider must never be trapped in a prompt
+// with no way out.
+func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	opts := setupOptions()
+	switch msg.String() {
+	case "esc":
+		m.setup.reset()
+		m.statusText = "настройка отменена"
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch m.setup.stage {
+	case setupPick:
+		switch msg.String() {
+		case "up":
+			if m.setup.selected > 0 {
+				m.setup.selected--
+			}
+			return m, nil
+		case "down":
+			if m.setup.selected < len(opts)-1 {
+				m.setup.selected++
+			}
+			return m, nil
+		case "enter":
+			m.setup.opt = opts[m.setup.selected]
+			switch {
+			case !m.setup.opt.keyless:
+				m.setup.stage = setupKey
+				m.setup.buf = ""
+			case m.setup.opt.baseURL == "":
+				m.setup.stage = setupURL
+				m.setup.buf = ""
+			default:
+				return m, m.applySetup()
+			}
+			return m, nil
+		}
+
+	case setupKey:
+		switch msg.String() {
+		case "enter":
+			if strings.TrimSpace(m.setup.buf) == "" {
+				m.statusText = "ключ не введён"
+				return m, nil
+			}
+			return m, m.applySetup()
+		case "backspace":
+			if r := []rune(m.setup.buf); len(r) > 0 {
+				m.setup.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+
+	case setupURL:
+		switch msg.String() {
+		case "enter":
+			if strings.TrimSpace(m.setup.buf) == "" {
+				m.statusText = "base URL не введён"
+				return m, nil
+			}
+			m.setup.opt.baseURL = strings.TrimSpace(m.setup.buf)
+			m.setup.stage = setupModel
+			m.setup.buf = ""
+			return m, nil
+		case "backspace":
+			if r := []rune(m.setup.buf); len(r) > 0 {
+				m.setup.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+
+	case setupModel:
+		switch msg.String() {
+		case "enter":
+			if strings.TrimSpace(m.setup.buf) == "" {
+				m.statusText = "модель не введена"
+				return m, nil
+			}
+			m.setup.opt.model = strings.TrimSpace(m.setup.buf)
+			return m, m.applySetup()
+		case "backspace":
+			if r := []rune(m.setup.buf); len(r) > 0 {
+				m.setup.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+	}
+
+	if len(msg.Text) > 0 && m.setup.stage != setupPick {
+		m.setup.buf += msg.Text
+	}
+	return m, nil
+}
+
+// applySetup persists the chosen provider to .env, exports it for this process,
+// and rebuilds the agent so the change takes effect without a restart. The key
+// is never echoed into the transcript, and the write is 0600 because .env holds
+// a secret.
+func (m *uiModel) applySetup() tea.Cmd {
+	opt := m.setup.opt
+	vars := setupVars(opt, strings.TrimSpace(m.setup.buf))
+
+	// Merge into any existing .env rather than replacing it, so a key the user
+	// set for another provider is not silently dropped.
+	lines, err := readDotEnv()
+	if err != nil {
+		m.statusText = "ошибка чтения .env"
+		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
+		m.setup.reset()
+		m.historyDirty = true
+		return nil
+	}
+	merged, _ := mergeDotEnv(lines, vars)
+
+	var sb strings.Builder
+	for _, l := range merged {
+		sb.WriteString(l + "\n")
+	}
+	if werr := os.WriteFile(".env", []byte(sb.String()), 0o600); werr != nil {
+		m.statusText = "не удалось записать .env"
+		m.history = append(m.history, line{kindErr, "setup: " + werr.Error()})
+		m.setup.reset()
+		m.historyDirty = true
+		return nil
+	}
+	for _, k := range sortedKeys(vars) {
+		os.Setenv(k, vars[k])
+	}
+
+	p := provider{
+		baseURL: vars["OPENAI_BASE_URL"],
+		model:   orDefaultModel(vars["DMCODE_MODEL"]),
+		api:     opt.api,
+		label:   setupLabel(opt),
+	}
+	if !opt.keyless {
+		p.apiKey = vars[opt.envKey]
+	}
+	m.prov = p
+	m.setup.reset()
+	m.statusText = "провайдер: " + p.label
+	m.history = append(m.history, line{kindSys, "провайдер сохранён в .env: " + p.label})
+	m.historyDirty = true
+
+	ctx := context.Background()
+	a, berr := buildAgent(ctx, p, m.tools)
+	if berr != nil {
+		m.history = append(m.history, line{kindErr, "setup: " + berr.Error()})
+		return nil
+	}
+	r, rerr := runner.New(runner.Config{
+		AppName:           "dmcode",
+		Agent:             a,
+		SessionService:    m.svc,
+		AutoCreateSession: true,
+	})
+	if rerr != nil {
+		m.history = append(m.history, line{kindErr, "setup: " + rerr.Error()})
+		return nil
+	}
+	m.runner = r
+	// A new provider needs its own tool-calling verdict.
+	return m.toolCheckCmd()
+}
+
+// setupLabel names a wizard option for the sidebar, where the provider is shown.
+func setupLabel(opt setupOption) string {
+	if opt.baseURL == "" {
+		return "Свой endpoint"
+	}
+	host := opt.baseURL
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	return host
+}
+
+// readDotEnv parses .env into ordered lines, keeping comments and ordering so a
+// rewrite does not lose the user's notes.
+func readDotEnv() ([]string, error) {
+	data, err := os.ReadFile(".env")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n"), nil
+}
+
+// mergeDotEnv overlays vars onto existing .env lines. Keys the wizard does not
+// manage are preserved verbatim, so a real provider key is never clobbered and
+// switching back to it later costs nothing. Lines that are not assignments are
+// kept as they are.
+//
+// It returns the merged file in order, plus the values that were actually
+// written. The values are needed to build the provider, and the ordering is
+// needed to rewrite the file without shuffling the user's comments around.
+func mergeDotEnv(lines []string, vars map[string]string) ([]string, map[string]string) {
+	out := make([]string, 0, len(lines)+len(vars))
+	vals := make(map[string]string, len(vars))
+	applied := make(map[string]bool, len(vars))
+
+	for _, line := range lines {
+		k, _, ok := dotEnvPair(line)
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		if v, managed := vars[k]; managed {
+			out = append(out, k+"="+v)
+			vals[k] = v
+			applied[k] = true
+			continue
+		}
+		out = append(out, line)
+	}
+	for _, k := range sortedKeys(vars) {
+		if !applied[k] {
+			out = append(out, k+"="+vars[k])
+			vals[k] = vars[k]
+		}
+	}
+	return out, vals
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// dotEnvPair extracts a key from a .env line, reporting false for comments and
+// anything that is not an assignment.
+func dotEnvPair(line string) (string, string, bool) {
+	t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
+	if t == "" || strings.HasPrefix(t, "#") {
+		return "", "", false
+	}
+	k, v, ok := strings.Cut(t, "=")
+	if !ok {
+		return "", "", false
+	}
+	return strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`), true
 }
 
 func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1289,6 +1648,66 @@ func (m *uiModel) modelPickerBox() string {
 	return m.floatingPanel("⌘ модели", m.picker.query, entries, m.picker.selected)
 }
 
+// setupBox renders the /setup wizard: the provider list, then a key prompt, or
+// the base-URL and model prompts for a custom endpoint.
+// maskedKey hides a secret while still showing that something was typed. The
+// width is capped so a pasted key cannot widen the overlay past the terminal.
+func maskedKey(s string, width int) string {
+	n := len([]rune(s))
+	if n == 0 {
+		return ""
+	}
+	if width > 1 && n > width-1 {
+		n = width - 1
+	}
+	return strings.Repeat("•", n)
+}
+
+func (m *uiModel) setupBox() string {
+	inner := m.floatingWidth() - panelBorder
+
+	switch m.setup.stage {
+	case setupKey:
+		// The key is a secret: show how much has been typed, never what. A
+		// shoulder-surfer or a screen share must not leak it, and the transcript
+		// stores only the masked form.
+		rows := [][]string{{styleHint.Render("ключ (ввод скрыт, вставь и нажми enter):")},
+			{maskedKey(m.setup.buf, inner) + "█"}}
+		return m.floatingPanel("? ключ провайдера", "", rows, 0)
+
+	case setupURL:
+		rows := [][]string{{styleHint.Render("base URL, напр. http://localhost:1234/v1")},
+			{m.setup.buf + "█"}}
+		return m.floatingPanel("? свой endpoint", "", rows, 0)
+
+	case setupModel:
+		rows := [][]string{{styleHint.Render("идентификатор модели на этом endpoint")},
+			{m.setup.buf + "█"}}
+		return m.floatingPanel("? модель", "", rows, 0)
+	}
+
+	opts := setupOptions()
+	var entries [][]string
+	for i, o := range opts {
+		marker, style := "   ", lipgloss.NewStyle()
+		switch {
+		case i == m.setup.selected:
+			marker, style = " ? ", styleTool
+		case setupLabel(o) == m.prov.label:
+			marker, style = " * ", styleTool
+		}
+		rows := wrapIndent(o.label, inner, marker, "     ")
+		if i != m.setup.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	// * marks the provider already in use, ? the highlighted row.
+	return m.floatingPanel("? провайдер  (* — текущий, enter — выбрать, esc — отмена)", "", entries, m.setup.selected)
+}
+
 func (m *uiModel) filteredCommands() []command {
 	pattern := strings.ToLower(m.palette.query)
 	var out []command
@@ -1304,10 +1723,13 @@ func (m *uiModel) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("dmcode загружается…")
 	}
-	if m.picker.open || m.palette.open {
+	if m.picker.open || m.palette.open || m.setup.open {
 		box := m.paletteBox()
-		if m.picker.open {
+		switch {
+		case m.picker.open:
 			box = m.modelPickerBox()
+		case m.setup.open:
+			box = m.setupBox()
 		}
 		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
 		v.AltScreen = true
