@@ -21,7 +21,24 @@ import (
 	"google.golang.org/adk/v2/tool"
 )
 
+// detectProvider is the single-endpoint view of detectProviders, kept for
+// callers that only need the one it will use first.
 func detectProvider() (provider, error) {
+	pool, err := detectProviders()
+	if err != nil {
+		return provider{}, err
+	}
+	return pool[0], nil
+}
+
+// detectProviders returns the session's pool in preference order.
+//
+// A configured endpoint is always first and always alone: the user chose it, and
+// promoting a free local server over a paid key they set up would be a
+// surprise. When nothing is configured, every working free endpoint is returned
+// rather than the first hit, so a host that dies mid-session has somewhere to
+// go without a fresh probe.
+func detectProviders() ([]provider, error) {
 	baseURL := os.Getenv("OPENAI_BASE_URL")
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	modelName := os.Getenv("DMCODE_MODEL")
@@ -32,13 +49,13 @@ func detectProvider() (provider, error) {
 	// into .env. DMCODE_API=chat forces the /chat/completions wire for
 	// endpoints that speak both, or that only speak chat.
 	if baseURL != "" {
-		return provider{
+		return []provider{{
 			baseURL: baseURL,
 			apiKey:  apiKey,
 			model:   orDefaultModel(modelName),
 			api:     envAPI(),
 			label:   "OpenAI-совместимый",
-		}, nil
+		}}, nil
 	}
 
 	type preset struct {
@@ -54,39 +71,41 @@ func detectProvider() (provider, error) {
 		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", apiResponses, "GitHub Models"},
 		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", apiResponses, "Mistral"},
 		{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", apiChat, "OpenRouter"},
+		{"KILO_API_KEY", "https://api.kilo.ai/api/gateway", "kilo-auto/free", apiChat, "Kilo"},
 	} {
 		if key := os.Getenv(p.env); key != "" {
-			return provider{
+			return []provider{{
 				baseURL: p.url,
 				apiKey:  key,
 				model:   orDefaultModel(firstNonEmpty(modelName, p.model)),
 				api:     p.api,
 				label:   p.label,
-			}, nil
+			}}, nil
 		}
 	}
 
 	// Nothing configured: look for something free that already works, so a
 	// fresh checkout is usable with no setup at all.
-	if p, ok := discoverFreeProvider(); ok {
-		return p, nil
+	if pool := discoverFreeProviders(); len(pool) > 0 {
+		return pool, nil
 	}
 
 	if err := setupWizard(); err != nil {
-		return provider{}, err
+		return nil, err
 	}
 	baseURL = os.Getenv("OPENAI_BASE_URL")
 	apiKey = os.Getenv("OPENAI_API_KEY")
 	if baseURL == "" || apiKey == "" {
-		return provider{}, fmt.Errorf("провайдер не настроен — %s", freeProviderHint)
+		return nil, fmt.Errorf("провайдер не настроен — %s", freeProviderHint)
 	}
-	return provider{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		model:   orDefaultModel(os.Getenv("DMCODE_MODEL")),
-		api:     envAPI(),
-		label:   "OpenAI-совместимый",
-	}, nil
+	return []provider{{
+		baseURL:   baseURL,
+		apiKey:    apiKey,
+		model:     orDefaultModel(os.Getenv("DMCODE_MODEL")),
+		api:       envAPI(),
+		label:     "OpenAI-совместимый",
+		reasoning: os.Getenv("DMCODE_REASONING_EFFORT"),
+	}}, nil
 }
 
 func envAPI() string {
@@ -121,6 +140,9 @@ type setupOption struct {
 	api     string // apiResponses or apiChat
 	// keyless marks options that need no API key at all.
 	keyless bool
+	// reasoning is written as DMCODE_REASONING_EFFORT when the endpoint needs a
+	// capped reasoning channel (see provider.reasoning).
+	reasoning string
 }
 
 // setupOptions is the single list of providers offered by both the interactive
@@ -131,10 +153,11 @@ type setupOption struct {
 // talks to keyless hosts without any key anyway.
 func setupOptions() []setupOption {
 	return []setupOption{
-		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", api: apiChat, keyless: true},
+		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", api: apiChat, keyless: true, reasoning: "low"},
 		{label: "Локально — Ollama (http://127.0.0.1:11434/v1)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", api: apiChat, keyless: true},
 		{label: "Unsloth (локально) — ключ из Settings → API, URL и модель из консоли", signup: "https://unsloth.ai/docs/basics/api", envKey: "OPENAI_API_KEY", api: apiChat},
 		{label: "OpenRouter — бесплатные модели (deepseek и др.)", signup: "https://openrouter.ai/keys", baseURL: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat-v3.1:free", envKey: "OPENAI_API_KEY", api: apiChat},
+		{label: "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)", signup: "https://app.kilo.ai/profile", baseURL: "https://api.kilo.ai/api/gateway", model: "kilo-auto/free", envKey: "KILO_API_KEY", api: apiChat},
 		{label: "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", signup: "https://opencode.ai/auth", baseURL: "https://opencode.ai/zen/v1", model: "nemotron-3-ultra-free", envKey: "OPENCODE_API_KEY", api: apiResponses},
 		{label: "Groq — бесплатно, быстро, tool calling работает", signup: "https://console.groq.com/keys", baseURL: "https://api.groq.com/openai/v1", model: "qwen/qwen3-32b", envKey: "GROQ_API_KEY", api: apiResponses},
 		{label: "Свой OpenAI-совместимый endpoint", envKey: "OPENAI_API_KEY", api: apiChat},
@@ -148,6 +171,9 @@ func setupVars(opt setupOption, key string) map[string]string {
 	if opt.baseURL != "" {
 		vars["OPENAI_BASE_URL"] = opt.baseURL
 		vars["DMCODE_MODEL"] = opt.model
+	}
+	if opt.reasoning != "" {
+		vars["DMCODE_REASONING_EFFORT"] = opt.reasoning
 	}
 	if !opt.keyless && opt.envKey != "" {
 		vars[opt.envKey] = key
@@ -270,6 +296,11 @@ type provider struct {
 	model   string
 	api     string // apiResponses (default) or apiChat
 	label   string // human-readable provider name for the UI
+	// reasoning is the OpenAI `reasoning_effort` to request on the chat wire.
+	// Empty means the field is not sent. Reasoning models spend the output
+	// budget on their analysis channel first, which on endpoints with a modest
+	// cap truncates long tool arguments mid-JSON; "low" prevents that.
+	reasoning string
 }
 
 func (p provider) wire() string {
@@ -279,20 +310,35 @@ func (p provider) wire() string {
 	return p.api
 }
 
-func buildAgent(ctx context.Context, p provider, tools []tool.Tool) (agent.Agent, error) {
-	var m model.LLM
+// buildLLM creates the client for one provider, picking the wire protocol the
+// endpoint actually speaks. Each member of the failover pool gets its own, so a
+// responses-wire provider and a chat-wire one can sit in the same session.
+func buildLLM(ctx context.Context, p provider) (model.LLM, error) {
 	if p.wire() == apiChat {
-		m = newChatModel(p.baseURL, p.apiKey, p.model)
-	} else {
-		om, err := openaimodel.NewModel(ctx, p.model, &openaimodel.ClientConfig{
-			APIKey:  p.apiKey,
-			BaseURL: p.baseURL,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create openai-compatible model: %w", err)
-		}
-		m = om
+		cm := newChatModel(p.baseURL, p.apiKey, p.model)
+		cm.setReasoningEffort(p.reasoning)
+		return cm, nil
 	}
+	om, err := openaimodel.NewModel(ctx, p.model, &openaimodel.ClientConfig{
+		APIKey:  p.apiKey,
+		BaseURL: p.baseURL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create openai-compatible model: %w", err)
+	}
+	return om, nil
+}
+
+func buildAgent(ctx context.Context, p provider, tools []tool.Tool) (agent.Agent, error) {
+	m, err := buildLLM(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	return buildAgentWithModel(m, tools)
+}
+
+// buildAgentWithModel wraps a client — plain or pooled — in the coding agent.
+func buildAgentWithModel(m model.LLM, tools []tool.Tool) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:        "dmcode",
 		Model:       m,
@@ -300,6 +346,16 @@ func buildAgent(ctx context.Context, p provider, tools []tool.Tool) (agent.Agent
 		Instruction: instruction,
 		Tools:       tools,
 	})
+}
+
+// buildPooledAgent builds the agent over a failover pool, so a 429 or a dropped
+// connection on the configured endpoint does not end the turn.
+func buildPooledAgent(ctx context.Context, pool []provider, tools []tool.Tool, onSwitch func(SwitchEvent)) (agent.Agent, error) {
+	m, err := newFailoverModel(ctx, pool, onSwitch)
+	if err != nil {
+		return nil, err
+	}
+	return buildAgentWithModel(m, tools)
 }
 
 func listModels(p provider) ([]string, error) {
@@ -360,7 +416,7 @@ func main() {
 	loadDotEnv()
 	ctx := context.Background()
 
-	p, err := detectProvider()
+	pool, err := detectProviders()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -374,7 +430,10 @@ func main() {
 	for _, t := range tools {
 		toolNames = append(toolNames, t.Name())
 	}
-	if err := runTUI(ctx, p, tools, toolNames); err != nil {
+	// When the user configured an endpoint the pool holds just that one: the
+	// free endpoints join it later, and only if it fails, so a working key
+	// never pays for a probe of candidates it does not need.
+	if err := runTUI(ctx, pool[0], pool, tools, toolNames); err != nil {
 		log.Fatal(err)
 	}
 }

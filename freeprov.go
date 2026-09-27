@@ -26,6 +26,8 @@ type freeCandidate struct {
 	models []string
 	// local candidates are probed first and are preferred when present.
 	local bool
+	// reasoning is the OpenAI `reasoning_effort` to request from this endpoint.
+	reasoning string
 }
 
 // localCandidates covers the OpenAI-compatible servers people run on their own
@@ -51,8 +53,23 @@ var localCandidates = []freeCandidate{
 //
 // openai-fast and openai are aliases of the same anonymous model (GPT-OSS 20B),
 // so listing both would only make the probe try the same thing twice.
+//
+// Other keyless hosts were probed live and rejected, so they do not belong
+// here:
+//   - Kilo (api.kilo.ai/api/gateway): Cloudflare answers 403 to every
+//     unauthenticated request from a non-browser client, models and chat
+//     alike. It is offered by /setup instead, where the free account key
+//     unlocks kilo-auto/free.
+//   - LLM7.io: the documented anonymous token is refused on almost every
+//     model, and the one model that does answer (codestral-latest) ignores
+//     the tools array entirely — a turn would degrade into prose.
+//   - OVHcloud AI Endpoints: /models is open, but chat completions require
+//     an OAuth-issued key, and the anonymous tier is ~2 requests/minute.
 var hostedCandidates = []freeCandidate{
-	{name: "Pollinations (без ключа)", baseURL: "https://text.pollinations.ai/openai", apiKey: "dmcode", models: []string{"openai-fast"}},
+	// reasoning "low" is not a tuning choice but a necessity: GPT-OSS spends
+	// its whole output budget on the analysis channel before the tool call
+	// starts, and the anonymous cap truncates the call's arguments mid-JSON.
+	{name: "Pollinations (без ключа)", baseURL: "https://text.pollinations.ai/openai", apiKey: "dmcode", models: []string{"openai-fast"}, reasoning: "low"},
 }
 
 // preferKeywords rank model ids returned by /v1/models: coding-tuned models
@@ -212,10 +229,12 @@ func probe(cand freeCandidate, timeout time.Duration) (string, bool) {
 	return modelName, true
 }
 
-// discoverFreeProvider looks for a usable free provider, preferring a local
-// server over a hosted keyless one. Probes run concurrently with a short
-// timeout so startup stays fast even when nothing is listening.
-func discoverFreeProvider() (provider, bool) {
+// discoverFreeProviders probes every candidate and returns the working ones in
+// preference order: a local server first, a keyless host after. Every candidate
+// is probed, not just the first that answers — that is the whole point of the
+// pool, since a second reachable endpoint is the difference between a turn that
+// completes and a turn that ends in an error.
+func discoverFreeProviders() []provider {
 	all := append(append([]freeCandidate{}, localCandidates...), hostedCandidates...)
 
 	type result struct {
@@ -242,19 +261,51 @@ func discoverFreeProvider() (provider, bool) {
 	}
 	wg.Wait()
 
-	// Order is preserved, so locals win over hosted when both are available.
+	// Candidate order is preserved, so locals win over hosted when both are
+	// available, and two servers on the same host stay in the order the list
+	// declares rather than the order the network answered in.
+	out := make([]provider, 0, len(results))
 	for _, r := range results {
 		if r.ok {
-			return provider{
-				baseURL: r.cand.baseURL,
-				apiKey:  r.cand.apiKey,
-				model:   r.model,
-				api:     apiChat,
-				label:   r.cand.name,
-			}, true
+			out = append(out, provider{
+				baseURL:   r.cand.baseURL,
+				apiKey:    r.cand.apiKey,
+				model:     r.model,
+				api:       apiChat,
+				label:     r.cand.name,
+				reasoning: r.cand.reasoning,
+			})
 		}
 	}
-	return provider{}, false
+	return out
+}
+
+// discoverFreeProvider is the first working candidate, for callers that want
+// one endpoint and nothing else.
+func discoverFreeProvider() (provider, bool) {
+	all := discoverFreeProviders()
+	if len(all) == 0 {
+		return provider{}, false
+	}
+	return all[0], true
+}
+
+// freeBackups is the lazy half of the failover pool: the endpoints to fall back
+// on once every configured one has failed. It runs the probe inside the failing
+// turn rather than at startup, because a user whose own key works must not wait
+// for a scan of candidates they will never need.
+func freeBackups(ctx context.Context) ([]poolMember, error) {
+	provs := discoverFreeProviders()
+	members := make([]poolMember, 0, len(provs))
+	for _, p := range provs {
+		llm, err := buildLLM(ctx, p)
+		if err != nil {
+			// One unusable endpoint is not a reason to give up on the others.
+			continue
+		}
+		members = append(members, poolMember{prov: p, llm: llm})
+	}
+	return members, nil
 }
 
 // freeProviderHint is shown when nothing was auto-detected, so the user knows

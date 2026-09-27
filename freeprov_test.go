@@ -621,3 +621,39 @@ func TestCandidateModelsAreDistinct(t *testing.T) {
 		}
 	}
 }
+// TestSetupOptionsIncludeKilo pins the Kilo option: it must write the free
+// routing model and its own key variable, and a KILO_API_KEY in the
+// environment must be picked up as a configured provider on the chat wire.
+func TestSetupOptionsIncludeKilo(t *testing.T) {
+	var kilo *setupOption
+	for i := range setupOptions() {
+		if setupOptions()[i].envKey == "KILO_API_KEY" {
+			kilo = &setupOptions()[i]
+		}
+	}
+	if kilo == nil {
+		t.Fatal("no Kilo option in setupOptions")
+	}
+	vars := setupVars(*kilo, "kilo-key")
+	if vars["DMCODE_MODEL"] != "kilo-auto/free" || vars["KILO_API_KEY"] != "kilo-key" || vars["DMCODE_API"] != apiChat {
+		t.Errorf("setupVars for Kilo = %v", vars)
+	}
+	if vars["OPENAI_API_KEY"] != "" {
+		t.Errorf("Kilo must not clobber OPENAI_API_KEY: %v", vars)
+	}
+
+	t.Setenv("KILO_API_KEY", "kilo-key")
+	// The preset scan stops at the first key it finds, so the other preset
+	// variables must be emptied even when the developer's shell carries them.
+	for _, k := range []string{"OPENCODE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
+		t.Setenv(k, "")
+	}
+	provs, err := detectProviders()
+	if err != nil {
+		t.Fatalf("detectProviders: %v", err)
+	}
+	if len(provs) != 1 || provs[0].baseURL != "https://api.kilo.ai/api/gateway" ||
+		provs[0].model != "kilo-auto/free" || provs[0].wire() != apiChat {
+		t.Errorf("KILO_API_KEY did not select the Kilo provider: %+v", provs)
+	}
+}

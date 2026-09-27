@@ -219,6 +219,74 @@ func TestContentsToChatToolLoop(t *testing.T) {
 	}
 }
 
+// TestChatModelTruncatedToolCall covers what Pollinations actually does to a
+// long write_file: the output cap cuts the arguments mid-JSON and the stream
+// still ends cleanly with finish_reason=length. The turn must fail with an
+// error that names the real cause instead of a bare JSON parser complaint.
+func TestChatModelTruncatedToolCall(t *testing.T) {
+	srv := fakeChatServer(t, []string{
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"index.html\",\"content\":\"<html>"}}]}}]}`,
+	}, `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
+
+	m := newChatModel(srv.URL+"/v1", "", "openai-fast")
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "напиши тетрис"}}}},
+	}
+
+	var gotErr error
+	for _, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			gotErr = err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("truncated tool call must fail the turn")
+	}
+	msg := gotErr.Error()
+	if !strings.Contains(msg, "finish_reason=length") {
+		t.Errorf("error must name the token-limit truncation, got %q", msg)
+	}
+	if strings.Contains(msg, "не удалось разобрать") {
+		t.Errorf("truncation must not be reported as a plain parse failure, got %q", msg)
+	}
+}
+
+// TestBuildChatRequestReasoningEffort checks that the configured reasoning
+// level reaches the wire and that an unset one stays off the request entirely,
+// so providers that never heard of the field see no surprises.
+func TestBuildChatRequestReasoningEffort(t *testing.T) {
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "hi"}}}},
+	}
+
+	plain := newChatModel("http://example.invalid/v1", "", "m")
+	body, err := plain.buildChatRequest(req, false)
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "reasoning_effort") {
+		t.Errorf("unset reasoning effort must not be sent, got %s", raw)
+	}
+
+	capped := newChatModel("http://example.invalid/v1", "", "m")
+	capped.setReasoningEffort("low")
+	body, err = capped.buildChatRequest(req, false)
+	if err != nil {
+		t.Fatalf("buildChatRequest: %v", err)
+	}
+	raw, err = json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"reasoning_effort":"low"`) {
+		t.Errorf("reasoning_effort missing from wire body: %s", raw)
+	}
+}
+
 func TestPickModelPrefersConfiguredThenCoding(t *testing.T) {
 	cand := freeCandidate{models: []string{"wanting", "test-coder"}}
 	if got := pickModel(cand, []string{"test-coder", "other"}); got != "test-coder" {

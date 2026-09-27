@@ -128,12 +128,22 @@ type modelsListMsg struct {
 type modelSwitchedMsg struct {
 	name   string
 	runner *runner.Runner
+	pool   []provider
 	err    error
 }
 
 type errMsg string
 
 func (e errMsg) Error() string { return string(e) }
+
+// failoverMsg announces that a turn moved to another endpoint. It is a message
+// rather than a direct history append because the switch happens on the turn
+// goroutine, and only Update may touch the transcript.
+type failoverMsg struct {
+	from   provider
+	to     provider
+	reason string
+}
 
 // toolCheckMsg reports the result of the background tool-calling check. A free
 // endpoint that lists models but cannot call tools makes every turn prose, so
@@ -157,6 +167,11 @@ type uiModel struct {
 	runner    *runner.Runner
 	svc       session.Service
 	prov      provider
+	// pool is every endpoint this session may use, in preference order. prov is
+	// the member currently answering, so a failover updates both and the next
+	// /model switch keeps the reserves instead of dropping back to a single
+	// endpoint.
+	pool      []provider
 	tools     []tool.Tool
 	prog      *tea.Program
 	toolNames []string
@@ -309,6 +324,7 @@ func initialModel(r *runner.Runner, svc session.Service, p provider, tools []too
 		runner:       r,
 		svc:          svc,
 		prov:         p,
+		pool:         []provider{p},
 		tools:        tools,
 		toolNames:    toolNames,
 		showSidebar:  true,
@@ -367,6 +383,40 @@ func (m *uiModel) toolCheckCmd() tea.Cmd {
 		ok, conclusive := verifyTools(p.baseURL, p.apiKey, p.model, toolProbeTimeout)
 		return toolCheckMsg{ok: ok, conclusive: conclusive, model: p.model, label: p.label}
 	}
+}
+
+// handleFailover records that a turn moved to another endpoint. The model and
+// label in the sidebar follow the switch, because after it the reserve is the
+// host actually answering — showing the old one would send /model and /models
+// to an endpoint this session has already walked away from.
+//
+// The pool is rewritten rather than left alone: a member that just failed
+// belongs at the back of the queue, so a later /model switch reuses the same
+// order the failover discovered instead of starting the user back on the host
+// that just failed.
+func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
+	m.prov = msg.to
+	rest := make([]provider, 0, len(m.pool))
+	rest = append(rest, msg.to)
+	for _, p := range m.pool {
+		if p.baseURL == msg.to.baseURL && p.model == msg.to.model {
+			continue
+		}
+		if p.baseURL == msg.from.baseURL && p.model == msg.from.model {
+			continue
+		}
+		rest = append(rest, p)
+	}
+	rest = append(rest, msg.from)
+	m.pool = rest
+	m.statusText = "запасной: " + msg.to.label
+	m.history = append(m.history, line{kindSys, fmt.Sprintf(
+		"⚡ %s недоступен (%s) — ответил %s (%s)",
+		msg.from.label, msg.reason, msg.to.label, msg.to.model)})
+	m.historyDirty = true
+	// The reserve has not been checked for tool calling, and a host that
+	// ignores tools turns every turn into prose.
+	return m.toolCheckCmd()
 }
 
 func (m *uiModel) lastAgentText() string {
@@ -579,6 +629,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.prov.model = msg.name
 			m.runner = msg.runner
+			if len(msg.pool) > 0 {
+				m.pool = msg.pool
+			}
 			// Preserve m.sessionID so conversation context is retained!
 			m.history = append(m.history, line{kindSys, "модель активирована: " + msg.name + " (контекст сохранён)"})
 			// A different model may or may not support tools, so check again.
@@ -609,6 +662,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyDirty = true
 	case toolCheckMsg:
 		m.handleToolCheck(msg)
+	case failoverMsg:
+		extra = m.handleFailover(msg)
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
@@ -1068,10 +1123,11 @@ func (m *uiModel) applySetup() tea.Cmd {
 	}
 
 	p := provider{
-		baseURL: vars["OPENAI_BASE_URL"],
-		model:   orDefaultModel(vars["DMCODE_MODEL"]),
-		api:     opt.api,
-		label:   setupLabel(opt),
+		baseURL:   vars["OPENAI_BASE_URL"],
+		model:     orDefaultModel(vars["DMCODE_MODEL"]),
+		api:       opt.api,
+		label:     setupLabel(opt),
+		reasoning: vars["DMCODE_REASONING_EFFORT"],
 	}
 	if !opt.keyless {
 		p.apiKey = vars[opt.envKey]
@@ -1250,13 +1306,32 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 	}
 }
 
+// switchModelCmd rebuilds the agent on a different model of the current
+// provider. The pool travels with it: the user picked a model, not a single
+// endpoint, and silently dropping the reserves would leave a later 429 with
+// nowhere to go.
 func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	p := m.prov
 	p.model = id
+	// Retain this session's ordering: active host first, the one that just
+	// failed last. The pool member being edited is the one currently answering.
+	pool := make([]provider, 0, len(m.pool))
+	edited := false
+	for _, member := range m.pool {
+		if !edited && member.baseURL == p.baseURL && member.apiKey == p.apiKey {
+			pool = append(pool, p)
+			edited = true
+			continue
+		}
+		pool = append(pool, member)
+	}
+	if !edited {
+		pool = append([]provider{p}, pool...)
+	}
 	svc, tools := m.svc, m.tools
 	return func() tea.Msg {
 		ctx := context.Background()
-		a, err := buildAgent(ctx, p, tools)
+		a, err := buildPooledAgent(ctx, pool, tools, m.switchNotifier())
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -1269,7 +1344,20 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
-		return modelSwitchedMsg{name: id, runner: r}
+		return modelSwitchedMsg{name: id, runner: r, pool: pool}
+	}
+}
+
+// switchNotifier hands a failover to the event loop. It is nil-safe: a switch
+// can only happen once a turn is running, and a program that is not up yet
+// cannot have one.
+func (m *uiModel) switchNotifier() func(SwitchEvent) {
+	prog := m.prog
+	return func(ev SwitchEvent) {
+		if prog == nil {
+			return
+		}
+		prog.Send(failoverMsg{from: ev.From, to: ev.To, reason: ev.Reason})
 	}
 }
 
@@ -1762,8 +1850,20 @@ func (m *uiModel) View() tea.View {
 	return v
 }
 
-func runTUI(ctx context.Context, p provider, tools []tool.Tool, toolNames []string) error {
-	a, err := buildAgent(ctx, p, tools)
+func runTUI(ctx context.Context, p provider, pool []provider, tools []tool.Tool, toolNames []string) error {
+	if len(pool) == 0 {
+		pool = []provider{p}
+	}
+	// The notifier needs the program, which needs the model, which needs the
+	// agent: the program is wired in afterwards, and a failover cannot happen
+	// before the first turn anyway.
+	m := initialModel(nil, nil, p, tools, toolNames)
+	m.pool = pool
+
+	prog := tea.NewProgram(m)
+	m.prog = prog
+
+	a, err := buildPooledAgent(ctx, pool, tools, m.switchNotifier())
 	if err != nil {
 		return err
 	}
@@ -1777,9 +1877,9 @@ func runTUI(ctx context.Context, p provider, tools []tool.Tool, toolNames []stri
 	if err != nil {
 		return err
 	}
-	m := initialModel(r, svc, p, tools, toolNames)
-	prog := tea.NewProgram(m)
-	m.prog = prog
+	m.runner = r
+	m.svc = svc
+
 	_, err = prog.Run()
 	return err
 }

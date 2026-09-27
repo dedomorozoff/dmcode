@@ -83,3 +83,57 @@ func TestLiveKeylessToolCall(t *testing.T) {
 	}
 	t.Logf("tool call: %s id=%s args=%v", call.Name, call.ID, call.Args)
 }
+
+// TestLiveKeylessBigToolCall replays the failure that started it all: a
+// write_file large enough that a capped endpoint truncates it. With the
+// reasoning effort held low the call must arrive complete and parseable.
+func TestLiveKeylessBigToolCall(t *testing.T) {
+	if os.Getenv("DMCODE_LIVE") != "1" {
+		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
+	}
+	m := newChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+	m.setReasoningEffort("low")
+	req := &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
+			{Text: "Вызови write_file: путь index.html, содержимое — классический тетрис на JS (HTML+CSS+JS, не менее 100 строк). Ничего кроме вызова инструмента."},
+		}}},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name:        "write_file",
+				Description: "Записать файл",
+				Parameters: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"path":    {Type: genai.TypeString},
+						"content": {Type: genai.TypeString},
+					},
+					Required: []string{"path", "content"},
+				},
+			}}}},
+		},
+	}
+
+	var final *model.LLMResponse
+	for resp, err := range m.GenerateContent(context.Background(), req, true) {
+		if err != nil {
+			t.Fatalf("live big tool stream failed: %v", err)
+		}
+		if !resp.Partial {
+			final = resp
+		}
+	}
+	if final == nil {
+		t.Fatal("no final event from live endpoint")
+	}
+	for _, p := range final.Content.Parts {
+		if p.FunctionCall != nil && p.FunctionCall.Name == "write_file" {
+			content, _ := p.FunctionCall.Args["content"].(string)
+			t.Logf("write_file content length: %d", len(content))
+			if len(content) < 1000 {
+				t.Errorf("write_file content suspiciously short: %d chars", len(content))
+			}
+			return
+		}
+	}
+	t.Fatalf("no write_file call in final parts: %+v", final.Content.Parts)
+}

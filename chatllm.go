@@ -173,7 +173,10 @@ func singleErrorSequence(err error) iter.Seq2[*model.LLMResponse, error] {
 // toolCallsToParts renders accumulated tool calls as genai parts. Arguments
 // that are not valid JSON objects are reported rather than silently dropped, so
 // a malformed call surfaces as a turn error instead of an empty function call.
-func toolCallsToParts(calls []chatToolCall) ([]*genai.Part, error) {
+// When the model ran out of output tokens the arguments are not malformed but
+// cut short, and the error has to say that: "unexpected end of JSON input"
+// alone sends the user hunting for a bug in dmcode that is not there.
+func toolCallsToParts(calls []chatToolCall, finish string) ([]*genai.Part, error) {
 	var parts []*genai.Part
 	for _, tc := range calls {
 		if tc.Function.Name == "" {
@@ -185,6 +188,9 @@ func toolCallsToParts(calls []chatToolCall) ([]*genai.Part, error) {
 		}
 		var args map[string]any
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			if finish == "length" {
+				return nil, fmt.Errorf("dmcode: вызов %s дошёл не целиком — модель упёрлась в лимит вывода (finish_reason=length): %w", tc.Function.Name, err)
+			}
 			return nil, fmt.Errorf("dmcode: не удалось разобрать аргументы вызова %s: %w", tc.Function.Name, err)
 		}
 		if args == nil {
@@ -206,6 +212,11 @@ type chatModel struct {
 	apiKey  string
 	name    string
 	client  *http.Client
+	// reasoningEffort is sent as the OpenAI `reasoning_effort` field when set.
+	// Reasoning models burn the output budget on their analysis channel before
+	// the tool call starts, which on a capped endpoint truncates the call's
+	// arguments mid-JSON; "low" keeps that channel short.
+	reasoningEffort string
 }
 
 func newChatModel(baseURL, apiKey, name string) *chatModel {
@@ -215,6 +226,13 @@ func newChatModel(baseURL, apiKey, name string) *chatModel {
 		name:    name,
 		client:  &http.Client{Timeout: 0},
 	}
+}
+
+// setReasoningEffort pins the reasoning level for this endpoint. Servers that
+// do not know the field drop it silently, so it is only ever set where it has
+// been seen to work.
+func (m *chatModel) setReasoningEffort(e string) {
+	m.reasoningEffort = e
 }
 
 func (m *chatModel) Name() string { return m.name }
@@ -244,7 +262,7 @@ func (m *chatModel) buildChatRequest(req *model.LLMRequest, stream bool) (chatRe
 	if len(msgs) == 0 {
 		return chatRequest{}, fmt.Errorf("dmcode: в запросе нет ни одного сообщения")
 	}
-	out := chatRequest{Model: name, Messages: msgs, Stream: stream}
+	out := chatRequest{Model: name, Messages: msgs, Stream: stream, ReasoningEffort: m.reasoningEffort}
 	if cfg := req.Config; cfg != nil {
 		if cfg.Temperature != nil {
 			t := float32(*cfg.Temperature)
@@ -279,6 +297,59 @@ func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Resp
 	return m.client.Do(req)
 }
 
+// Why a call failed, in the terms the failover layer needs. The rendered
+// message alone cannot tell a rate limit from a malformed request, and the two
+// demand opposite reactions: the first is worth retrying on another host, the
+// second would fail identically everywhere.
+const (
+	failTransport = "transport" // never reached the server
+	failHTTP      = "http"      // the server answered with a non-2xx status
+	failStream    = "stream"    // an error frame arrived mid-response
+)
+
+// providerError is a failed call to one endpoint, tagged with enough structure
+// to tell a transient failure from a request the provider will never accept.
+// The message is exactly what the previous plain error produced, so nothing
+// user-visible changes; the type only adds what the classifier needs.
+type providerError struct {
+	err    error
+	status int    // HTTP status, 0 when the failure was not a status reply
+	reason string // failTransport, failHTTP or failStream
+}
+
+func (e *providerError) Error() string { return e.err.Error() }
+func (e *providerError) Unwrap() error { return e.err }
+
+// retryable reports whether another endpoint in the pool stands a chance of
+// serving the same request.
+//
+// The conservative default is yes. Anything that is not clearly about the
+// request itself — a 429, a 5xx, a 404 for a model this host does not carry, a
+// dropped connection — is a property of the endpoint, not of the conversation,
+// and the pool exists precisely to route around it.
+//
+// The exceptions are the statuses that mean the payload itself is wrong: a
+// rejected tool schema or an oversized prompt produces them on every host, so
+// walking the pool would only multiply the latency of a failure that is already
+// decided.
+func (e *providerError) retryable() bool {
+	if e.reason == failHTTP {
+		switch e.status {
+		case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+			return false
+		}
+	}
+	return true
+}
+
+// transportError reports an endpoint that could not be reached at all.
+func transportError(baseURL string, err error) error {
+	return &providerError{
+		err:    fmt.Errorf("dmcode: %s: %w", baseURL, err),
+		reason: failTransport,
+	}
+}
+
 // httpError renders a non-2xx reply, including the server's own JSON message,
 // because the bare status ("500 Internal Server Error") rarely says anything
 // actionable.
@@ -290,9 +361,17 @@ func httpError(op string, resp *http.Response) error {
 		if json.Unmarshal(snippet, &e) == nil && e.Error != nil && e.Error.Message != "" {
 			msg = e.Error.Message
 		}
-		return fmt.Errorf("%s: %s: %s", op, resp.Status, truncate(msg, 200))
+		return &providerError{
+			err:    fmt.Errorf("%s: %s: %s", op, resp.Status, truncate(msg, 200)),
+			status: resp.StatusCode,
+			reason: failHTTP,
+		}
 	}
-	return fmt.Errorf("%s: %s", op, resp.Status)
+	return &providerError{
+		err:    fmt.Errorf("%s: %s", op, resp.Status),
+		status: resp.StatusCode,
+		reason: failHTTP,
+	}
 }
 
 // toolCallBuffer accumulates streamed tool calls. The chat API splits one call
@@ -356,7 +435,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp, err := m.doRequest(ctx, body)
 		if err != nil {
-			yield(nil, fmt.Errorf("dmcode: %s: %w", m.baseURL, err))
+			yield(nil, transportError(m.baseURL, err))
 			return
 		}
 		defer resp.Body.Close()
@@ -373,7 +452,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 		// The turn is closed with one aggregated non-partial event, which is
 		// what the ADK runner requires to persist the turn and dispatch tools.
 		defer func() {
-			parts, err := toolCallsToParts(calls.snapshot())
+			parts, err := toolCallsToParts(calls.snapshot(), finish)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -408,7 +487,10 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 				continue
 			}
 			if chunk.Error != nil && chunk.Error.Message != "" {
-				yield(nil, fmt.Errorf("%s: %s", m.baseURL, chunk.Error.Message))
+				yield(nil, &providerError{
+					err:    fmt.Errorf("%s: %s", m.baseURL, chunk.Error.Message),
+					reason: failStream,
+				})
 				return
 			}
 			if chunk.Model != "" {
@@ -450,7 +532,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 			if ctx.Err() != nil {
 				return
 			}
-			yield(nil, fmt.Errorf("dmcode: обрыв потока от %s: %w", m.baseURL, err))
+			yield(nil, transportError(m.baseURL, fmt.Errorf("обрыв потока: %w", err)))
 		}
 	}
 }
@@ -473,7 +555,7 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 	return func(yield func(*model.LLMResponse, error) bool) {
 		resp, err := m.doRequest(ctx, body)
 		if err != nil {
-			yield(nil, fmt.Errorf("dmcode: %s: %w", m.baseURL, err))
+			yield(nil, transportError(m.baseURL, err))
 			return
 		}
 		defer resp.Body.Close()
@@ -495,15 +577,15 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 			return
 		}
 		ch := parsed.Choices[0]
-		parts, err := toolCallsToParts(ch.Message.ToolCalls)
+		chunks, err := toolCallsToParts(ch.Message.ToolCalls, ch.FinishReason)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 		if ch.Message.Content != "" {
-			parts = append([]*genai.Part{{Text: ch.Message.Content}}, parts...)
+			chunks = append([]*genai.Part{{Text: ch.Message.Content}}, chunks...)
 		}
-		if len(parts) == 0 {
+		if len(chunks) == 0 {
 			// A model that answered only with reasoning still completed a turn.
 			yield(&model.LLMResponse{
 				Content:      &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{}},
@@ -513,7 +595,7 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 			return
 		}
 		yield(&model.LLMResponse{
-			Content:       &genai.Content{Role: genai.RoleModel, Parts: parts},
+			Content:       &genai.Content{Role: genai.RoleModel, Parts: chunks},
 			FinishReason:  chatFinishReason(ch.FinishReason),
 			UsageMetadata: usageToGenai(parsed.Usage),
 			ModelVersion:  parsed.Model,
@@ -553,6 +635,7 @@ type chatRequest struct {
 	Messages        []chatMessage `json:"messages"`
 	Tools           []chatTool    `json:"tools,omitempty"`
 	Stream          bool          `json:"stream,omitempty"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 	Temperature     *float32      `json:"temperature,omitempty"`
 	MaxOutputTokens int           `json:"max_tokens,omitempty"`
 }
