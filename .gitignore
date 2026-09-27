@@ -1,0 +1,7 @@
+# Local secrets. .env.example is the tracked template.
+.env
+
+# Build output: 53 MB of binary per build is not something to keep in history.
+dmcode.exe
+dmcode
+dmcode.exe~
