@@ -1,0 +1,548 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+)
+
+const maxReadBytes = 256 * 1024
+const maxWalkFiles = 2000
+
+type readFileArgs struct {
+	Path   string `json:"path"`
+	Offset int    `json:"offset_line"`
+	Limit  int    `json:"limit_lines"`
+}
+type readFileResult struct {
+	Content    string `json:"content"`
+	TotalLines int    `json:"total_lines"`
+	Truncated  bool   `json:"truncated"`
+}
+
+func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
+	data, err := os.ReadFile(in.Path)
+	if err != nil {
+		return readFileResult{}, err
+	}
+	if len(data) > maxReadBytes {
+		data = data[:maxReadBytes]
+	}
+	lines := strings.Split(string(data), "\n")
+	total := len(lines)
+	start := max(in.Offset, 0)
+	if start >= total {
+		return readFileResult{Content: "", TotalLines: total}, nil
+	}
+	end := total
+	trunc := false
+	if in.Limit > 0 && start+in.Limit < total {
+		end = start + in.Limit
+		trunc = true
+	}
+	if len(data) == maxReadBytes {
+		trunc = true
+	}
+	return readFileResult{
+		Content:    strings.Join(lines[start:end], "\n"),
+		TotalLines: total,
+		Truncated:  trunc,
+	}, nil
+}
+
+type writeFileArgs struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+type writeFileResult struct {
+	BytesWritten int `json:"bytes_written"`
+}
+
+func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
+	if dir := filepath.Dir(in.Path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return writeFileResult{}, err
+		}
+	}
+	if err := os.WriteFile(in.Path, []byte(in.Content), 0o644); err != nil {
+		return writeFileResult{}, err
+	}
+	return writeFileResult{BytesWritten: len(in.Content)}, nil
+}
+
+type editFileArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string"`
+	NewString  string `json:"new_string"`
+	ReplaceAll bool   `json:"replace_all"`
+}
+type editFileResult struct {
+	Replacements int `json:"replacements"`
+}
+
+func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
+	data, err := os.ReadFile(in.Path)
+	if err != nil {
+		return editFileResult{}, err
+	}
+	src := string(data)
+	if in.OldString == "" {
+		return editFileResult{}, fmt.Errorf("old_string is empty")
+	}
+
+	// 1. Try exact match
+	if in.ReplaceAll {
+		n := strings.Count(src, in.OldString)
+		if n > 0 {
+			src = strings.ReplaceAll(src, in.OldString, in.NewString)
+			if err := os.WriteFile(in.Path, []byte(src), 0o644); err != nil {
+				return editFileResult{}, err
+			}
+			return editFileResult{Replacements: n}, nil
+		}
+	} else {
+		idx := strings.Index(src, in.OldString)
+		if idx >= 0 {
+			if strings.Index(src[idx+1:], in.OldString) >= 0 {
+				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+			}
+			src = src[:idx] + in.NewString + src[idx+len(in.OldString):]
+			if err := os.WriteFile(in.Path, []byte(src), 0o644); err != nil {
+				return editFileResult{}, err
+			}
+			return editFileResult{Replacements: 1}, nil
+		}
+	}
+
+	// 2. Fallback: normalize newlines (\r\n <-> \n) for Windows/Unix compatibility
+	hasCRLF := strings.Contains(src, "\r\n")
+	normSrc := strings.ReplaceAll(src, "\r\n", "\n")
+	normOld := strings.ReplaceAll(in.OldString, "\r\n", "\n")
+	normNew := strings.ReplaceAll(in.NewString, "\r\n", "\n")
+
+	if in.ReplaceAll {
+		n := strings.Count(normSrc, normOld)
+		if n > 0 {
+			normSrc = strings.ReplaceAll(normSrc, normOld, normNew)
+			if hasCRLF {
+				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
+			}
+			if err := os.WriteFile(in.Path, []byte(normSrc), 0o644); err != nil {
+				return editFileResult{}, err
+			}
+			return editFileResult{Replacements: n}, nil
+		}
+	} else {
+		idx := strings.Index(normSrc, normOld)
+		if idx >= 0 {
+			if strings.Index(normSrc[idx+1:], normOld) >= 0 {
+				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+			}
+			normSrc = normSrc[:idx] + normNew + normSrc[idx+len(normOld):]
+			if hasCRLF {
+				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
+			}
+			if err := os.WriteFile(in.Path, []byte(normSrc), 0o644); err != nil {
+				return editFileResult{}, err
+			}
+			return editFileResult{Replacements: 1}, nil
+		}
+	}
+
+	return editFileResult{}, fmt.Errorf("old_string not found in %s", in.Path)
+}
+
+// isIgnoredDir returns true if directory should be skipped (VCS / vendor / caches).
+func isIgnoredDir(name string) bool {
+	switch name {
+	case ".git", ".crush", ".hg", ".svn", "node_modules", ".idea", ".vscode", "vendor":
+		return true
+	default:
+		return false
+	}
+}
+
+type listDirArgs struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive"`
+}
+type listDirResult struct {
+	Entries string `json:"entries"`
+}
+
+func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
+	dir := in.Path
+	if dir == "" {
+		dir = "."
+	}
+	var b strings.Builder
+	if !in.Recursive {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return listDirResult{}, err
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].IsDir() != entries[j].IsDir() {
+				return entries[i].IsDir()
+			}
+			return entries[i].Name() < entries[j].Name()
+		})
+		for _, e := range entries {
+			if e.IsDir() && isIgnoredDir(e.Name()) {
+				continue
+			}
+			if e.IsDir() {
+				b.WriteString(e.Name() + "/\n")
+			} else {
+				b.WriteString(e.Name() + "\n")
+			}
+		}
+		return listDirResult{Entries: b.String()}, nil
+	}
+	count := 0
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if isIgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		count++
+		if count > maxWalkFiles {
+			b.WriteString("... (truncated)\n")
+			return filepath.SkipAll
+		}
+		b.WriteString(filepath.ToSlash(path) + "\n")
+		return nil
+	})
+	if err != nil {
+		return listDirResult{}, err
+	}
+	return listDirResult{Entries: b.String()}, nil
+}
+
+type grepArgs struct {
+	Pattern string `json:"pattern"`
+	Path    string `json:"path"`
+	Glob    string `json:"glob"`
+}
+type grepResult struct {
+	Matches string `json:"matches"`
+}
+
+func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
+	re, err := regexp.Compile(in.Pattern)
+	if err != nil {
+		return grepResult{}, fmt.Errorf("invalid regex: %w", err)
+	}
+	root := in.Path
+	if root == "" {
+		root = "."
+	}
+	var fileFilter *regexp.Regexp
+	if in.Glob != "" {
+		if fileFilter, err = regexp.Compile(globToRegex(in.Glob)); err != nil {
+			return grepResult{}, fmt.Errorf("invalid glob: %w", err)
+		}
+	}
+	var b strings.Builder
+	count := 0
+	skip := false
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if skip {
+			return filepath.SkipAll
+		}
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if isIgnoredDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if fileFilter != nil && !fileFilter.MatchString(d.Name()) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil || len(data) > maxReadBytes {
+			return nil
+		}
+		if strings.ContainsRune(string(data[:min(4096, len(data))]), 0) {
+			return nil
+		}
+		for i, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			if re.MatchString(line) {
+				count++
+				b.WriteString(fmt.Sprintf("%s:%d: %s\n", filepath.ToSlash(path), i+1, truncate(line, 200)))
+				if count >= 200 {
+					b.WriteString("... (more matches truncated)\n")
+					skip = true
+					return filepath.SkipAll
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return grepResult{}, err
+	}
+	return grepResult{Matches: b.String()}, nil
+}
+
+func globToRegex(g string) string {
+	var b strings.Builder
+	b.WriteString("^")
+	// Normalize slashes
+	g = strings.ReplaceAll(g, "\\", "/")
+	runes := []rune(g)
+	n := len(runes)
+	for i := 0; i < n; i++ {
+		// Handle "/**/"
+		if i+3 < n && runes[i] == '/' && runes[i+1] == '*' && runes[i+2] == '*' && runes[i+3] == '/' {
+			b.WriteString("(?:/|/.*/)")
+			i += 3
+			continue
+		}
+		// Handle leading "**/"
+		if i == 0 && i+2 < n && runes[0] == '*' && runes[1] == '*' && runes[2] == '/' {
+			b.WriteString("(?:.*/)?")
+			i += 2
+			continue
+		}
+		// Handle trailing "/**"
+		if i+2 < n && runes[i] == '/' && runes[i+1] == '*' && runes[i+2] == '*' && i+3 == n {
+			b.WriteString("(?:/.*)?")
+			i += 2
+			continue
+		}
+		// Handle standalone "**"
+		if i+1 < n && runes[i] == '*' && runes[i+1] == '*' {
+			b.WriteString(".*")
+			i++
+			continue
+		}
+		// Handle standalone "*"
+		if runes[i] == '*' {
+			b.WriteString("[^/\\\\]*")
+			continue
+		}
+		if runes[i] == '?' {
+			b.WriteString("[^/\\\\]")
+			continue
+		}
+		switch runes[i] {
+		case '.', '(', ')', '[', ']', '{', '}', '^', '$', '+', '|', '\\':
+			b.WriteString("\\" + string(runes[i]))
+		case '/':
+			b.WriteString("[/\\\\]")
+		default:
+			b.WriteRune(runes[i])
+		}
+	}
+	b.WriteString("$")
+	return b.String()
+}
+
+type globArgs struct {
+	Pattern string `json:"pattern"`
+}
+type globResult struct {
+	Files string `json:"files"`
+}
+
+func glob(ctx agent.Context, in globArgs) (globResult, error) {
+	pattern := in.Pattern
+	// If pattern contains ** or path separators, perform recursive walk matching
+	if strings.Contains(pattern, "**") || strings.Contains(pattern, "/") || strings.Contains(pattern, "\\") {
+		rePattern, err := regexp.Compile(globToRegex(filepath.ToSlash(pattern)))
+		if err != nil {
+			return globResult{}, fmt.Errorf("invalid glob pattern: %w", err)
+		}
+		var matches []string
+		err = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if isIgnoredDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			slashPath := filepath.ToSlash(path)
+			trimmed := strings.TrimPrefix(slashPath, "./")
+			if rePattern.MatchString(slashPath) || rePattern.MatchString(trimmed) {
+				matches = append(matches, slashPath)
+			}
+			return nil
+		})
+		if err != nil {
+			return globResult{}, err
+		}
+		sort.Strings(matches)
+		if len(matches) > maxWalkFiles {
+			matches = append(matches[:maxWalkFiles], "... (truncated)")
+		}
+		return globResult{Files: strings.Join(matches, "\n")}, nil
+	}
+
+	matches, err := filepath.Glob(in.Pattern)
+	if err != nil {
+		return globResult{}, err
+	}
+	sort.Strings(matches)
+	if len(matches) > maxWalkFiles {
+		matches = append(matches[:maxWalkFiles], "... (truncated)")
+	}
+	return globResult{Files: strings.Join(matches, "\n")}, nil
+}
+
+func detectShell() (string, []string) {
+	if runtime.GOOS == "windows" {
+		// Prefer pwsh (PowerShell 7) if installed
+		if p, err := exec.LookPath("pwsh"); err == nil {
+			return p, []string{"-NoProfile", "-NonInteractive", "-Command"}
+		}
+		// Check for Git Bash or Cygwin bash explicitly
+		for _, bashPath := range []string{
+			`C:\Program Files\Git\bin\bash.exe`,
+			`C:\cygwin64\bin\bash.exe`,
+			`C:\msys64\usr\bin\bash.exe`,
+		} {
+			if _, err := os.Stat(bashPath); err == nil {
+				return bashPath, []string{"-c"}
+			}
+		}
+		// Fallback to Windows PowerShell
+		if p, err := exec.LookPath("powershell"); err == nil {
+			return p, []string{"-NoProfile", "-NonInteractive", "-Command"}
+		}
+		return "cmd.exe", []string{"/C"}
+	}
+
+	// Unix / POSIX
+	if s := os.Getenv("SHELL"); s != "" {
+		return s, []string{"-c"}
+	}
+	if _, err := os.Stat("/bin/sh"); err == nil {
+		return "/bin/sh", []string{"-c"}
+	}
+	return "sh", []string{"-c"}
+}
+
+type runCommandArgs struct {
+	Command  string `json:"command"`
+	WorkDir  string `json:"work_dir"`
+	TimeoutS int    `json:"timeout_seconds"`
+}
+type runCommandResult struct {
+	Output string `json:"output"`
+}
+
+func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) {
+	timeout := time.Duration(in.TimeoutS) * time.Second
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	if timeout > 10*time.Minute {
+		timeout = 10 * time.Minute
+	}
+	workDir := in.WorkDir
+	if workDir == "" {
+		workDir = "."
+	}
+	shell, flags := detectShell()
+
+	parentCtx := context.Background()
+	if ctx != nil {
+		parentCtx = ctx
+	}
+	cmdCtx, cancel := context.WithTimeout(parentCtx, timeout)
+	defer cancel()
+
+	args := append(append([]string{}, flags...), in.Command)
+	cmd := exec.CommandContext(cmdCtx, shell, args...)
+	cmd.Dir = workDir
+	out, err := cmd.CombinedOutput()
+	result := runCommandResult{Output: truncate(string(out), 20000)}
+	if cmdCtx.Err() != nil {
+		if parentCtx.Err() != nil {
+			result.Output += "\n[command cancelled by user]"
+			return result, nil
+		}
+		result.Output += fmt.Sprintf("\n[command timed out after %s]", timeout)
+		return result, nil
+	}
+	if err != nil {
+		result.Output += fmt.Sprintf("\n[command failed: %v]", err)
+	}
+	return result, nil
+}
+
+func makeTools() ([]tool.Tool, error) {
+	readFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "read_file",
+		Description: "Reads a file. Optional offset_line and limit_lines for large files. Returns content, total line count and whether it was truncated.",
+	}, readFile)
+	if err != nil {
+		return nil, err
+	}
+	writeFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "write_file",
+		Description: "Creates or overwrites a file with the given content. Creates parent directories.",
+	}, writeFile)
+	if err != nil {
+		return nil, err
+	}
+	editFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "edit_file",
+		Description: "Replaces exact old_string with new_string in a file. old_string must be unique unless replace_all is true; otherwise returns an error.",
+	}, editFile)
+	if err != nil {
+		return nil, err
+	}
+	listDirTool, err := functiontool.New(functiontool.Config{
+		Name:        "list_dir",
+		Description: "Lists directory entries, skipping hidden files. Set recursive=true to walk the tree.",
+	}, listDir)
+	if err != nil {
+		return nil, err
+	}
+	grepTool, err := functiontool.New(functiontool.Config{
+		Name:        "grep",
+		Description: "Regex search across files under path (default cwd). Optional filename glob filter like '*.go'. Returns path:line: match.",
+	}, grep)
+	if err != nil {
+		return nil, err
+	}
+	globTool2, err := functiontool.New(functiontool.Config{
+		Name:        "glob",
+		Description: "Lists files matching a shell glob pattern like 'src/*.go' or '*.md'.",
+	}, glob)
+	if err != nil {
+		return nil, err
+	}
+	runCommandTool, err := functiontool.New(functiontool.Config{
+		Name:        "run_command",
+		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600.",
+	}, runCommand)
+	if err != nil {
+		return nil, err
+	}
+	return []tool.Tool{readFileTool, writeFileTool, editFileTool, listDirTool, grepTool, globTool2, runCommandTool}, nil
+}
