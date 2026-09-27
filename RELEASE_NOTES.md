@@ -46,6 +46,13 @@ go install github.com/dedomorozoff/dmcode@latest
   `/setup`, the command palette and the model picker. Pasted text is collapsed
   to a single line, so a key copied from a web page no longer lands in `.env`
   with a trailing newline and silently fails to load on the next start.
+- **The setup wizard checks your key before saving it.** Picking a provider and
+  pasting a key used to save the pair and report success straight away, with no
+  check that the endpoint accepted the key. A key belonging to a different
+  provider therefore looked configured until your first message failed with a
+  401 — by which point the working `OPENAI_API_KEY` had already been
+  overwritten. The key is now verified first; on rejection `.env` is left
+  untouched, the transcript says so, and the wizard offers a retry.
 - **README in English**, covering install, the tools, the hotkeys and the
   language setting.
 
