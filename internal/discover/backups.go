@@ -3,7 +3,7 @@ package discover
 import (
 	"context"
 
-	"dmcode/internal/llm"
+	"github.com/dedomorozoff/dmcode/internal/llm"
 )
 
 // FreeBackups is the lazy half of the failover pool: the endpoints to fall back

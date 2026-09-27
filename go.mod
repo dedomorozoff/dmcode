@@ -1,4 +1,4 @@
-module dmcode
+module github.com/dedomorozoff/dmcode
 
 go 1.26.6
 

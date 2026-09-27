@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // An explicit endpoint needs no key: keyless hosts and a local Ollama have none,

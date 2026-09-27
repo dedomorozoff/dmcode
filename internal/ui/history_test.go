@@ -10,7 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // withTempHistory points DMCODE_HISTORY_PATH at a scratch file for the test.

@@ -5,3 +5,10 @@
 dmcode.exe
 dmcode
 dmcode.exe~
+
+# make output: cross-compiled binaries and packages.
+dist/
+
+# IDE settings.
+.idea/
+.kilo/

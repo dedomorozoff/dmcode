@@ -9,7 +9,7 @@ import (
 
 	"google.golang.org/adk/v2/model"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // PoolMember is one endpoint in the failover pool: the provider it stands for

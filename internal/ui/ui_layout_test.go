@@ -8,7 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // lipgloss counts a style's Width/Height as the total block size with borders

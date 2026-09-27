@@ -10,9 +10,9 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/tool"
 
-	"dmcode/internal/config"
-	"dmcode/internal/discover"
-	"dmcode/internal/llm"
+	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/llm"
 )
 
 const instruction = `You are dmcode, an autonomous terminal-based AI coding assistant working directly on the user's filesystem.

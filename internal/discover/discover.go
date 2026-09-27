@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // freeCandidate is a provider dmcode can use without the user configuring

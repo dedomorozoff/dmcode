@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // The hint text used to point at a command that did not exist. Whatever it

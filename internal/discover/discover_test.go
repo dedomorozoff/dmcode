@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 func TestPickModelPrefersConfiguredThenCoding(t *testing.T) {

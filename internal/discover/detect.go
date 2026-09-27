@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // detectProvider is the single-endpoint view of detectProviders, kept for

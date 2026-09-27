@@ -17,9 +17,9 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/x/ansi"
 
-	dmagent "dmcode/internal/agent"
-	"dmcode/internal/config"
-	"dmcode/internal/llm"
+	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
+	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/llm"
 
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"

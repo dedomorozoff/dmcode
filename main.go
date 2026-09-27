@@ -9,26 +9,44 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log"
 
-	"dmcode/internal/config"
-	"dmcode/internal/discover"
-	"dmcode/internal/tools"
-	"dmcode/internal/ui"
+	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/tools"
+	"github.com/dedomorozoff/dmcode/internal/ui"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=..." (see the
+// Makefile). Release tags set it; a plain "go build" leaves it as "dev".
+var version = "dev"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the dmcode version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println("dmcode", version)
+		return
+	}
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	config.LoadDotEnv()
 	ctx := context.Background()
 
 	pool, err := discover.DetectProviders()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	agentTools, err := tools.MakeTools()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	var toolNames []string
@@ -38,7 +56,5 @@ func main() {
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	if err := ui.RunTUI(ctx, pool[0], pool, agentTools, toolNames); err != nil {
-		log.Fatal(err)
-	}
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, toolNames)
 }
