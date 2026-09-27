@@ -30,6 +30,13 @@ type freeCandidate struct {
 
 // localCandidates covers the OpenAI-compatible servers people run on their own
 // machine. Ports are the documented defaults for each project.
+//
+// Unsloth is deliberately absent. It does speak OpenAI at /v1/chat/completions,
+// but it rejects every unauthenticated request, and it does not listen on a
+// fixed port — `unsloth run` prints whatever it bound, and GET /v1/models only
+// answers with a bearer key. A candidate here is probed with no key, so an entry
+// could never succeed; it is offered by /setup instead, where the user pastes
+// the URL, model and sk-unsloth-… key their own instance printed.
 var localCandidates = []freeCandidate{
 	{name: "Ollama", baseURL: "http://127.0.0.1:11434/v1", models: []string{"qwen2.5-coder:7b", "qwen3-coder:30b", "llama3.1:8b"}, local: true},
 	{name: "LM Studio", baseURL: "http://127.0.0.1:1234/v1", local: true},

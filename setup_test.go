@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // setupKeys drives the model the way the real event loop does, through the
@@ -180,6 +181,36 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 	// The overlay is gone, so the box is not a place to look any more either.
 	if strings.Contains(m.View().Content, secret) {
 		t.Error("the key is still on screen after the wizard closed")
+	}
+}
+
+// Every option has to be readable in the overlay at the sizes people actually
+// use. A long label that gets cut off is an option that does not exist.
+func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
+	m := initialModel(nil, nil, provider{label: "old", model: "old-model", api: apiChat}, nil, nil)
+	m.history = nil
+
+	for _, size := range [][2]int{{100, 34}, {80, 24}, {72, 22}} {
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		setupKeys{m}.type_("/setup").enter()
+		view := m.View().Content
+
+		for _, o := range setupOptions() {
+			// Labels wrap, so check the first word that cannot be split.
+			head := strings.Fields(o.label)[0]
+			if !strings.Contains(view, head) {
+				t.Errorf("%dx%d: %q is missing from the overlay:\n%s", size[0], size[1], head, view)
+			}
+		}
+		for i, l := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
+			if w := ansi.StringWidth(l); w > m.width {
+				t.Errorf("%dx%d: line %d is %d wide, want at most %d", size[0], size[1], i, w, m.width)
+			}
+		}
+		if rows := strings.Count(view, "\n") + 1; rows > m.height {
+			t.Errorf("%dx%d: the overlay is %d rows, want at most %d", size[0], size[1], rows, m.height)
+		}
+		m.setup.reset()
 	}
 }
 

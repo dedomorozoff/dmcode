@@ -133,6 +133,7 @@ func setupOptions() []setupOption {
 	return []setupOption{
 		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", api: apiChat, keyless: true},
 		{label: "Локально — Ollama (http://127.0.0.1:11434/v1)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", api: apiChat, keyless: true},
+		{label: "Unsloth (локально) — ключ из Settings → API, URL и модель из консоли", signup: "https://unsloth.ai/docs/basics/api", envKey: "OPENAI_API_KEY", api: apiChat},
 		{label: "OpenRouter — бесплатные модели (deepseek и др.)", signup: "https://openrouter.ai/keys", baseURL: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat-v3.1:free", envKey: "OPENAI_API_KEY", api: apiChat},
 		{label: "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", signup: "https://opencode.ai/auth", baseURL: "https://opencode.ai/zen/v1", model: "nemotron-3-ultra-free", envKey: "OPENCODE_API_KEY", api: apiResponses},
 		{label: "Groq — бесплатно, быстро, tool calling работает", signup: "https://console.groq.com/keys", baseURL: "https://api.groq.com/openai/v1", model: "qwen/qwen3-32b", envKey: "GROQ_API_KEY", api: apiResponses},

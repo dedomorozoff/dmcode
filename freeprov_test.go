@@ -240,11 +240,15 @@ func TestSetupVarsNeverEmpty(t *testing.T) {
 			}
 		}
 	}
-	// The custom option has no defaults: they are asked for at run time.
-	opts := setupOptions()
-	custom := opts[len(opts)-1]
-	if got := setupVars(custom, "k"); len(got) != 2 {
-		t.Errorf("custom option wrote %v before the endpoint was even known", got)
+	// Options with no preset endpoint (the custom one, Unsloth) collect their
+	// URL and model at run time, so they must not try to persist a guess.
+	for _, o := range setupOptions() {
+		if o.baseURL != "" {
+			continue
+		}
+		if got := setupVars(o, "k"); len(got) != 2 {
+			t.Errorf("%q wrote %v before the endpoint was even known", o.label, got)
+		}
 	}
 }
 
@@ -427,7 +431,99 @@ func TestHostedCandidatesAreKeyless(t *testing.T) {
 	}
 }
 
-// The stdin wizard is the fallback when there is no terminal, so it has to
+// Unsloth speaks OpenAI at /v1/chat/completions but authenticates every request
+// and binds a port it prints at run time, so it can only be offered as a choice
+// the user fills in. Two mistakes are easy to make here and both produce a
+// broken option: listing it as keyless, or giving it a guessed default port.
+func TestUnslothIsOfferedAsAUserSuppliedEndpoint(t *testing.T) {
+	var opt setupOption
+	found := 0
+	for _, o := range setupOptions() {
+		if strings.Contains(o.label, "Unsloth") {
+			opt, found = o, found+1
+		}
+	}
+	if found != 1 {
+		t.Fatalf("Unsloth appears %d times in /setup, want exactly 1", found)
+	}
+	if opt.keyless {
+		t.Error("Unsloth is marked keyless, but it rejects unauthenticated requests")
+	}
+	if opt.envKey == "" {
+		t.Error("Unsloth needs somewhere to keep its sk-unsloth-… key")
+	}
+	if opt.baseURL != "" {
+		t.Errorf("Unsloth has a preset endpoint %q, but the port is chosen at run time", opt.baseURL)
+	}
+	if opt.signup == "" {
+		t.Error("Unsloth should point at its API docs, since the key is created in-app")
+	}
+	if opt.api != apiChat {
+		t.Errorf("Unsloth api = %q, want %q (it serves /v1/chat/completions)", opt.api, apiChat)
+	}
+
+	// It must not be in the auto-probed list either: a candidate is probed with
+	// no key, so Unsloth would only ever produce a 401 and cost a round trip.
+	for _, c := range localCandidates {
+		if strings.Contains(strings.ToLower(c.name), "unsloth") {
+			t.Errorf("Unsloth is in localCandidates as %q, where it can never be probed successfully", c.name)
+		}
+	}
+	for _, c := range hostedCandidates {
+		if strings.Contains(strings.ToLower(c.name), "unsloth") {
+			t.Errorf("Unsloth is listed as a hosted candidate %q, but it is a local server", c.name)
+		}
+	}
+}
+
+// Picking Unsloth has to ask for a key and an endpoint, and a blank answer to
+// either must not be written out as a working config.
+func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
+	inTempDir(t)
+	opts := setupOptions()
+	idx := 0
+	for i, o := range opts {
+		if strings.Contains(o.label, "Unsloth") {
+			idx = i + 1
+		}
+	}
+	if idx == 0 {
+		t.Fatal("Unsloth is not in the option list")
+	}
+
+	// key, then blank endpoint: rejected.
+	err := setupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\nmodel-x\n", idx)), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "base URL") {
+		t.Errorf("a blank endpoint gave %v, want a complaint about the URL", err)
+	}
+	if _, serr := os.Stat(".env"); serr == nil {
+		t.Error(".env was written despite the missing endpoint")
+	}
+
+	// key, endpoint, blank model: rejected.
+	err = setupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\n\n", idx)), &strings.Builder{})
+	if err == nil || !strings.Contains(err.Error(), "модель") {
+		t.Errorf("a blank model gave %v, want a complaint about the model", err)
+	}
+
+	// All three supplied: persisted exactly as given, which is the whole point
+	// of asking, since Unsloth's port and model id are not guessable.
+	if err := setupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
+		t.Fatalf("a complete Unsloth answer was rejected: %v", err)
+	}
+	data, _ := os.ReadFile(".env")
+	for _, want := range []string{
+		"OPENAI_API_KEY=sk-unsloth-abc",
+		"OPENAI_BASE_URL=http://127.0.0.1:8888/v1",
+		"DMCODE_MODEL=qwen3-27b",
+		"DMCODE_API=chat",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing %q:\n%s", want, data)
+		}
+	}
+}
+
 // reach the same .env as /setup and reject the same half-typed answers.
 func TestStdinWizardWritesKeylessChoice(t *testing.T) {
 	inTempDir(t)
