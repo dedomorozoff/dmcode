@@ -490,6 +490,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// for every message, which is what re-wraps the transcript at the new
 		// width. Calling it twice would render the whole history twice.
 		m.layout()
+	case tea.PasteMsg:
+		// A terminal paste arrives as PasteMsg, not as a run of key presses, so
+		// the overlays that own plain string buffers never saw it — a key pasted
+		// into /setup was silently dropped. The main prompt is a textinput and
+		// handles this at the tail of Update, but an open overlay returns early
+		// and never gets there, so route it by hand.
+		if m.pasteTarget() != nil {
+			m.pasteInto(string(msg.Content))
+			return m, nil
+		}
 	case tea.KeyPressMsg:
 		if m.setup.open {
 			model, cmd := m.setupKey(msg)
@@ -508,6 +518,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model, cmd
 		}
 		switch msg.String() {
+		case "ctrl+v":
+			// ctrl+v is not a paste inside a raw-mode TUI; the terminal sends the
+			// control character and nothing else. Read the clipboard directly, so
+			// the shortcut works wherever bracketed paste is unavailable.
+			if m.pasteTarget() != nil {
+				text, err := clipboard.ReadAll()
+				if err != nil {
+					m.statusText = i18n.T("clipboard error: ") + err.Error()
+					return m, nil
+				}
+				m.pasteInto(text)
+				return m, nil
+			}
 		case "esc":
 			if m.busy {
 				if m.cancelTurn != nil {
@@ -1058,6 +1081,57 @@ func (m *uiModel) openSetup() tea.Cmd {
 // setupKey walks the wizard. Escape always backs out, including from a text
 // stage: a user who picked the wrong provider must never be trapped in a prompt
 // with no way out.
+// pasteTarget returns the buffer a paste should land in, or nil when no overlay
+// has a text field focused — in which case the message belongs to the main
+// textinput, which pastes on its own.
+func (m *uiModel) pasteTarget() *string {
+	switch {
+	// The language list has no text field, so a paste has nowhere to go. It is
+	// checked first so it cannot be shadowed by a stale overlay flag.
+	case m.lang.open:
+		return nil
+	case m.setup.open && m.setup.stage != setupPick:
+		return &m.setup.buf
+	case m.picker.open:
+		return &m.picker.query
+	case m.palette.open:
+		return &m.palette.query
+	}
+	return nil
+}
+
+// pasteInto appends pasted text to the focused overlay field.
+//
+// Pasted content is collapsed to a single line first. A key copied from a web
+// page usually carries a trailing newline, and it would otherwise be written
+// into .env as a value containing a line break — which DotEnvPair then reads as
+// a broken assignment, so the key silently fails to load on the next start.
+func (m *uiModel) pasteInto(text string) {
+	dst := m.pasteTarget()
+	if dst == nil {
+		return
+	}
+	*dst += oneLine(text)
+	// Typing resets the cursor, so a paste has to as well or the highlight
+	// stays on the first row of a filtered list.
+	if m.picker.open {
+		m.picker.selected = 0
+	}
+	if m.palette.open {
+		m.palette.selected = 0
+	}
+}
+
+// oneLine flattens pasted text into a single line: CRLF and LF become nothing,
+// stray carriage returns are dropped, and the result is trimmed. A value pasted
+// into a one-field prompt must not be able to smuggle in a second line.
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return strings.TrimSpace(s)
+}
+
 func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	opts := config.SetupOptions()
 	switch msg.String() {
@@ -1752,7 +1826,7 @@ func (m *uiModel) setupBox() string {
 		// The key is a secret: show how much has been typed, never what. A
 		// shoulder-surfer or a screen share must not leak it, and the transcript
 		// stores only the masked form.
-		rows := [][]string{{styleHint.Render(i18n.T("key (input hidden, paste and press enter):"))},
+		rows := [][]string{{styleHint.Render(i18n.T("key (input hidden, paste or ctrl+v, then enter):"))},
 			{maskedKey(m.setup.buf, inner) + "█"}}
 		return m.floatingPanel(i18n.T("? provider key"), "", rows, 0)
 

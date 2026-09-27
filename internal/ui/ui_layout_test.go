@@ -94,6 +94,101 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 
 // Long values must be cut on rune boundaries: a byte cut lands mid-rune and the
 // terminal prints replacement characters.
+func TestOneLineFlattensPastedText(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"sk-abc", "sk-abc"},
+		{"sk-abc\n", "sk-abc"},
+		{"sk-abc\r\n", "sk-abc"},
+		{"\n  sk-abc  \n", "sk-abc"},
+		{"line1\nline2", "line1line2"},
+		{"key\rmore", "keymore"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := oneLine(c.in); got != c.want {
+			t.Errorf("oneLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A key pasted into /setup must reach the buffer. It used to be dropped: the
+// terminal sends tea.PasteMsg, which is not a KeyPressMsg, and the setup overlay
+// only ever saw key presses.
+func TestPasteReachesSetupBuffer(t *testing.T) {
+	m := &uiModel{}
+	m.setup = setupState{open: true, stage: setupKey}
+
+	if got := m.pasteTarget(); got == nil {
+		t.Fatal("setup key stage exposes no paste target")
+	}
+	m.pasteInto("gsk_from_clipboard")
+	if m.setup.buf != "gsk_from_clipboard" {
+		t.Errorf("pasteTarget/pasteInto left buf = %q", m.setup.buf)
+	}
+
+	// A trailing newline from a web copy must not survive: it would be written
+	// into .env and break the assignment on the next load.
+	m.pasteInto("\r\n")
+	if m.setup.buf != "gsk_from_clipboard" {
+		t.Errorf("trailing newline leaked into buf: %q", m.setup.buf)
+	}
+}
+
+func TestPasteTargetPerOverlay(t *testing.T) {
+	m := &uiModel{}
+
+	// The provider list is navigated with arrows, not typed into.
+	m.setup = setupState{open: true, stage: setupPick}
+	if m.pasteTarget() != nil {
+		t.Error("the provider list should have no paste target")
+	}
+
+	m.palette = paletteState{open: true}
+	if m.pasteTarget() != &m.palette.query {
+		t.Error("the palette query is not the paste target")
+	}
+	m.pasteInto("set")
+	if m.palette.query != "set" {
+		t.Errorf("palette query = %q, want %q", m.palette.query, "set")
+	}
+	if m.palette.selected != 0 {
+		t.Error("paste into the palette must reset the cursor")
+	}
+
+	// The language list has no text field.
+	m.lang = langState{open: true}
+	if m.pasteTarget() != nil {
+		t.Error("the language list should have no paste target")
+	}
+
+	// Nothing open: the main textinput pastes on its own.
+	m = &uiModel{}
+	if m.pasteTarget() != nil {
+		t.Error("with no overlay open, the main input should handle the paste")
+	}
+}
+
+// The whole point of the fix: Update must hand a PasteMsg to the open overlay
+// instead of dropping it on the floor.
+func TestUpdateRoutesPasteToOpenOverlay(t *testing.T) {
+	m := &uiModel{}
+	m.setup = setupState{open: true, stage: setupKey}
+
+	_, _ = m.Update(tea.PasteMsg{Content: "sk-pasted"})
+
+	if m.setup.buf != "sk-pasted" {
+		t.Errorf("Update dropped the paste: buf = %q, want %q", m.setup.buf, "sk-pasted")
+	}
+}
+
+func TestSetupLabelUsesHostName(t *testing.T) {
+	// Unchanged behaviour kept as a regression guard: a custom endpoint shows
+	// as "Custom endpoint" rather than an empty host.
+	if got := setupLabel(config.SetupOption{}); got == "" {
+		t.Error("setupLabel returned an empty label for a custom endpoint")
+	}
+}
+
 func TestTruncateCountsCellsNotBytes(t *testing.T) {
 	got := truncate("Pollinations (без ключа)", 20)
 	if n := ansi.StringWidth(got); n > 20 {
