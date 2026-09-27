@@ -96,9 +96,26 @@ Commands: `/setup` `/models` `/tools` `/history` `/lang` `/new` `/clear` `/copy`
 ```bash
 git clone https://github.com/dedomorozoff/dmcode
 cd dmcode
+make install       # build and install into GOBIN (or GOPATH/bin)
+dmcode
+```
+
+`make install` defaults to `$(go env GOBIN)`, falling back to `GOPATH/bin` —
+both writable without root, and both present on Windows. For a system-wide
+install pass a prefix:
+
+```bash
+sudo make install PREFIX=/usr/local   # -> /usr/local/bin/dmcode
+make uninstall                        # remove it again
+```
+
+Other targets:
+
+```bash
 make build              # -> dist/dmcode
 make test               # unit tests
 make vet                # go vet
+make clean              # remove dist/
 ```
 
 Cross-compile with `make build-linux-amd64`, `build-darwin-arm64`,

@@ -21,7 +21,7 @@ build-%:
 	GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(DIST)/$(BINARY)-$*$$ext .
 
-.PHONY: vet test fmt build clean win-zip deb rpm pkg termux
+.PHONY: vet test fmt build clean install uninstall win-zip deb rpm pkg termux
 
 build: ## Native build into dist/ (version stamped).
 	@mkdir -p $(DIST)
@@ -73,3 +73,28 @@ termux: build-linux-arm64
 
 clean:
 	rm -rf $(DIST)
+
+# Where `make install` puts the binary. GOBIN (or GOPATH/bin) is the default
+# rather than /usr/local/bin because it is writable without root and exists on
+# Windows too. Pass PREFIX for a system-wide install: `sudo make install
+# PREFIX=/usr/local` lands the binary in /usr/local/bin.
+GOBIN_DIR := $(shell go env GOBIN)
+ifeq ($(strip $(GOBIN_DIR)),)
+GOBIN_DIR := $(shell go env GOPATH)/bin
+endif
+PREFIX ?=
+BINDIR ?= $(if $(strip $(PREFIX)),$(PREFIX)/bin,$(GOBIN_DIR))
+
+install: build ## Install the binary into $(BINDIR).
+	@mkdir -p "$(BINDIR)"
+	install -m 0755 $(DIST)/$(BINARY)$(shell go env GOEXE) "$(BINDIR)/$(BINARY)$(shell go env GOEXE)"
+	@echo "installed $(BINDIR)/$(BINARY)$(shell go env GOEXE)"
+	@case ":$$PATH:" in \
+		*":$(BINDIR):"*) ;; \
+		*) echo "note: $(BINDIR) is not on PATH; add it to use '$(BINARY)' by name" ;; \
+	esac
+
+uninstall: ## Remove the installed binary.
+	rm -f "$(BINDIR)/$(BINARY)$(shell go env GOEXE)"
+	@echo "removed $(BINDIR)/$(BINARY)$(shell go env GOEXE)"
+
