@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 // lipgloss counts a style's Width/Height as the total block size with borders
@@ -72,7 +73,7 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	}
 
 	full := m.sidebarView(200)
-	if !strings.Contains(full, "ГОРЯЧИЕ КЛАВИШИ") {
+	if !strings.Contains(full, "HOTKEYS") {
 		t.Error("tall sidebar should show every section")
 	}
 	if got := lipgloss.Width(full); got != sidebarBoxWidth+sidebarGap {
@@ -86,7 +87,7 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	if !strings.Contains(short, "…") {
 		t.Error("trimmed sidebar should mark the cut with an ellipsis")
 	}
-	if strings.Contains(short, "esc     отмена хода") {
+	if strings.Contains(short, "esc     stop turn") {
 		t.Error("trimmed sidebar must not keep rendering cut-off lines")
 	}
 }
@@ -155,7 +156,7 @@ func TestTranscriptRowsFitAndHang(t *testing.T) {
 		{kindToolRes, `{"preview":"package ui — содержимое файла с кириллицей"}`},
 		{kindAgent, "first paragraph\n\nsecond paragraph that is also long enough to need breaking"},
 		{kindErr, "error: the provider refused the connection and the message goes on for a while"},
-		{kindSys, "— сессия сброшена —"},
+		{kindSys, i18n.T("— session reset —")},
 	}
 	for _, width := range []int{12, 20, 34, 56, 73, 120} {
 		for _, tc := range cases {
@@ -233,7 +234,7 @@ func framedModel(w, h int, model string) *uiModel {
 		lastTool:    "run_command_with_a_really_long_name",
 		showSidebar: true,
 		busy:        true,
-		statusText:  "вызов: run_command_with_a_really_long_name",
+		statusText:  i18n.T("calling: ") + "run_command_with_a_really_long_name",
 	}
 	m.toolCallCount = 345
 	m.history = []line{
@@ -245,7 +246,7 @@ func framedModel(w, h int, model string) *uiModel {
 		{kindToolRes, `{"result":"package ui — содержимое файла с кириллицей и очень длинной строкой"}`},
 		{kindAgent, "Here is the answer.\n\nSecond paragraph, also long enough to be wrapped by the renderer.\n\n- пункт\n- второй пункт"},
 		{kindErr, "error: something went horribly wrong with a very long error message"},
-		{kindSys, "— сессия сброшена —"},
+		{kindSys, i18n.T("— session reset —")},
 	}
 	m.suggest = []string{"/model " + model, "/models", "/new", "/clear", "/quit"}
 	m.width, m.height = w, h
@@ -296,7 +297,7 @@ func TestResizeKeepsHistory(t *testing.T) {
 	}
 	// The last thing in the transcript must survive the resize, otherwise the
 	// re-sync is dropping the tail of the conversation.
-	if !strings.Contains(m.vp.GetContent(), "сброшена") {
+	if !strings.Contains(m.vp.GetContent(), "session reset") {
 		t.Error("tail of the transcript is missing after a resize")
 	}
 }

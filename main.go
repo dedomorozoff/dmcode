@@ -15,6 +15,7 @@ import (
 
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
 )
@@ -37,6 +38,8 @@ func main() {
 
 func run() error {
 	config.LoadDotEnv()
+	// Before anything renders, so even the setup wizard speaks the saved language.
+	i18n.Init()
 	ctx := context.Background()
 
 	pool, err := discover.DetectProviders()

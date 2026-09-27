@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 // maxPromptHistory is how many prompts stay in memory for ↑/↓ recall, and how
@@ -125,7 +127,7 @@ func (m *uiModel) savePrompt(text string) {
 func (m *uiModel) showRecentPrompts() {
 	n := len(m.promptHistory)
 	if n == 0 {
-		m.history = append(m.history, line{kindSys, "история промптов пуста"})
+		m.history = append(m.history, line{kindSys, i18n.T("prompt history is empty")})
 	}
 	start := n - 10
 	if start < 0 {

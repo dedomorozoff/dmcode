@@ -12,13 +12,13 @@ import (
 func TestFreeHintNamesRealCommand(t *testing.T) {
 	// Pull out the /command token rather than guessing at word counts.
 	var named []string
-	for _, f := range strings.Fields(config.FreeProviderHint) {
+	for _, f := range strings.Fields(config.FreeProviderHint()) {
 		if strings.HasPrefix(f, "/") {
 			named = append(named, strings.Trim(f, "/.,;"))
 		}
 	}
 	if len(named) == 0 {
-		t.Fatalf("freeProviderHint names no command at all: %q", config.FreeProviderHint)
+		t.Fatalf("freeProviderHint names no command at all: %q", config.FreeProviderHint())
 	}
 
 	names := map[string]bool{}

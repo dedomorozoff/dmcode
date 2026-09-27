@@ -19,6 +19,7 @@ import (
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/llm"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -181,6 +182,7 @@ type uiModel struct {
 	palette   paletteState
 	picker    modelPicker
 	setup     setupState
+	lang      langState
 	suggest   []string
 	stick     bool
 
@@ -219,6 +221,13 @@ type paletteState struct {
 	selected int
 }
 
+// langState drives the /lang overlay: a short list with no text field, since
+// the choice set is fixed and small.
+type langState struct {
+	open     bool
+	selected int
+}
+
 // setup stages, walked in order by /setup.
 const (
 	setupPick = iota
@@ -250,56 +259,59 @@ type command struct {
 
 func (m *uiModel) commands() []command {
 	return []command{
-		{name: "setup", desc: "выбрать провайдера (бесплатно, без ключа)", run: func(m *uiModel) tea.Cmd {
+		{name: "setup", desc: i18n.T("choose a provider (free, no key needed)"), run: func(m *uiModel) tea.Cmd {
 			return m.openSetup()
 		}},
-		{name: "models", desc: "список моделей", run: func(m *uiModel) tea.Cmd {
+		{name: "models", desc: i18n.T("list models"), run: func(m *uiModel) tea.Cmd {
 			return m.fetchModelsCmd()
 		}},
-		{name: "copy", desc: "скопировать ответ агента (ctrl+y)", run: func(m *uiModel) tea.Cmd {
+		{name: "copy", desc: i18n.T("copy the agent's reply (ctrl+y)"), run: func(m *uiModel) tea.Cmd {
 			m.copyLastResponse()
 			return nil
 		}},
-		{name: "sidebar", desc: "боковая панель (ctrl+b)", run: func(m *uiModel) tea.Cmd {
+		{name: "sidebar", desc: i18n.T("toggle the sidebar (ctrl+b)"), run: func(m *uiModel) tea.Cmd {
 			m.showSidebar = !m.showSidebar
 			m.layout()
 			m.followVP()
 			return nil
 		}},
-		{name: "new", desc: "новая сессия", run: func(m *uiModel) tea.Cmd {
+		{name: "new", desc: i18n.T("start a new session"), run: func(m *uiModel) tea.Cmd {
 			m.sessionID = newSessionID()
 			m.turnCount = 0
 			m.toolCallCount = 0
-			m.history = append(m.history, line{kindSys, "— сессия сброшена —"})
+			m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "clear", desc: "очистить экран", run: func(m *uiModel) tea.Cmd {
+		{name: "clear", desc: i18n.T("clear the screen"), run: func(m *uiModel) tea.Cmd {
 			m.history = nil
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "history", desc: "последние промпты (↑/↓ — вызвать)", run: func(m *uiModel) tea.Cmd {
+		{name: "history", desc: i18n.T("recent prompts (up/down to recall)"), run: func(m *uiModel) tea.Cmd {
 			m.showRecentPrompts()
 			return nil
 		}},
-		{name: "help", desc: "подсказки", run: func(m *uiModel) tea.Cmd {
+		{name: "lang", desc: i18n.T("interface language"), run: func(m *uiModel) tea.Cmd {
+			return m.openLangPicker()
+		}},
+		{name: "help", desc: i18n.T("show the hotkeys"), run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
-				line{kindSys, "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ"},
-				line{kindSys, "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл"},
-				line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /new, /clear, /quit"})
+				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
+				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "tools", desc: "список инструментов", run: func(m *uiModel) tea.Cmd {
+		{name: "tools", desc: i18n.T("list the available tools"), run: func(m *uiModel) tea.Cmd {
 			for _, t := range m.toolNames {
 				m.history = append(m.history, line{kindSys, "· " + t})
 			}
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "quit", desc: "выход", run: func(m *uiModel) tea.Cmd { return tea.Quit }},
+		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
 	}
 }
 
@@ -319,7 +331,7 @@ func newSessionID() string {
 func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, toolNames []string) *uiModel {
 	ti := textinput.New()
 	ti.Prompt = "› "
-	ti.Placeholder = "опиши задачу… (/help — команды, esc — отмена)"
+	ti.Placeholder = i18n.T("describe the task… (/help for commands, esc to cancel)")
 	ti.Focus()
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	vp := viewport.New(viewport.WithHeight(10))
@@ -345,15 +357,22 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		workDir:      filepath.Base(wd),
 		historyDirty: true,
 	}
+	m.printWelcome()
+	m.promptHistory = loadPromptHistory()
+	m.histPos = len(m.promptHistory)
+	return m
+}
+
+// printWelcome prints the banner and the one-line hint into the transcript. It is
+// a method rather than inline literal so a language switch can re-emit it: the
+// banner is otherwise written once, at construction, in the old language.
+func (m *uiModel) printWelcome() {
 	m.history = append(m.history,
 		line{kindSys, ""},
 		line{kindLogo, logo},
 		line{kindSys, ""},
-		line{kindSys, "ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена"},
+		line{kindSys, i18n.T("ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop")},
 		line{kindSys, ""})
-	m.promptHistory = loadPromptHistory()
-	m.histPos = len(m.promptHistory)
-	return m
 }
 
 func (m *uiModel) Init() tea.Cmd {
@@ -383,9 +402,9 @@ func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
 	if msg.ok {
 		return
 	}
-	m.statusText = "провайдер без tools"
+	m.statusText = i18n.T("provider without tools")
 	m.history = append(m.history, line{kindErr, fmt.Sprintf(
-		"⚠ %s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
+		i18n.T("⚠ %s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another."),
 		msg.Label, msg.Model)})
 	m.historyDirty = true
 }
@@ -425,9 +444,9 @@ func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	}
 	rest = append(rest, msg.from)
 	m.pool = rest
-	m.statusText = "запасной: " + msg.to.Label
+	m.statusText = i18n.T("failover: ") + msg.to.Label
 	m.history = append(m.history, line{kindSys, fmt.Sprintf(
-		"⚡ %s недоступен (%s) — ответил %s (%s)",
+		i18n.T("⚡ %s is unavailable (%s) — %s (%s) answered"),
 		msg.from.Label, msg.reason, msg.to.Label, msg.to.Model)})
 	m.historyDirty = true
 	// The reserve has not been checked for tool calling, and a host that
@@ -447,14 +466,14 @@ func (m *uiModel) lastAgentText() string {
 func (m *uiModel) copyLastResponse() {
 	text := m.lastAgentText()
 	if text == "" {
-		m.statusText = "нет ответа для копирования"
+		m.statusText = i18n.T("nothing to copy")
 		return
 	}
 	if err := clipboard.WriteAll(text); err != nil {
-		m.history = append(m.history, line{kindErr, "ошибка буфера: " + err.Error()})
+		m.history = append(m.history, line{kindErr, i18n.T("clipboard error: ") + err.Error()})
 	} else {
-		m.statusText = "ответ скопирован в буфер обмена!"
-		m.history = append(m.history, line{kindSys, "📋 последний ответ скопирован в буфер обмена"})
+		m.statusText = i18n.T("reply copied to the clipboard!")
+		m.history = append(m.history, line{kindSys, i18n.T("📋 the last reply was copied to the clipboard")})
 	}
 	m.historyDirty = true
 	m.followVP()
@@ -484,6 +503,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.pickerKey(msg)
 			return model, cmd
 		}
+		if m.lang.open {
+			model, cmd := m.langKey(msg)
+			return model, cmd
+		}
 		switch msg.String() {
 		case "esc":
 			if m.busy {
@@ -492,8 +515,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cancelTurn = nil
 				}
 				m.busy = false
-				m.statusText = "ход прерван"
-				m.history = append(m.history, line{kindSys, "⏹ ход прерван пользователем (Esc)"})
+				m.statusText = i18n.T("turn stopped")
+				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Esc)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -505,8 +528,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cancelTurn = nil
 				}
 				m.busy = false
-				m.statusText = "ход прерван"
-				m.history = append(m.history, line{kindSys, "⏹ ход прерван пользователем (Ctrl+C)"})
+				m.statusText = i18n.T("turn stopped")
+				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Ctrl+C)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -583,9 +606,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, "ctrl+p — палитра команд · ctrl+b — панель · ctrl+y — копировать ответ"},
-					line{kindSys, "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл"},
-					line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
+					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
+					line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /new, /clear, /quit"})
 				m.historyDirty = true
 				m.followVP()
@@ -610,7 +633,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.sessionID = newSessionID()
 				m.turnCount = 0
 				m.toolCallCount = 0
-				m.history = append(m.history, line{kindSys, "— сессия сброшена —"})
+				m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -648,11 +671,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toolCallMsg:
 		m.lastTool = msg.name
 		m.toolCallCount++
-		m.statusText = "вызов: " + msg.name
+		m.statusText = i18n.T("calling: ") + msg.name
 		m.history = append(m.history, line{kindTool, msg.name + "(" + msg.args + ")"})
 		m.historyDirty = true
 	case toolResMsg:
-		m.statusText = "ответ: " + msg.name
+		m.statusText = i18n.T("returned: ") + msg.name
 		// Stored raw: renderHistory owns the "⎿" gutter and the wrapping, so
 		// pre-wrapping here would both double the prefix and measure against a
 		// width that ignores it.
@@ -676,7 +699,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pool = msg.pool
 			}
 			// Preserve m.sessionID so conversation context is retained!
-			m.history = append(m.history, line{kindSys, "модель активирована: " + msg.name + " (контекст сохранён)"})
+			m.history = append(m.history, line{kindSys, i18n.T("model activated: ") + msg.name + i18n.T(" (context kept)")})
 			// A different model may or may not support tools, so check again.
 			extra = m.toolCheckCmd()
 		}
@@ -687,20 +710,20 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelTurn = nil
 		if msg.err != nil {
 			if msg.err == context.Canceled {
-				m.statusText = "прервано"
-				m.history = append(m.history, line{kindSys, "⏹ ход прерван"})
+				m.statusText = i18n.T("stopped")
+				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped")})
 			} else {
-				m.statusText = "ошибка"
+				m.statusText = i18n.T("error")
 				m.history = append(m.history, line{kindErr, "error: " + msg.err.Error()})
 			}
 		} else {
-			m.statusText = "готов"
+			m.statusText = i18n.T("ready")
 		}
 		m.history = append(m.history, line{kindSys, ""})
 		m.historyDirty = true
 	case errMsg:
 		m.busy = false
-		m.statusText = "ошибка"
+		m.statusText = i18n.T("error")
 		m.history = append(m.history, line{kindErr, "error: " + msg.Error()})
 		m.historyDirty = true
 	case toolCheckMsg:
@@ -1040,7 +1063,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.setup.reset()
-		m.statusText = "настройка отменена"
+		m.statusText = i18n.T("setup cancelled")
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1078,7 +1101,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			if strings.TrimSpace(m.setup.buf) == "" {
-				m.statusText = "ключ не введён"
+				m.statusText = i18n.T("no key entered")
 				return m, nil
 			}
 			return m, m.applySetup()
@@ -1093,7 +1116,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			if strings.TrimSpace(m.setup.buf) == "" {
-				m.statusText = "base URL не введён"
+				m.statusText = i18n.T("no base URL entered")
 				return m, nil
 			}
 			m.setup.opt.BaseURL = strings.TrimSpace(m.setup.buf)
@@ -1111,7 +1134,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "enter":
 			if strings.TrimSpace(m.setup.buf) == "" {
-				m.statusText = "модель не введена"
+				m.statusText = i18n.T("no model entered")
 				return m, nil
 			}
 			m.setup.opt.Model = strings.TrimSpace(m.setup.buf)
@@ -1142,7 +1165,7 @@ func (m *uiModel) applySetup() tea.Cmd {
 	// set for another provider is not silently dropped.
 	lines, err := config.ReadDotEnv()
 	if err != nil {
-		m.statusText = "ошибка чтения .env"
+		m.statusText = i18n.T("error reading .env")
 		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
 		m.setup.reset()
 		m.historyDirty = true
@@ -1155,7 +1178,7 @@ func (m *uiModel) applySetup() tea.Cmd {
 		sb.WriteString(l + "\n")
 	}
 	if werr := os.WriteFile(".env", []byte(sb.String()), 0o600); werr != nil {
-		m.statusText = "не удалось записать .env"
+		m.statusText = i18n.T("could not write .env")
 		m.history = append(m.history, line{kindErr, "setup: " + werr.Error()})
 		m.setup.reset()
 		m.historyDirty = true
@@ -1177,8 +1200,8 @@ func (m *uiModel) applySetup() tea.Cmd {
 	}
 	m.prov = p
 	m.setup.reset()
-	m.statusText = "провайдер: " + p.Label
-	m.history = append(m.history, line{kindSys, "провайдер сохранён в .env: " + p.Label})
+	m.statusText = i18n.T("provider: ") + p.Label
+	m.history = append(m.history, line{kindSys, i18n.T("provider saved to .env: ") + p.Label})
 	m.historyDirty = true
 
 	ctx := context.Background()
@@ -1205,7 +1228,7 @@ func (m *uiModel) applySetup() tea.Cmd {
 // setupLabel names a wizard option for the sidebar, where the provider is shown.
 func setupLabel(opt config.SetupOption) string {
 	if opt.BaseURL == "" {
-		return "Свой endpoint"
+		return i18n.T("Custom endpoint")
 	}
 	host := opt.BaseURL
 	if i := strings.Index(host, "://"); i >= 0 {
@@ -1236,7 +1259,7 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.picker.open = false
 		if m.picker.selected < len(filtered) {
 			id := filtered[m.picker.selected]
-			m.history = append(m.history, line{kindSys, "· модель → " + id})
+			m.history = append(m.history, line{kindSys, i18n.T("· model → ") + id})
 			m.historyDirty = true
 			cmd := m.switchModelCmd(id)
 			m.followVP()
@@ -1337,7 +1360,7 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
 	m.turnCount++
-	m.statusText = "генерация ответа..."
+	m.statusText = i18n.T("generating a reply…")
 	return func() tea.Msg {
 		userMsg := genai.NewContentFromText(text, genai.RoleUser)
 		prevText := ""
@@ -1424,41 +1447,41 @@ func (m *uiModel) sidebarView(height int) string {
 		}
 	}
 
-	row(styleSidebarLabel, "МОДЕЛЬ")
+	row(styleSidebarLabel, i18n.T("MODEL"))
 	value(styleSidebarValue, " ", m.prov.Model)
 	if m.prov.Label != "" {
 		row(styleHint, truncate("via "+m.prov.Label, sbInner))
 	}
 	b.WriteString("\n")
 
-	row(styleSidebarLabel, "СЕССИЯ")
+	row(styleSidebarLabel, i18n.T("SESSION"))
 	row(styleHint, " "+truncate(m.sessionID, sbInner-1))
-	row(styleHint, fmt.Sprintf(" ходов: %d", m.turnCount))
-	row(styleHint, fmt.Sprintf(" тулов: %d", m.toolCallCount))
+	row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
+	row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
 	b.WriteString("\n")
 
-	row(styleSidebarLabel, "ПАПКА")
+	row(styleSidebarLabel, i18n.T("FOLDER"))
 	value(styleSidebarValue, " ", m.workDir)
 	b.WriteString("\n")
 
 	if m.lastTool != "" {
-		row(styleSidebarLabel, "ПОСЛЕДНИЙ ТУЛ")
+		row(styleSidebarLabel, i18n.T("LAST TOOL"))
 		value(styleTool, " ⏺ ", m.lastTool)
 		b.WriteString("\n")
 	}
 
-	row(styleSidebarLabel, "ИНСТРУМЕНТЫ")
+	row(styleSidebarLabel, i18n.T("TOOLS"))
 	for _, t := range m.toolNames {
 		row(styleHint, " · "+t)
 	}
 	b.WriteString("\n")
 
-	row(styleSidebarLabel, "ГОРЯЧИЕ КЛАВИШИ")
-	row(styleHint, " ctrl+p  команды")
-	row(styleHint, " ctrl+b  скрыть панель")
-	row(styleHint, " ctrl+y  копировать ответ")
-	row(styleHint, " esc     отмена хода")
-	row(styleHint, " pgup/dn скролл")
+	row(styleSidebarLabel, i18n.T("HOTKEYS"))
+	row(styleHint, i18n.T(" ctrl+p  commands"))
+	row(styleHint, i18n.T(" ctrl+b  hide panel"))
+	row(styleHint, i18n.T(" ctrl+y  copy reply"))
+	row(styleHint, i18n.T(" esc     stop turn"))
+	row(styleHint, i18n.T(" pgup/dn scroll"))
 
 	// Measuring at sbInner wraps and pads every row to exactly the width the
 	// framed box will have available, so the split below counts real rows.
@@ -1493,19 +1516,19 @@ func (m *uiModel) statusBarView() string {
 	var badge string
 	switch {
 	case m.busy:
-		badge = styleBadgeBusy.Render("⏳ РАБОТАЕТ")
-	case m.statusText == "ход прерван", m.statusText == "прервано":
-		badge = styleBadgeStop.Render("⏹ ПРЕРВАНО")
+		badge = styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
+		badge = styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
 	default:
-		badge = styleBadgeReady.Render("● ГОТОВ")
+		badge = styleBadgeReady.Render(i18n.T("● READY"))
 	}
 
 	statusDesc := m.statusText
 	switch {
 	case statusDesc == "" && m.busy:
-		statusDesc = m.spin.View() + " выполнение..."
+		statusDesc = m.spin.View() + " " + i18n.T("running…")
 	case statusDesc == "":
-		statusDesc = "ожидание задачи"
+		statusDesc = i18n.T("waiting for a task")
 	case m.busy:
 		statusDesc = m.spin.View() + " " + statusDesc
 	}
@@ -1627,7 +1650,7 @@ func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int
 	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 
 	head := []string{
-		styleHeader.Render(" "+title+" ") + styleHint.Render("esc — закрыть"),
+		styleHeader.Render(" "+title+" ") + styleHint.Render(i18n.T("esc — close")),
 		styleHint.Render(truncate(" › "+query, inner)),
 		"",
 	}
@@ -1651,10 +1674,10 @@ func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int
 		}
 	}
 	if len(entries) == 0 {
-		rows = append(rows, styleHint.Render("   ничего не найдено"))
+		rows = append(rows, styleHint.Render(i18n.T("   nothing found")))
 	}
 	if hidden := total - len(entries); hidden > 0 {
-		rows = append(rows, styleHint.Render("   ↓ ещё "+fmt.Sprint(hidden)))
+		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(hidden)))
 	}
 
 	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
@@ -1679,7 +1702,7 @@ func (m *uiModel) paletteBox() string {
 		}
 		entries = append(entries, wrapIndent(c.name+" — "+c.desc, inner, marker, "     "))
 	}
-	return m.floatingPanel("⌘ команды", m.palette.query, entries, m.palette.selected)
+	return m.floatingPanel(i18n.T("⌘ commands"), m.palette.query, entries, m.palette.selected)
 }
 
 func (m *uiModel) modelPickerBox() string {
@@ -1703,7 +1726,7 @@ func (m *uiModel) modelPickerBox() string {
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel("⌘ модели", m.picker.query, entries, m.picker.selected)
+	return m.floatingPanel(i18n.T("⌘ models"), m.picker.query, entries, m.picker.selected)
 }
 
 // setupBox renders the /setup wizard: the provider list, then a key prompt, or
@@ -1729,19 +1752,19 @@ func (m *uiModel) setupBox() string {
 		// The key is a secret: show how much has been typed, never what. A
 		// shoulder-surfer or a screen share must not leak it, and the transcript
 		// stores only the masked form.
-		rows := [][]string{{styleHint.Render("ключ (ввод скрыт, вставь и нажми enter):")},
+		rows := [][]string{{styleHint.Render(i18n.T("key (input hidden, paste and press enter):"))},
 			{maskedKey(m.setup.buf, inner) + "█"}}
-		return m.floatingPanel("? ключ провайдера", "", rows, 0)
+		return m.floatingPanel(i18n.T("? provider key"), "", rows, 0)
 
 	case setupURL:
-		rows := [][]string{{styleHint.Render("base URL, напр. http://localhost:1234/v1")},
+		rows := [][]string{{styleHint.Render(i18n.T("base URL, e.g. http://localhost:1234/v1"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel("? свой endpoint", "", rows, 0)
+		return m.floatingPanel(i18n.T("? custom endpoint"), "", rows, 0)
 
 	case setupModel:
-		rows := [][]string{{styleHint.Render("идентификатор модели на этом endpoint")},
+		rows := [][]string{{styleHint.Render(i18n.T("model id on this endpoint"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel("? модель", "", rows, 0)
+		return m.floatingPanel(i18n.T("? model"), "", rows, 0)
 	}
 
 	opts := config.SetupOptions()
@@ -1763,7 +1786,89 @@ func (m *uiModel) setupBox() string {
 		entries = append(entries, rows)
 	}
 	// * marks the provider already in use, ? the highlighted row.
-	return m.floatingPanel("? провайдер  (* — текущий, enter — выбрать, esc — отмена)", "", entries, m.setup.selected)
+	return m.floatingPanel(i18n.T("? provider  (* — current, enter — select, esc — cancel)"), "", entries, m.setup.selected)
+}
+
+// langLabels names each selectable language in that language itself, so the row
+// is readable no matter which one is active — a list of English names would
+// leave a Russian user hunting for "Russian".
+var langLabels = map[i18n.Lang]string{
+	i18n.English: "English",
+	i18n.Russian: "Русский",
+}
+
+// openLangPicker opens /lang with the active language already highlighted.
+func (m *uiModel) openLangPicker() tea.Cmd {
+	m.lang.open = true
+	for i, l := range i18n.Langs {
+		if l == i18n.Current() {
+			m.lang.selected = i
+			break
+		}
+	}
+	return nil
+}
+
+// langKey drives the /lang overlay. The choice takes effect immediately and is
+// persisted, so the rest of the session — and the next start — use it.
+func (m *uiModel) langKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+p", "q":
+		m.lang.open = false
+		return m, nil
+	case "up":
+		if m.lang.selected > 0 {
+			m.lang.selected--
+		}
+		return m, nil
+	case "down":
+		if m.lang.selected < len(i18n.Langs)-1 {
+			m.lang.selected++
+		}
+		return m, nil
+	case "enter":
+		m.lang.open = false
+		if m.lang.selected >= len(i18n.Langs) {
+			return m, nil
+		}
+		l := i18n.Langs[m.lang.selected]
+		if err := i18n.Set(l); err != nil {
+			// The switch already applies for this session; only the persistence
+			// failed, so say so and carry on rather than treating it as fatal.
+			m.statusText = i18n.T("could not save the language choice")
+			m.history = append(m.history, line{kindErr, err.Error()})
+		}
+		m.history = append(m.history, line{kindSys, i18n.T("language: ") + langLabels[l]})
+		// The banner and status text are rendered on every frame, but the
+		// welcome block is printed once, so refresh it to show the new language.
+		m.printWelcome()
+		m.historyDirty = true
+		return m, nil
+	}
+	return m, nil
+}
+
+// langBox renders the /lang list: * marks the active language, ? the cursor.
+func (m *uiModel) langBox() string {
+	inner := m.floatingWidth() - panelBorder
+	var entries [][]string
+	for i, l := range i18n.Langs {
+		marker, style := "   ", lipgloss.NewStyle()
+		switch {
+		case i == m.lang.selected:
+			marker, style = " ? ", styleTool
+		case l == i18n.Current():
+			marker, style = " * ", styleTool
+		}
+		rows := wrapIndent(langLabels[l], inner, marker, "     ")
+		if i != m.lang.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	return m.floatingPanel(i18n.T("? language  (* — current, enter — select, esc — cancel)"), "", entries, m.lang.selected)
 }
 
 func (m *uiModel) filteredCommands() []command {
@@ -1779,15 +1884,17 @@ func (m *uiModel) filteredCommands() []command {
 
 func (m *uiModel) View() tea.View {
 	if m.width == 0 {
-		return tea.NewView("dmcode загружается…")
+		return tea.NewView(i18n.T("dmcode is starting…"))
 	}
-	if m.picker.open || m.palette.open || m.setup.open {
+	if m.picker.open || m.palette.open || m.setup.open || m.lang.open {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
 			box = m.modelPickerBox()
 		case m.setup.open:
 			box = m.setupBox()
+		case m.lang.open:
+			box = m.langBox()
 		}
 		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
 		v.AltScreen = true

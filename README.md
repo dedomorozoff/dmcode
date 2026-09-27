@@ -2,12 +2,18 @@
 
 # dmCode
 
-**Кодинг-агент для терминала..**
+**A coding agent for your terminal.**
+
+Ask it something. It reads your files, edits them and runs your tests.
+Built on [google/adk-go](https://github.com/google/adk-go) and [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+
+One static binary. No API key required.
+
 </div>
 
 ---
 
-## Установка
+## Install
 
 **macOS / Linux / BSD:**
 
@@ -21,36 +27,35 @@ curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh
 irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
 ```
 
-**Из исходников** — нужен Go 1.26+:
+**From source** — needs Go 1.26+:
 
 ```bash
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-Готово. Первый запуск — и всё:
+Then just run it:
 
 ```bash
 dmcode
 ```
 
-## Автонастройка
+## The provider finds itself
 
-Ключ не нужен. При старте dmcode сам находит, на чём работать, и
-переключается на другого провайдера, если первый отвалился прямо посреди
-сессии.
+No key required. On startup dmCode looks for an endpoint that actually answers,
+and fails over to another one if the current provider dies mid-session.
 
-| Что найдёт сам | Когда |
+| What it finds | When |
 |---|---|
-| **Ollama, LM Studio, llama.cpp, vLLM, Jan** | запущены локально — проверяются первыми |
-| **Pollinations** | анонимный OpenAI-совместимый API, вообще без ключа |
-| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models** | если ключ уже лежит в `.env` или окружении |
+| **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
+| **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
+| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models** | the key is already in `.env` or the environment |
 
-Ничего не нашёл — запускается мастер `/setup`: выбираешь провайдера, вставляешь
-ключ, он пишется в `.env`. Есть варианты вообще без ключа, а есть свои
-endpoint'ы (Unsloth, LM Studio, vLLM — что угодно, что говорит OpenAI-совместимый
+If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
+and it lands in `.env`. Some options need no key at all; others are your own
+endpoints (Unsloth, LM Studio, vLLM — anything speaking the OpenAI-compatible
 API).
 
-Свой endpoint — это три строки в `.env`:
+A custom endpoint is three lines in `.env`:
 
 ```bash
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
@@ -58,59 +63,66 @@ OPENAI_API_KEY=gsk_...
 DMCODE_MODEL=qwen/qwen3-32b
 ```
 
-Полезно знать: `DMCODE_API=chat` заставляет говорить по `/chat/completions`,
-`DMCODE_REASONING_EFFORT=low` ограничивает канал рассуждений.
+Worth knowing: `DMCODE_API=chat` forces the `/chat/completions` wire, and
+`DMCODE_REASONING_EFFORT=low` caps the reasoning channel.
 
-## Инструменты
+## Interface language
 
-Агент работает файлами и шеллом:
+English by default. Run `/lang` to switch to Russian; the choice is saved to
+`~/.dmcode/settings.json` and restored on the next start. `DMCODE_LANG=ru`
+overrides it for a single run.
+
+## Tools
+
+The agent works on files and a shell, rather than just talking:
 
 `read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command`
 
-## Клавиши
+## Keys
 
 | | |
 |---|---|
-| `ctrl+p` | палитра команд |
-| `ctrl+b` | скрыть боковую панель |
-| `ctrl+y` | скопировать ответ |
-| `esc` | прервать текущий ход |
-| `↑` `↓` | история промптов |
-| `pgup` `pgdn` | скролл |
+| `ctrl+p` | command palette |
+| `ctrl+b` | toggle the sidebar |
+| `ctrl+y` | copy the reply |
+| `esc` | stop the current turn |
+| `↑` `↓` | prompt history |
+| `pgup` `pgdn` | scroll |
 
-Команды: `/setup` `/models` `/tools` `/history` `/new` `/clear` `/copy` `/sidebar` `/help` `/quit`
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/new` `/clear` `/copy` `/sidebar` `/help` `/quit`
 
-## Сборка из исходников
+## Build from source
 
 ```bash
 git clone https://github.com/dedomorozoff/dmcode
 cd dmcode
 make build              # -> dist/dmcode
-make test               # тесты
+make test               # unit tests
 make vet                # go vet
 ```
 
-Кросс-компиляция — `make build-linux-amd64`, `build-darwin-arm64`,
-`build-windows-amd64` и любые другие пары GOOS-GOARCH. Пакеты: `make deb`,
+Cross-compile with `make build-linux-amd64`, `build-darwin-arm64`,
+`build-windows-amd64`, or any other GOOS-GOARCH pair. Packages: `make deb`,
 `make rpm`, `make pkg`.
 
-Теги `v*` собирают релизы через GitHub Actions: бинари под восемь платформ,
-`.deb`, `.rpm`, Arch-пакет и zip для Windows.
+`v*` tags build releases through GitHub Actions: binaries for eight platforms,
+plus `.deb`, `.rpm`, an Arch package and a Windows zip.
 
-## Структура
+## Layout
 
 ```
-main.go              только связывает пакеты между собой
-internal/agent       сборка агента и системный промпт
-internal/config      .env, endpoint'ы, мастер настройки
-internal/discover    поиск провайдеров, которые реально отвечают
-internal/llm         OpenAI-совместимый wire, failover между endpoint'ами
-internal/tools       инструменты агента
-internal/ui          терминальный интерфейс на Bubble Tea
+main.go              chains the packages together, nothing else
+internal/agent       builds the agent and its system prompt
+internal/config      .env, endpoints, the setup wizard
+internal/discover    finds the providers that actually answer
+internal/i18n        English source strings and the Russian catalog
+internal/llm         OpenAI-compatible wire, failover between endpoints
+internal/tools       the agent's tools
+internal/ui          the Bubble Tea terminal interface
 ```
 
-## Дорожная карта
+## Roadmap
 
-Планы — в [ROADMAP.md](ROADMAP.md): отмена хода, права на опасные команды,
-персистентность сессий, MCP и LSP.
+Plans are in [ROADMAP.md](ROADMAP.md): turn cancellation, permissions for
+dangerous commands, session persistence, MCP and LSP.
 

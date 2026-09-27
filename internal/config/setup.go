@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 type SetupOption struct {
@@ -30,14 +32,14 @@ type SetupOption struct {
 // talks to keyless hosts without any key anyway.
 func SetupOptions() []SetupOption {
 	return []SetupOption{
-		{Label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low"},
-		{Label: "Локально — Ollama (http://127.0.0.1:11434/v1)", BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true},
-		{Label: "Unsloth (локально) — ключ из Settings → API, URL и модель из консоли", Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
-		{Label: "OpenRouter — бесплатные модели (deepseek и др.)", Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
-		{Label: "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)", Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
-		{Label: "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "nemotron-3-ultra-free", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
-		{Label: "Groq — бесплатно, быстро, tool calling работает", Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses},
-		{Label: "Свой OpenAI-совместимый endpoint", EnvKey: "OPENAI_API_KEY", API: APIChat},
+		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low"},
+		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true},
+		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
+		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
+		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
+		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "nemotron-3-ultra-free", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
+		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses},
+		{Label: i18n.T("Your own OpenAI-compatible endpoint"), EnvKey: "OPENAI_API_KEY", API: APIChat},
 	}
 }
 
@@ -68,15 +70,15 @@ func SetupWizard() error {
 // reachable from a test.
 func SetupWizardWith(r io.Reader, w io.Writer) error {
 	opts := SetupOptions()
-	fmt.Fprintf(w, "\nБесплатный провайдер не настроен. Выбери:\n")
+	fmt.Fprintf(w, "%s", i18n.T("\nNo free provider is configured. Pick one:\n"))
 	for i, o := range opts {
 		fmt.Fprintf(w, "  %d) %s\n", i+1, o.Label)
 	}
-	fmt.Fprint(w, "номер [1]: ")
+	fmt.Fprint(w, i18n.T("number [1]: "))
 	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil && line == "" {
-		return fmt.Errorf("не удалось прочитать выбор (stdin не терминал?): %s", FreeProviderHint)
+		return fmt.Errorf("%s: %s", i18n.T("could not read the choice (stdin not a terminal?)"), FreeProviderHint())
 	}
 	line = strings.TrimSpace(line)
 	idx := 1
@@ -90,32 +92,32 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	key := ""
 	if !opt.Keyless {
 		if opt.Signup != "" {
-			fmt.Fprintln(w, "Возьми ключ тут:", opt.Signup)
+			fmt.Fprintln(w, i18n.T("Get a key here:"), opt.Signup)
 		}
-		fmt.Fprint(w, "ключ: ")
+		fmt.Fprint(w, i18n.T("key: "))
 		keyLine, err := reader.ReadString('\n')
 		if err != nil && strings.TrimSpace(keyLine) == "" {
-			return fmt.Errorf("ключ не введён")
+			return fmt.Errorf("%s", i18n.T("no key entered"))
 		}
 		key = strings.TrimSpace(keyLine)
 		if key == "" {
-			return fmt.Errorf("ключ не введён")
+			return fmt.Errorf("%s", i18n.T("no key entered"))
 		}
 	}
 
-	// кастомный endpoint: доп. ввод
+	// Custom endpoint: ask for the extra fields it needs.
 	if opt.BaseURL == "" {
-		fmt.Fprint(w, "base URL (напр. http://localhost:1234/v1): ")
+		fmt.Fprint(w, i18n.T("base URL (e.g. http://localhost:1234/v1): "))
 		urlLine, _ := reader.ReadString('\n')
 		opt.BaseURL = strings.TrimSpace(urlLine)
 		if opt.BaseURL == "" {
-			return fmt.Errorf("base URL не введён")
+			return fmt.Errorf("%s", i18n.T("no base URL entered"))
 		}
-		fmt.Fprint(w, "модель: ")
+		fmt.Fprint(w, i18n.T("model: "))
 		mLine, _ := reader.ReadString('\n')
 		opt.Model = strings.TrimSpace(mLine)
 		if opt.Model == "" {
-			return fmt.Errorf("модель не введена")
+			return fmt.Errorf("%s", i18n.T("no model entered"))
 		}
 	}
 
@@ -140,5 +142,9 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	return os.WriteFile(".env", []byte(sb.String()), 0o600)
 }
 
-const FreeProviderHint = "подними локально Ollama (ollama serve) или LM Studio — dmcode подхватит её сам; " +
-	"либо выполни /setup в приложении и выбери провайдера"
+// FreeProviderHint is the advice shown when no endpoint is reachable. It is a
+// function, not a const, because it is translated at call time.
+func FreeProviderHint() string {
+	return i18n.T("run Ollama locally (ollama serve) or LM Studio — dmcode picks it up on its own; " +
+		"or run /setup inside the app and choose a provider")
+}

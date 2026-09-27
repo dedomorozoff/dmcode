@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 // detectProvider is the single-endpoint view of detectProviders, kept for
@@ -42,7 +43,7 @@ func DetectProviders() ([]config.Provider, error) {
 			APIKey:  APIKey,
 			Model:   config.OrDefaultModel(modelName),
 			API:     config.EnvAPI(),
-			Label:   "OpenAI-совместимый",
+			Label:   i18n.T("OpenAI-compatible"),
 		}}, nil
 	}
 
@@ -84,14 +85,14 @@ func DetectProviders() ([]config.Provider, error) {
 	BaseURL = os.Getenv("OPENAI_BASE_URL")
 	APIKey = os.Getenv("OPENAI_API_KEY")
 	if BaseURL == "" || APIKey == "" {
-		return nil, fmt.Errorf("провайдер не настроен — %s", config.FreeProviderHint)
+		return nil, fmt.Errorf("no provider configured — %s", config.FreeProviderHint())
 	}
 	return []config.Provider{{
 		BaseURL:   BaseURL,
 		APIKey:    APIKey,
 		Model:     config.OrDefaultModel(os.Getenv("DMCODE_MODEL")),
 		API:       config.EnvAPI(),
-		Label:     "OpenAI-совместимый",
+		Label:     i18n.T("OpenAI-compatible"),
 		Reasoning: os.Getenv("DMCODE_REASONING_EFFORT"),
 	}}, nil
 }

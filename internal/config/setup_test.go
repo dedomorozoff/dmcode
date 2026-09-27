@@ -229,7 +229,7 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 
 	// key, endpoint, blank Model: rejected.
 	err = SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\n\n", idx)), &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "модель") {
+	if err == nil || !strings.Contains(err.Error(), "model") {
 		t.Errorf("a blank model gave %v, want a complaint about the model", err)
 	}
 
@@ -286,8 +286,8 @@ func TestStdinWizardRejectsIncompleteCustomEndpoint(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"no url", "sk-1\n\nmy-model\n", "base URL не введён"},
-		{"no model", "sk-1\nhttp://127.0.0.1:1234/v1\n\n", "модель не введена"},
+		{"no url", "sk-1\n\nmy-model\n", "no base URL entered"},
+		{"no model", "sk-1\nhttp://127.0.0.1:1234/v1\n\n", "no model entered"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inTempDir(t)
@@ -311,7 +311,7 @@ func TestStdinWizardRejectsEmptyKey(t *testing.T) {
 	inTempDir(t)
 	// Option 3 is OpenRouter, which needs a key.
 	err := SetupWizardWith(strings.NewReader("3\n\n"), &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "ключ не введён") {
+	if err == nil || !strings.Contains(err.Error(), "no key entered") {
 		t.Errorf("an empty key gave %v, want a complaint about the key", err)
 	}
 	if _, serr := os.Stat(".env"); serr == nil {

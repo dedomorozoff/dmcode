@@ -28,13 +28,13 @@ func VerifyTools(BaseURL, APIKey, modelName string, timeout time.Duration) (ok, 
 
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
-			{Text: "Вызови инструмент probe_ok, ничего больше не нужно."},
+			{Text: "Call the probe_ok tool, nothing else."},
 		}}},
 		Config: &genai.GenerateContentConfig{
 			MaxOutputTokens: 64,
 			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
 				Name:        "probe_ok",
-				Description: "Проверочный инструмент. Вызови его.",
+				Description: "Probe tool. Call it.",
 				Parameters:  &genai.Schema{Type: genai.TypeObject},
 			}}}},
 		},

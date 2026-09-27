@@ -10,6 +10,7 @@ import (
 	"google.golang.org/adk/v2/model"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 // PoolMember is one endpoint in the failover pool: the provider it stands for
@@ -87,7 +88,7 @@ func NewFailoverModel(ctx context.Context, pool []config.Provider, backups Backu
 		members = append(members, PoolMember{Prov: p, LLM: LLM})
 	}
 	if len(members) == 0 {
-		return nil, fmt.Errorf("dmcode: пустой пул провайдеров")
+		return nil, fmt.Errorf("dmcode: empty provider pool")
 	}
 	return &failoverModel{members: members, backups: backups, onSwitch: onSwitch}, nil
 }
@@ -268,13 +269,13 @@ func shortReason(err error) string {
 		}
 		switch pe.reason {
 		case failTransport:
-			return "недоступен"
+			return i18n.T("unavailable")
 		case failStream:
-			return "обрыв потока"
+			return i18n.T("stream broke")
 		}
 	}
 	if err == nil {
-		return "ошибка"
+		return i18n.T("failed")
 	}
-	return "ошибка"
+	return i18n.T("failed")
 }
