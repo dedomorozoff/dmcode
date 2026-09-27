@@ -53,6 +53,7 @@ deb: build-linux-amd64
 rpm: build-linux-amd64
 	mkdir -p dist/rpm/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 	rpmbuild --define "_topdir $(CURDIR)/dist/rpm" \
+		--define "srcdir $(CURDIR)" \
 		--define "_arch x86_64" \
 		--define "version $(VERSION)" \
 		--define "major $(shell echo $(VERSION) | cut -d. -f1)" \

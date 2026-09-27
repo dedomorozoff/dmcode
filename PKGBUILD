@@ -14,10 +14,11 @@ provides=('dmcode')
 conflicts=()
 
 build() {
-  cd "$srcdir"
-  make build-linux-amd64 VERSION="$pkgver"
+  # makepkg builds in an empty $srcdir (source=()), so drive the checkout the
+  # release actually happened in rather than a directory with only a PKGBUILD.
+  make -C "$startdir" build-linux-amd64 VERSION="$pkgver"
 }
 
 package() {
-  install -Dm755 "dist/dmcode-linux-amd64" "$pkgdir/usr/bin/dmcode"
+  install -Dm755 "$startdir/dist/dmcode-linux-amd64" "$pkgdir/usr/bin/dmcode"
 }
