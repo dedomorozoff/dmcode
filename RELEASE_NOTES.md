@@ -40,6 +40,12 @@ go install github.com/dedomorozoff/dmcode@latest
 - **`make install` and `make uninstall`.** Install into `$(go env GOBIN)`,
   falling back to `GOPATH/bin` — both writable without root and both present on
   Windows. Pass `PREFIX=/usr/local` for a system-wide install.
+- **Pasting works in the setup wizard.** Pasting a key with `ctrl+v` or the
+  terminal's own paste did nothing before: pastes arrive as a message the
+  overlays were not listening for, and `ctrl+v` was unbound. Both now work in
+  `/setup`, the command palette and the model picker. Pasted text is collapsed
+  to a single line, so a key copied from a web page no longer lands in `.env`
+  with a trailing newline and silently fails to load on the next start.
 - **README in English**, covering install, the tools, the hotkeys and the
   language setting.
 
