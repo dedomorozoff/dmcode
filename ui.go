@@ -15,6 +15,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
+	"github.com/charmbracelet/x/ansi"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"
@@ -71,13 +72,41 @@ var (
 
 	boxBorder = lipgloss.NormalBorder()
 
-	styleSidebar      = lipgloss.NewStyle().Border(boxBorder, true).BorderForeground(cBorder).Padding(0, 1)
+	// The sidebar carries a one-column left margin so its border never touches
+	// the chat panel's; without it the two boxes read as one ragged block.
+	styleSidebar      = lipgloss.NewStyle().Border(boxBorder, true).BorderForeground(cBorder).Padding(0, 1).MarginLeft(sidebarGap)
 	styleSidebarLabel = lipgloss.NewStyle().Bold(true).Foreground(cTool)
 	styleSidebarValue = lipgloss.NewStyle().Foreground(cAgent)
 
 	stylePanel  = lipgloss.NewStyle().Border(boxBorder, true).BorderForeground(cBorder)
 	styleTopBar = lipgloss.NewStyle().Border(boxBorder, false, false, true, false).BorderForeground(cBorder).Padding(0, 1)
 )
+
+// Frame geometry. lipgloss treats a style's Width/Height as the *total* block
+// size with borders already included, so every number here is an outer
+// measurement and the inner sizes are derived from it. Getting this backwards
+// is what left the sidebar two rows short of the chat panel and every row of
+// the frame a few columns narrower than the terminal.
+const (
+	sidebarBoxWidth = 24 // outer width of the sidebar box, margins excluded
+	sidebarGap      = 1  // blank columns between the chat panel and the sidebar
+	minSidebarTerm  = 90 // below this terminal width the sidebar is dropped
+	minChatWidth    = 36 // the chat panel is not squeezed below this
+
+	headerHeight = 2 // 1 row of text + 1 bottom border
+	statusHeight = 1 // single row
+	inputHeight  = 3 // 1 row of text + 2 borders
+	panelBorder  = 2 // the chat panel's top and bottom border
+	minViewRows  = 1 // a framed panel is an empty row between two borders
+
+	// chromeHeight is everything on screen that is not transcript: the header,
+	// the status bar, the input box and the chat panel's own two borders.
+	chromeHeight = headerHeight + statusHeight + inputHeight + panelBorder
+)
+
+// statusHotkeys are dropped from the status bar one by one as the terminal
+// narrows, so the model name survives longest.
+var statusHotkeys = []string{"ctrl+p", "ctrl+b", "ctrl+y", "esc"}
 
 type deltaMsg struct{ text string }
 type toolCallMsg struct {
@@ -189,7 +218,7 @@ func (m *uiModel) commands() []command {
 		}},
 		{name: "help", desc: "подсказки", run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
-				line{kindSys, "ctrl+p — палитра · ctrl+b — панель · ctrl+y — копировать ответ"},
+				line{kindSys, "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ"},
 				line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
 				line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
 				line{kindSys, "/models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
@@ -290,6 +319,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		// No followVP here on purpose: the tail of Update re-syncs the viewport
+		// for every message, which is what re-wraps the transcript at the new
+		// width. Calling it twice would render the whole history twice.
 		m.layout()
 	case tea.KeyPressMsg:
 		if m.palette.open {
@@ -377,7 +409,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, "ctrl+p — палитра · ctrl+b — панель · ctrl+y — копировать ответ"},
+					line{kindSys, "ctrl+p — палитра команд · ctrl+b — панель · ctrl+y — копировать ответ"},
 					line{kindSys, "esc — прервать текущий ход · pgup/pgdown — скролл"},
 					line{kindSys, "мышь — выделение и копирование текста прямо в терминале"},
 					line{kindSys, "/models, /model <id>, /copy, /sidebar, /new, /clear, /quit"})
@@ -434,14 +466,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastTool = msg.name
 		m.toolCallCount++
 		m.statusText = "вызов: " + msg.name
-		m.history = append(m.history, line{kindTool, "⏺ " + msg.name + "(" + msg.args + ")"})
+		m.history = append(m.history, line{kindTool, msg.name + "(" + msg.args + ")"})
 		m.historyDirty = true
 	case toolResMsg:
 		m.statusText = "ответ: " + msg.name
-		out := wrapLines(msg.output, m.contentWidth()-2, 5)
-		for _, l := range out {
-			m.history = append(m.history, line{kindToolRes, "  ⎿ " + l})
-		}
+		// Stored raw: renderHistory owns the "⎿" gutter and the wrapping, so
+		// pre-wrapping here would both double the prefix and measure against a
+		// width that ignores it.
+		m.history = append(m.history, line{kindToolRes, msg.output})
 		m.historyDirty = true
 	case modelsListMsg:
 		if msg.err != nil {
@@ -490,47 +522,59 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// sidebarVisible reports whether the sidebar is actually on screen. Having it
+// switched on is not enough: below minSidebarTerm there is no room for it next
+// to a usable chat panel, so it is dropped rather than squeezing the transcript
+// down to a column of text.
+func (m *uiModel) sidebarVisible() bool {
+	return m.showSidebar && m.width >= minSidebarTerm && m.width-sidebarBoxWidth-sidebarGap >= minChatWidth
+}
+
+// chatBoxWidth is the outer width of the chat panel, borders included. It is
+// never allowed to exceed the terminal: overrunning it is what pushed whole
+// rows of the frame past the right edge.
 func (m *uiModel) chatBoxWidth() int {
-	if m.showSidebar && m.width >= 90 {
-		w := m.width - 28
-		if w > 20 {
-			return w
-		}
+	w := m.width
+	if m.sidebarVisible() {
+		w -= sidebarBoxWidth + sidebarGap
 	}
-	if m.width > 2 {
-		return m.width
-	}
-	return 98
+	return max(w, 8)
 }
 
+// contentWidth is how many cells a transcript row may occupy. The chat panel
+// spends panelBorder columns on its vertical borders, so wrapping to anything
+// wider is exactly what pushes text past the frame and into the sidebar.
 func (m *uiModel) contentWidth() int {
-	w := m.chatBoxWidth() - 4
-	if w < 10 {
-		return 10
-	}
-	return w
+	return max(m.chatBoxWidth()-panelBorder, 8)
 }
 
+// suggestHeight is the row the tab-completion hint occupies, or 0 when hidden.
+// On a terminal too short to hold the whole frame the hint is dropped: the
+// input box matters more than the completion, and a frame one row too tall
+// scrolls the input off the bottom of the screen.
+func (m *uiModel) suggestHeight() int {
+	if len(m.suggest) == 0 {
+		return 0
+	}
+	if m.height < chromeHeight+2 {
+		return 0
+	}
+	return 1
+}
+
+// layout sizes the viewport so that header + chat panel + status bar +
+// suggestion row + input box add up to exactly the terminal height. The
+// viewport receives the panel's *inner* row count; View adds the borders back.
 func (m *uiModel) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	suggestHeight := 0
-	if len(m.suggest) > 0 {
-		suggestHeight = 1
-	}
-	// Header: 2 lines (1 line text + 1 line bottom border)
-	// Status bar: 1 line
-	// Input box: 3 lines (1 line text + 2 lines border)
-	// Viewport panel borders: 2 lines (top + bottom)
-	// Suggest line: suggestHeight
-	// Total chrome: 2 + 1 + 3 + 2 = 8 lines
-	panelHeight := m.height - 8 - suggestHeight
-	if panelHeight < 4 {
-		panelHeight = 4
-	}
+	rows := max(m.height-chromeHeight-m.suggestHeight(), minViewRows)
 	m.vp.SetWidth(m.contentWidth())
-	m.vp.SetHeight(panelHeight)
+	m.vp.SetHeight(rows)
+	// The input scrolls horizontally within one row; without an explicit width
+	// a long prompt grows the box and pushes the frame off the bottom.
+	m.input.SetWidth(max(m.contentWidth()-ansi.StringWidth(m.input.Prompt), 8))
 	m.historyDirty = true
 }
 
@@ -588,6 +632,57 @@ func (m *uiModel) updateSuggest() {
 	}
 }
 
+// transcriptRow describes how one history entry is laid out in the chat panel:
+// a gutter in front of the first row and a matching hanging indent on the rows
+// that follow, so wrapped text stays aligned under its own marker instead of
+// jumping back to column zero.
+type transcriptRow struct {
+	style lipgloss.Style
+	first string
+	rest  string
+	// verbatim marks pre-formatted art (the logo), which keeps its own line
+	// breaks: re-wrapping box-drawing runes would scramble the picture.
+	verbatim bool
+}
+
+func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
+	switch kind {
+	case kindUser:
+		return transcriptRow{style: styleUser, first: "› ", rest: "  "}
+	case kindTool:
+		return transcriptRow{style: styleTool, first: "⏺ ", rest: "  "}
+	case kindToolRes:
+		return transcriptRow{style: styleToolRes, first: "  ⎿ ", rest: "    "}
+	case kindAgent:
+		return transcriptRow{style: styleAgent}
+	case kindSys:
+		return transcriptRow{style: styleSys}
+	case kindErr:
+		return transcriptRow{style: styleErr}
+	case kindLogo:
+		return transcriptRow{style: styleLogo, verbatim: true}
+	}
+	return transcriptRow{style: styleAgent}
+}
+
+// rowRows turns one history entry into the transcript rows it occupies. Prose is
+// wrapped to width under a hanging indent. Pre-formatted art keeps its own line
+// breaks and is dropped whole when it cannot fit: a banner sliced to the panel
+// edge, or broken across rows, reads as corruption rather than as a logo. The
+// header names the app regardless, so losing the art costs nothing.
+func rowRows(text string, width int, row transcriptRow) []string {
+	if !row.verbatim {
+		return wrapIndent(text, width, row.first, row.rest)
+	}
+	rows := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	for _, r := range rows {
+		if ansi.StringWidth(r) > width {
+			return nil
+		}
+	}
+	return rows
+}
+
 func (m *uiModel) renderHistory() string {
 	w := m.contentWidth()
 	if !m.historyDirty && m.cachedWidth == w && m.cachedHistory != "" {
@@ -595,33 +690,9 @@ func (m *uiModel) renderHistory() string {
 	}
 	var b strings.Builder
 	for _, l := range m.history {
-		var style lipgloss.Style
-		wrap := true
-		switch l.kind {
-		case kindUser:
-			style, l.text = styleUser, "› "+l.text
-		case kindAgent:
-			style = styleAgent
-		case kindTool:
-			style = styleTool
-		case kindToolRes:
-			style = styleToolRes
-			wrap = false
-		case kindSys:
-			style = styleSys
-		case kindErr:
-			style = styleErr
-			wrap = false
-		case kindLogo:
-			style = styleLogo
-			wrap = false
-		}
-		if wrap {
-			for _, seg := range wordWrap(l.text, w) {
-				b.WriteString(style.Render(seg) + "\n")
-			}
-		} else {
-			b.WriteString(style.Render(l.text) + "\n")
+		row := m.rowStyle(l.kind)
+		for _, r := range rowRows(l.text, w, row) {
+			b.WriteString(row.style.Render(r) + "\n")
 		}
 	}
 	m.cachedHistory = b.String()
@@ -630,38 +701,93 @@ func (m *uiModel) renderHistory() string {
 	return m.cachedHistory
 }
 
-func wordWrap(s string, width int) []string {
-	if width < 10 {
-		width = 10
+// wrapIndent breaks text into rows no wider than width cells, prefixing the
+// very first row with first and every later row with rest.
+func wrapIndent(text string, width int, first, rest string) []string {
+	if width < 1 {
+		width = 1
+	}
+	// Rows are wrapped against the wider of the two indents, so neither the
+	// gutter row nor a continuation row can spill past the frame.
+	avail := width - max(ansi.StringWidth(first), ansi.StringWidth(rest))
+	if avail < 1 {
+		avail = 1
 	}
 	var out []string
-	for _, para := range strings.Split(s, "\n") {
-		if para == "" {
-			out = append(out, "")
-			continue
+	for _, para := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		for _, row := range wrapCells(para, avail) {
+			indent := rest
+			if len(out) == 0 {
+				indent = first
+			}
+			out = append(out, indent+row)
 		}
-		var cur strings.Builder
-		for _, word := range strings.Split(para, " ") {
-			for len(word) > width {
-				if cur.Len() > 0 {
-					out = append(out, cur.String())
-					cur.Reset()
-				}
-				out = append(out, word[:width])
-				word = word[width:]
-			}
-			if cur.Len()+len(word)+1 > width {
-				out = append(out, cur.String())
-				cur.Reset()
-			}
-			if cur.Len() > 0 {
-				cur.WriteString(" ")
-			}
-			cur.WriteString(word)
-		}
-		out = append(out, cur.String())
 	}
 	return out
+}
+
+// wrapCells breaks one logical line into rows of at most width terminal cells.
+// It prefers word boundaries and only splits inside a word when that word
+// cannot fit on a row of its own. Widths are counted in cells rather than bytes
+// so that Cyrillic, CJK and emoji all measure the way the terminal draws them.
+func wrapCells(s string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	s = strings.TrimRight(s, " \t")
+	if ansi.StringWidth(s) <= width {
+		return []string{s}
+	}
+	var rows []string
+	cur, curW := "", 0
+	flush := func() {
+		rows = append(rows, cur)
+		cur, curW = "", 0
+	}
+	for _, word := range strings.Split(s, " ") {
+		wordW := ansi.StringWidth(word)
+		if wordW == 0 {
+			// A run of spaces is kept, leading ones included: they are often the
+			// indent of a pre-formatted line, and the caller adds its own
+			// gutter on top of the text rather than inside it.
+			if curW < width {
+				cur += " "
+				curW++
+			}
+			continue
+		}
+		switch {
+		case curW == 0 && wordW <= width:
+			cur, curW = word, wordW
+		case curW > 0 && curW+1+wordW <= width:
+			cur += " " + word
+			curW += 1 + wordW
+		default:
+			if curW > 0 {
+				flush()
+			}
+			for wordW > width {
+				head, rest := cutCells(word, width)
+				rows = append(rows, head)
+				word, wordW = rest, ansi.StringWidth(rest)
+			}
+			cur, curW = word, wordW
+		}
+	}
+	flush()
+	return rows
+}
+
+// cutCells splits s at the last grapheme boundary that fits in width cells, so
+// a rune is never halved.
+func cutCells(s string, width int) (head, rest string) {
+	if width < 1 {
+		width = 1
+	}
+	if ansi.StringWidth(s) <= width {
+		return s, ""
+	}
+	return ansi.Truncate(s, width, ""), ansi.TruncateLeft(s, width, "")
 }
 
 func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -757,42 +883,6 @@ func (m *uiModel) filteredModels() []string {
 	return out
 }
 
-func (m *uiModel) modelPickerBox() string {
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
-	var b strings.Builder
-	b.WriteString(styleHeader.Render(" ⌘ модели ") + styleHint.Render("  ↑↓ выбор · enter — переключить · esc — закрыть\n"))
-	b.WriteString(styleHint.Render(" › "+m.picker.query) + "\n\n")
-	filtered := m.filteredModels()
-	if len(filtered) == 0 {
-		b.WriteString(styleHint.Render("   ничего не найдено\n"))
-	}
-	for i, id := range filtered {
-		marker := "   "
-		style := lipgloss.NewStyle()
-		if id == m.prov.model {
-			marker = " ● "
-			style = styleTool
-		}
-		if i == m.picker.selected {
-			b.WriteString(styleSel.Render(" ▸ "+id) + "\n")
-			continue
-		}
-		b.WriteString(style.Render(marker+id) + "\n")
-	}
-	return stylePanel.Render(strings.TrimRight(b.String(), "\n"))
-}
-
-func (m *uiModel) filteredCommands() []command {
-	pattern := strings.ToLower(m.palette.query)
-	var out []command
-	for _, c := range m.commands() {
-		if pattern == "" || strings.Contains(strings.ToLower(c.name), pattern) || strings.Contains(strings.ToLower(c.desc), pattern) {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 func (m *uiModel) fetchModelsCmd() tea.Cmd {
 	p := m.prov
 	return func() tea.Msg {
@@ -873,180 +963,377 @@ func renderToolResponse(fr *genai.FunctionResponse) string {
 	return truncate(string(b), 600)
 }
 
+// truncate cuts s to at most n terminal cells. Counting cells instead of bytes
+// matters because the strings routed through here hold Cyrillic (2 bytes per
+// rune) and box-drawing runes: a byte cut lands mid-rune and the terminal
+// prints replacement characters.
 func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
+	if n <= 0 {
+		return ""
 	}
-	return s[:n-1] + "…"
+	return ansi.Truncate(s, n, "…")
 }
 
-func wrapLines(s string, width, maxLines int) []string {
-	s = strings.TrimRight(s, "\n")
-	var out []string
-	for _, l := range strings.Split(s, "\n") {
-		for len(l) > width {
-			out = append(out, l[:width])
-			l = l[width:]
-		}
-		out = append(out, l)
-	}
-	if len(out) > maxLines {
-		out = append(out[:maxLines], "… (обрезано)")
-	}
-	return out
-}
-
-func (m *uiModel) paletteBox() string {
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
-	var b strings.Builder
-	b.WriteString(styleHeader.Render(" ⌘ команды ") + styleHint.Render("  esc — закрыть\n"))
-	b.WriteString(styleHint.Render(" › "+m.palette.query) + "\n\n")
-	filtered := m.filteredCommands()
-	if len(filtered) == 0 {
-		b.WriteString(styleHint.Render("   ничего не найдено\n"))
-	}
-	for i, c := range filtered {
-		if i == m.palette.selected {
-			b.WriteString(styleSel.Render(" ▸ "+c.name) + styleHint.Render(" — "+c.desc) + "\n")
-		} else {
-			b.WriteString("   " + c.name + styleHint.Render(" — "+c.desc) + "\n")
-		}
-	}
-	return stylePanel.Render(strings.TrimRight(b.String(), "\n"))
-}
-
+// sidebarView renders the info panel. height is the *outer* height it has to
+// occupy, borders included, and it must be the same value the chat panel is
+// given — the two are framed side by side and any difference in their heights
+// leaves one bottom border floating above the other.
+//
+// Three lipgloss details drive the shape. Height only pads a block up, it never
+// crops; the word wrap happens at Width minus the borders and padding, so a row
+// count taken before framing is not the row count that reaches the screen; and
+// the left margin is applied after everything else, adding a column but no
+// row. So the body is wrapped and measured on its own, trimmed to the budget,
+// and only then framed.
 func (m *uiModel) sidebarView(height int) string {
+	const (
+		sbPad   = 1 // horizontal padding
+		sbEdge  = 1 // one vertical border per side
+		sbInner = sidebarBoxWidth - 2*sbPad - 2*sbEdge
+	)
+
 	var b strings.Builder
-
-	b.WriteString(styleSidebarLabel.Render("МОДЕЛЬ") + "\n")
-	b.WriteString(styleSidebarValue.Render(" "+truncate(m.prov.model, 20)) + "\n\n")
-
-	b.WriteString(styleSidebarLabel.Render("СЕССИЯ") + "\n")
-	b.WriteString(styleHint.Render(" "+truncate(m.sessionID, 20)) + "\n")
-	b.WriteString(styleHint.Render(fmt.Sprintf(" ходов: %d · тулов: %d", m.turnCount, m.toolCallCount)) + "\n\n")
-
-	b.WriteString(styleSidebarLabel.Render("ПАПКА") + "\n")
-	b.WriteString(styleSidebarValue.Render(" "+truncate(m.workDir, 20)) + "\n\n")
-
-	if m.lastTool != "" {
-		b.WriteString(styleSidebarLabel.Render("ПОСЛЕДНИЙ ТУЛ") + "\n")
-		b.WriteString(styleTool.Render(" ⏺ "+m.lastTool) + "\n\n")
+	row := func(style lipgloss.Style, text string) {
+		b.WriteString(style.Render(text) + "\n")
+	}
+	// value writes an indented entry, wrapping it under its own marker so a
+	// long model or tool name stays readable instead of being cut mid-word. The
+	// text is cut to the room the marker leaves, so the ellipsis lands on the
+	// last row instead of being stranded on a continuation of its own.
+	value := func(style lipgloss.Style, marker, text string) {
+		indent := strings.Repeat(" ", ansi.StringWidth(marker))
+		for _, r := range wrapIndent(truncate(text, sbInner-ansi.StringWidth(marker)), sbInner, marker, indent) {
+			b.WriteString(style.Render(r) + "\n")
+		}
 	}
 
-	b.WriteString(styleSidebarLabel.Render("ИНСТРУМЕНТЫ") + "\n")
-	for _, t := range m.toolNames {
-		b.WriteString(styleHint.Render(" · "+t) + "\n")
+	row(styleSidebarLabel, "МОДЕЛЬ")
+	value(styleSidebarValue, " ", m.prov.model)
+	if m.prov.label != "" {
+		row(styleHint, truncate("via "+m.prov.label, sbInner))
 	}
 	b.WriteString("\n")
 
-	b.WriteString(styleSidebarLabel.Render("ГОРЯЧИЕ КЛАВИШИ") + "\n")
-	b.WriteString(styleHint.Render(" ctrl+p  команды") + "\n")
-	b.WriteString(styleHint.Render(" ctrl+b  скрыть панель") + "\n")
-	b.WriteString(styleHint.Render(" ctrl+y  копировать ответ") + "\n")
-	b.WriteString(styleHint.Render(" esc     отмена хода") + "\n")
-	b.WriteString(styleHint.Render(" pgup/dn скролл") + "\n")
+	row(styleSidebarLabel, "СЕССИЯ")
+	row(styleHint, " "+truncate(m.sessionID, sbInner-1))
+	row(styleHint, fmt.Sprintf(" ходов: %d", m.turnCount))
+	row(styleHint, fmt.Sprintf(" тулов: %d", m.toolCallCount))
+	b.WriteString("\n")
 
-	return styleSidebar.Width(24).Height(height).Render(b.String())
+	row(styleSidebarLabel, "ПАПКА")
+	value(styleSidebarValue, " ", m.workDir)
+	b.WriteString("\n")
+
+	if m.lastTool != "" {
+		row(styleSidebarLabel, "ПОСЛЕДНИЙ ТУЛ")
+		value(styleTool, " ⏺ ", m.lastTool)
+		b.WriteString("\n")
+	}
+
+	row(styleSidebarLabel, "ИНСТРУМЕНТЫ")
+	for _, t := range m.toolNames {
+		row(styleHint, " · "+t)
+	}
+	b.WriteString("\n")
+
+	row(styleSidebarLabel, "ГОРЯЧИЕ КЛАВИШИ")
+	row(styleHint, " ctrl+p  команды")
+	row(styleHint, " ctrl+b  скрыть панель")
+	row(styleHint, " ctrl+y  копировать ответ")
+	row(styleHint, " esc     отмена хода")
+	row(styleHint, " pgup/dn скролл")
+
+	// Measuring at sbInner wraps and pads every row to exactly the width the
+	// framed box will have available, so the split below counts real rows.
+	body := lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+	if height <= 0 {
+		return styleSidebar.Width(sidebarBoxWidth).Render(body)
+	}
+
+	lines := strings.Split(body, "\n")
+	if budget := height - 2*sbEdge; len(lines) > budget {
+		if budget < 1 {
+			budget = 1
+		}
+		lines = lines[:budget]
+		// Mark the cut so a trimmed panel is not read as a complete one.
+		lines[budget-1] = styleHint.Render("…")
+	}
+
+	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
+// statusBarView renders the single-row footer. Everything in it competes for
+// one line, so the model name and the hotkey list are fitted against the space
+// that is actually left and the rest is dropped. Overflowing is not cosmetic:
+// lipgloss word-wraps the surplus onto a second row, which makes the whole
+// frame one row taller than the terminal and scrolls the input off the bottom.
 func (m *uiModel) statusBarView() string {
+	width := max(m.width, 16)
+	inner := width - 2 // the bar's own left/right padding
+	const sep = "  │  "
+
 	var badge string
-	if m.busy {
+	switch {
+	case m.busy:
 		badge = styleBadgeBusy.Render("⏳ РАБОТАЕТ")
-	} else if m.statusText == "ход прерван" || m.statusText == "прервано" {
+	case m.statusText == "ход прерван", m.statusText == "прервано":
 		badge = styleBadgeStop.Render("⏹ ПРЕРВАНО")
-	} else {
+	default:
 		badge = styleBadgeReady.Render("● ГОТОВ")
 	}
 
 	statusDesc := m.statusText
-	if statusDesc == "" {
-		if m.busy {
-			statusDesc = m.spin.View() + " выполнение..."
-		} else {
-			statusDesc = "ожидание задачи"
-		}
-	} else if m.busy {
+	switch {
+	case statusDesc == "" && m.busy:
+		statusDesc = m.spin.View() + " выполнение..."
+	case statusDesc == "":
+		statusDesc = "ожидание задачи"
+	case m.busy:
 		statusDesc = m.spin.View() + " " + statusDesc
 	}
 
-	modelInfo := styleHint.Render(m.prov.model)
-	hotkeys := styleHint.Render("ctrl+p палитра · ctrl+b панель · ctrl+y копия · esc отмена")
-
 	left := badge + "  " + statusDesc
-	right := modelInfo + "  │  " + hotkeys
+	// Two columns are always held back as the gutter between the two halves, so
+	// the gap can never collapse to zero and push the row over the wrap point.
+	avail := inner - ansi.StringWidth(left) - 2
+	if avail < 8 {
+		return styleStatusBar.Width(width).Render(truncate(left, inner))
+	}
 
-	totalWidth := m.width
-	if totalWidth <= 0 {
-		totalWidth = 90
+	// Right half, assembled most- to least-important so the hotkeys are what
+	// disappears on a narrow terminal.
+	var right string
+	fit := func(s string) bool {
+		cand := s
+		if right != "" {
+			cand = right + sep + s
+		}
+		if ansi.StringWidth(cand) > avail {
+			return false
+		}
+		right = cand
+		return true
 	}
-	gap := totalWidth - lipgloss.Width(left) - lipgloss.Width(right) - 4
-	if gap < 2 {
-		gap = 2
+	if fit(truncate(m.prov.model, avail)) {
+		for _, k := range statusHotkeys {
+			if !fit(k) {
+				break
+			}
+		}
 	}
-	content := left + strings.Repeat(" ", gap) + right
-	return styleStatusBar.Width(totalWidth).Render(content)
+
+	content := left
+	if right != "" {
+		gap := inner - ansi.StringWidth(left) - ansi.StringWidth(right)
+		content = left + strings.Repeat(" ", max(gap, 2)) + right
+	}
+	return styleStatusBar.Width(width).Render(content)
+}
+
+// headerView renders the app name, the model and the session id on one row.
+// As with the status bar, the variable-length parts are truncated rather than
+// allowed to wrap the row onto a second one.
+func (m *uiModel) headerView() string {
+	width := max(m.width, 16)
+	inner := width - 2 // the bar's own left/right padding
+	const (
+		sep  = "  ·  "
+		name = "dmcode"
+	)
+
+	avail := inner - ansi.StringWidth(name) - 2*ansi.StringWidth(sep)
+	if avail < 12 {
+		return styleTopBar.Width(width).Render(styleHeader.Render(name))
+	}
+
+	// The session id is the less useful of the two on a narrow screen, so the
+	// model keeps the columns and the id is reduced to a readable stub.
+	model := truncate(m.prov.model, max(avail-ansi.StringWidth(sep)-8, 4))
+	id := truncate(m.sessionID, max(avail-ansi.StringWidth(sep)-ansi.StringWidth(model), 4))
+
+	return styleTopBar.Width(width).Render(
+		styleHeader.Render(name) + styleHint.Render(sep+model+sep+id))
+}
+
+// suggestView renders the tab-completion row. It is a single row, so the tail
+// of the list is cut instead of wrapped.
+func (m *uiModel) suggestView() string {
+	if len(m.suggest) == 0 {
+		return ""
+	}
+	const (
+		indent  = 2
+		tail    = "  (tab)"
+		maxShow = 6
+	)
+
+	var b strings.Builder
+	b.WriteString(strings.Repeat(" ", indent))
+	used := indent
+	for i, s := range m.suggest {
+		if i >= maxShow {
+			break
+		}
+		seg := s
+		if i > 0 {
+			seg = "  " + s
+		}
+		if used+ansi.StringWidth(seg)+ansi.StringWidth(tail) > m.width {
+			break
+		}
+		if i == 0 {
+			b.WriteString(styleSuggest.Render(s))
+		} else {
+			b.WriteString(styleHint.Render(seg))
+		}
+		used += ansi.StringWidth(seg)
+	}
+	b.WriteString(styleHint.Render(tail))
+	return b.String()
+}
+
+// floatingWidth is the outer width of the palette and the model picker. Both
+// list model identifiers, which are unbounded, so their rows are wrapped inside
+// a frame that fits the terminal instead of growing past it.
+func (m *uiModel) floatingWidth() int {
+	return max(min(m.width, 68), 24)
+}
+
+// floatingPanel frames a palette-style box: a two-row header, a list body and
+// the border. The body is trimmed by rendered row rather than by entry, because
+// one long model id can take two rows and a count taken before wrapping is not
+// the count that reaches the screen. Trimming stops at the selected entry: a
+// panel scrolled away from its cursor is worse than one listing fewer models.
+func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int) string {
+	inner := m.floatingWidth() - panelBorder
+	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+
+	head := []string{
+		styleHeader.Render(" "+title+" ") + styleHint.Render("esc — закрыть"),
+		styleHint.Render(truncate(" › "+query, inner)),
+		"",
+	}
+
+	// One row is held back for the "still hidden" marker, so revealing it can
+	// never push the bottom border off the screen.
+	room := max(m.height-panelBorder-len(head)-1, 1)
+	total := len(entries)
+	for len(entries) > 0 && len(entries)-1 != sel && rowCount(entries) > room {
+		entries = entries[:len(entries)-1]
+	}
+
+	rows := make([]string, 0, len(head)+room+1)
+	rows = append(rows, head...)
+	for i, group := range entries {
+		for _, r := range group {
+			if i == sel {
+				r = styleSel.Render(r)
+			}
+			rows = append(rows, r)
+		}
+	}
+	if len(entries) == 0 {
+		rows = append(rows, styleHint.Render("   ничего не найдено"))
+	}
+	if hidden := total - len(entries); hidden > 0 {
+		rows = append(rows, styleHint.Render("   ↓ ещё "+fmt.Sprint(hidden)))
+	}
+
+	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
+}
+
+// rowCount counts the rendered rows a list of entry groups occupies.
+func rowCount(entries [][]string) int {
+	n := 0
+	for _, e := range entries {
+		n += len(e)
+	}
+	return n
+}
+
+func (m *uiModel) paletteBox() string {
+	inner := m.floatingWidth() - panelBorder
+	var entries [][]string
+	for i, c := range m.filteredCommands() {
+		marker := "   "
+		if i == m.palette.selected {
+			marker = " ▸ "
+		}
+		entries = append(entries, wrapIndent(c.name+" — "+c.desc, inner, marker, "     "))
+	}
+	return m.floatingPanel("⌘ команды", m.palette.query, entries, m.palette.selected)
+}
+
+func (m *uiModel) modelPickerBox() string {
+	inner := m.floatingWidth() - panelBorder
+	var entries [][]string
+	for i, id := range m.filteredModels() {
+		// The marker is the first-line indent rather than part of the text, so
+		// the rows stay inside the frame instead of being re-wrapped by it.
+		marker, style := "   ", lipgloss.NewStyle()
+		switch {
+		case i == m.picker.selected:
+			marker, style = " ▸ ", lipgloss.NewStyle()
+		case id == m.prov.model:
+			marker, style = " ● ", styleTool
+		}
+		rows := wrapIndent(id, inner, marker, "     ")
+		if i != m.picker.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	return m.floatingPanel("⌘ модели", m.picker.query, entries, m.picker.selected)
+}
+
+func (m *uiModel) filteredCommands() []command {
+	pattern := strings.ToLower(m.palette.query)
+	var out []command
+	for _, c := range m.commands() {
+		if pattern == "" || strings.Contains(strings.ToLower(c.name), pattern) || strings.Contains(strings.ToLower(c.desc), pattern) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (m *uiModel) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("dmcode загружается…")
 	}
-	if m.picker.open {
-		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.modelPickerBox()))
+	if m.picker.open || m.palette.open {
+		box := m.paletteBox()
+		if m.picker.open {
+			box = m.modelPickerBox()
+		}
+		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
 		v.AltScreen = true
 		return v
 	}
-	if m.palette.open {
-		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.paletteBox()))
-		v.AltScreen = true
-		return v
+
+	// Every row of the frame is exactly m.width wide and together they are
+	// exactly m.height rows: the chat panel and the sidebar are framed to the
+	// same outer height, and the viewport gets the panel's inner rows.
+	rows := m.vp.Height()
+	panel := stylePanel.Width(m.chatBoxWidth()).Height(rows + panelBorder).Render(m.vp.View())
+
+	middle := panel
+	if m.sidebarVisible() {
+		middle = lipgloss.JoinHorizontal(lipgloss.Top, panel, m.sidebarView(rows+panelBorder))
 	}
 
-	header := styleTopBar.Width(m.width).Render(
-		styleHeader.Render("dmcode") + styleHint.Render("  ·  "+m.prov.model+"  ·  "+m.sessionID))
-
-	suggestLine := ""
-	if len(m.suggest) > 0 {
-		first := styleSuggest.Render(m.suggest[0])
-		rest := styleHint.Render("  " + strings.Join(m.suggest[1:min(len(m.suggest), 6)], "  "))
-		suggestLine = "  " + first + rest + styleHint.Render("  (tab)") + "\n"
+	// JoinVertical pads every block out to the widest one, so a single
+	// overflowing row is enough to shift the whole frame sideways.
+	parts := []string{m.headerView(), middle, m.statusBarView()}
+	if m.suggestHeight() == 1 {
+		parts = append(parts, m.suggestView())
 	}
+	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
-	// Main middle section: chat viewport + optional sidebar
-	chatW := m.chatBoxWidth()
-	viewportBox := stylePanel.Width(chatW - 2).Height(m.vp.Height()).Render(m.vp.View())
-
-	var middle string
-	if m.showSidebar && m.width >= 90 {
-		sb := m.sidebarView(m.vp.Height())
-		middle = lipgloss.JoinHorizontal(lipgloss.Top, viewportBox, sb)
-	} else {
-		middle = viewportBox
-	}
-
-	statusBar := m.statusBarView()
-	inputBox := stylePanel.Width(m.width - 2).Render(m.input.View())
-
-	var body string
-	if suggestLine != "" {
-		body = lipgloss.JoinVertical(lipgloss.Left,
-			header,
-			middle,
-			statusBar,
-			suggestLine,
-			inputBox,
-		)
-	} else {
-		body = lipgloss.JoinVertical(lipgloss.Left,
-			header,
-			middle,
-			statusBar,
-			inputBox,
-		)
-	}
-
-	v := tea.NewView(body)
+	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
 	v.AltScreen = true
 	// Note: We deliberately do NOT set v.MouseMode = tea.MouseModeCellMotion.
 	// This enables native terminal mouse text selection and copying without blocking user selection!

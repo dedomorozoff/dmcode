@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/openaimodel"
 	"google.golang.org/adk/v2/tool"
 )
@@ -25,41 +26,88 @@ func detectProvider() (provider, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	modelName := os.Getenv("DMCODE_MODEL")
 
+	// An explicit endpoint always wins: the user configured it on purpose.
+	// DMCODE_API=chat forces the /chat/completions wire for endpoints that
+	// speak both, or that only speak chat.
+	if baseURL != "" && apiKey != "" {
+		return provider{
+			baseURL: baseURL,
+			apiKey:  apiKey,
+			model:   orDefaultModel(modelName),
+			api:     envAPI(),
+			label:   "OpenAI-совместимый",
+		}, nil
+	}
+
 	type preset struct {
 		env   string
 		url   string
 		model string
+		api   string
+		label string
 	}
 	for _, p := range []preset{
-		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free"},
-		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b"},
-		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini"},
-		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest"},
+		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free", apiResponses, "OpenCode Zen"},
+		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", apiResponses, "Groq"},
+		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", apiResponses, "GitHub Models"},
+		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", apiResponses, "Mistral"},
+		{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", apiChat, "OpenRouter"},
 	} {
-		if baseURL == "" && apiKey == "" {
-			if key := os.Getenv(p.env); key != "" {
-				apiKey, baseURL = key, p.url
-				if modelName == "" {
-					modelName = p.model
-				}
-			}
+		if key := os.Getenv(p.env); key != "" {
+			return provider{
+				baseURL: p.url,
+				apiKey:  key,
+				model:   orDefaultModel(firstNonEmpty(modelName, p.model)),
+				api:     p.api,
+				label:   p.label,
+			}, nil
 		}
 	}
-	if baseURL == "" && apiKey == "" {
-		if err := setupWizard(); err != nil {
-			return provider{}, err
-		}
-		baseURL = os.Getenv("OPENAI_BASE_URL")
-		apiKey = os.Getenv("OPENAI_API_KEY")
-		modelName = os.Getenv("DMCODE_MODEL")
-		if baseURL == "" || apiKey == "" {
-			return provider{}, fmt.Errorf("провайдер не настроен — запусти ещё раз и введи ключ")
+
+	// Nothing configured: look for something free that already works, so a
+	// fresh checkout is usable with no setup at all.
+	if p, ok := discoverFreeProvider(); ok {
+		return p, nil
+	}
+
+	if err := setupWizard(); err != nil {
+		return provider{}, err
+	}
+	baseURL = os.Getenv("OPENAI_BASE_URL")
+	apiKey = os.Getenv("OPENAI_API_KEY")
+	if baseURL == "" || apiKey == "" {
+		return provider{}, fmt.Errorf("провайдер не настроен — %s", freeProviderHint)
+	}
+	return provider{
+		baseURL: baseURL,
+		apiKey:  apiKey,
+		model:   orDefaultModel(os.Getenv("DMCODE_MODEL")),
+		api:     envAPI(),
+		label:   "OpenAI-совместимый",
+	}, nil
+}
+
+func envAPI() string {
+	if strings.EqualFold(os.Getenv("DMCODE_API"), apiChat) {
+		return apiChat
+	}
+	return apiResponses
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
 		}
 	}
-	if modelName == "" {
-		modelName = "qwen2.5-coder:7b"
+	return ""
+}
+
+func orDefaultModel(m string) string {
+	if m != "" {
+		return m
 	}
-	return provider{baseURL: baseURL, apiKey: apiKey, model: modelName}, nil
+	return "qwen2.5-coder:7b"
 }
 
 type setupOption struct {
@@ -68,15 +116,19 @@ type setupOption struct {
 	baseURL string
 	model   string
 	envKey  string
+	api     string // apiResponses or apiChat
+	// keyless marks options that need no API key at all.
+	keyless bool
 }
 
 func setupWizard() error {
 	opts := []setupOption{
-		{"OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", "https://opencode.ai/auth", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free", "OPENCODE_API_KEY"},
-		{"Groq — бесплатно, быстрый, tool calling работает", "https://console.groq.com/keys", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", "GROQ_API_KEY"},
-		{"OpenRouter — бесплатные модели (deepseek и др.)", "https://openrouter.ai/keys", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", "OPENAI_API_KEY"},
-		{"Mistral — Codestral, есть free tier", "https://console.mistral.ai/api-keys", "https://api.mistral.ai/v1", "codestral-latest", "MISTRAL_API_KEY"},
-		{"Свой OpenAI-совместимый endpoint", "", "", "", "OPENAI_API_KEY"},
+		{label: "Без ключа — Pollinations (OpenAI-совместимый, анонимно)", baseURL: "https://text.pollinations.ai/openai", model: "openai-fast", envKey: "OPENAI_API_KEY", api: apiChat, keyless: true},
+		{label: "Локально — Ollama (http://127.0.0.1:11434/v1)", baseURL: "http://127.0.0.1:11434/v1", model: "qwen2.5-coder:7b", envKey: "OPENAI_API_KEY", api: apiChat, keyless: true},
+		{label: "OpenRouter — бесплатные модели (deepseek и др.)", signup: "https://openrouter.ai/keys", baseURL: "https://openrouter.ai/api/v1", model: "deepseek/deepseek-chat-v3.1:free", envKey: "OPENAI_API_KEY", api: apiChat},
+		{label: "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)", signup: "https://opencode.ai/auth", baseURL: "https://opencode.ai/zen/v1", model: "nemotron-3-ultra-free", envKey: "OPENCODE_API_KEY", api: apiResponses},
+		{label: "Groq — бесплатно, быстро, tool calling работает", signup: "https://console.groq.com/keys", baseURL: "https://api.groq.com/openai/v1", model: "qwen/qwen3-32b", envKey: "GROQ_API_KEY", api: apiResponses},
+		{label: "Свой OpenAI-совместимый endpoint", envKey: "OPENAI_API_KEY", api: apiChat},
 	}
 	fmt.Println("\nБесплатный провайдер не настроен. Выбери:")
 	for i, o := range opts {
@@ -86,7 +138,7 @@ func setupWizard() error {
 	reader := bufio.NewReader(os.Stdin)
 	line, err := reader.ReadString('\n')
 	if err != nil && line == "" {
-		return fmt.Errorf("не удалось прочитать выбор (stdin не терминал?)")
+		return fmt.Errorf("не удалось прочитать выбор (stdin не терминал?): %s", freeProviderHint)
 	}
 	line = strings.TrimSpace(line)
 	idx := 1
@@ -96,33 +148,34 @@ func setupWizard() error {
 		}
 	}
 	opt := opts[idx-1]
-	if opt.signup != "" {
-		fmt.Println("Возьми ключ тут:", opt.signup)
-	}
-	fmt.Print("ключ: ")
-	keyLine, err := reader.ReadString('\n')
-	if err != nil && strings.TrimSpace(keyLine) == "" {
-		return fmt.Errorf("ключ не введён")
-	}
-	key := strings.TrimSpace(keyLine)
-	if key == "" {
-		return fmt.Errorf("ключ не введён")
+
+	key := "dmcode"
+	if !opt.keyless {
+		if opt.signup != "" {
+			fmt.Println("Возьми ключ тут:", opt.signup)
+		}
+		fmt.Print("ключ: ")
+		keyLine, err := reader.ReadString('\n')
+		if err != nil && strings.TrimSpace(keyLine) == "" {
+			return fmt.Errorf("ключ не введён")
+		}
+		key = strings.TrimSpace(keyLine)
+		if key == "" {
+			return fmt.Errorf("ключ не введён")
+		}
 	}
 
-	vars := map[string]string{opt.envKey: key}
+	vars := map[string]string{opt.envKey: key, "DMCODE_API": opt.api}
 	if opt.baseURL != "" {
 		vars["OPENAI_BASE_URL"] = opt.baseURL
 		vars["DMCODE_MODEL"] = opt.model
-	}
-	if opt.envKey == "OPENAI_API_KEY" {
-		vars["OPENAI_API_KEY"] = key
 	}
 	if opt.envKey == "OPENCODE_API_KEY" {
 		vars["OPENCODE_API_KEY"] = key
 	}
 
 	// кастомный endpoint: доп. ввод
-	if opt.baseURL == "" && idx == len(opts) {
+	if opt.baseURL == "" {
 		fmt.Print("base URL (напр. http://localhost:1234/v1): ")
 		urlLine, _ := reader.ReadString('\n')
 		if u := strings.TrimSpace(urlLine); u != "" {
@@ -166,19 +219,40 @@ Safety & Coding Guidelines:
 - Keep edits minimal and focused on the user's explicit request. Do not introduce unnecessary refactoring or style drift.
 - Never delete or modify files outside the workspace unless explicitly instructed.`
 
+// api selects which OpenAI-compatible wire protocol the endpoint speaks.
+const (
+	apiResponses = "responses" // /v1/responses — OpenAI, OpenCode Zen, GitHub Models
+	apiChat      = "chat"      // /chat/completions — Ollama, LM Studio, Pollinations
+)
+
 type provider struct {
 	baseURL string
 	apiKey  string
 	model   string
+	api     string // apiResponses (default) or apiChat
+	label   string // human-readable provider name for the UI
+}
+
+func (p provider) wire() string {
+	if p.api == "" {
+		return apiResponses
+	}
+	return p.api
 }
 
 func buildAgent(ctx context.Context, p provider, tools []tool.Tool) (agent.Agent, error) {
-	m, err := openaimodel.NewModel(ctx, p.model, &openaimodel.ClientConfig{
-		APIKey:  p.apiKey,
-		BaseURL: p.baseURL,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create openai-compatible model: %w", err)
+	var m model.LLM
+	if p.wire() == apiChat {
+		m = newChatModel(p.baseURL, p.apiKey, p.model)
+	} else {
+		om, err := openaimodel.NewModel(ctx, p.model, &openaimodel.ClientConfig{
+			APIKey:  p.apiKey,
+			BaseURL: p.baseURL,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create openai-compatible model: %w", err)
+		}
+		m = om
 	}
 	return llmagent.New(llmagent.Config{
 		Name:        "dmcode",
