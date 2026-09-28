@@ -442,7 +442,13 @@ func framedModel(w, h int, model string) *uiModel {
 		{kindErr, "error: something went horribly wrong with a very long error message"},
 		{kindSys, i18n.T("— session reset —")},
 	}
-	m.suggest = []string{"/model " + model, "/models", "/new", "/clear", "/quit"}
+	m.suggest = []suggestion{
+		{"/model " + model, i18n.T("switch to this model")},
+		{"/models", i18n.T("list models")},
+		{"/new", i18n.T("start a new session")},
+		{"/clear", i18n.T("clear the screen")},
+		{"/quit", i18n.T("leave")},
+	}
 	m.width, m.height = w, h
 	m.layout()
 	m.syncVP()

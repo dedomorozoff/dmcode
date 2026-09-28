@@ -115,8 +115,8 @@ are never treated as markdown, so a JSON payload containing `**` survives intact
 
 ## Plan and act modes
 
-`tab` switches between them (inside a `/` command, tab still completes
-suggestions):
+`tab` switches between them. Typing `/` opens a command list you move through
+with `↑` `↓` and run with `enter`; `esc` closes it and keeps what you typed.
 
 - **ACT** — the full tool set; the agent reads and writes.
 - **PLAN** — `read_file`, `list_dir`, `grep` and `glob` only. The agent
@@ -136,10 +136,13 @@ while a turn is running; the conversation is kept across a switch.
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
 | `tab` | plan / act mode |
-| `esc` | stop the current turn |
-| `↑` `↓` | prompt history |
+| `esc` | close the command list, or stop the current turn |
+| `↑` `↓` | prompt history, or the command list while `/` is typed |
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
+
+The status bar carries the mode and the state, and nothing else — the model is in
+the header and the sidebar, and the keys are in `/help`.
 
 Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/new` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 

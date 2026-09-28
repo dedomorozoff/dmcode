@@ -134,10 +134,6 @@ const (
 	chromeHeight = headerHeight + statusHeight + inputHeight + panelBorder
 )
 
-// statusHotkeys are dropped from the status bar one by one as the terminal
-// narrows, so the model name survives longest.
-var statusHotkeys = []string{"ctrl+p", "ctrl+b", "ctrl+y", "esc"}
-
 // deltaMsg carries one text part of a round to the event loop. It is a spoken
 // rather than a wrapper of one, so the field names read the same on both sides
 // of the goroutine boundary.
@@ -298,8 +294,11 @@ type uiModel struct {
 	picker    modelPicker
 	setup     setupState
 	lang      langState
-	suggest   []string
-	stick     bool
+	suggest   []suggestion
+	// suggestSel is the highlighted row of the command list. It is reset on every
+	// keystroke, so a narrowed list always starts at the top.
+	suggestSel int
+	stick      bool
 
 	// Prompt history: every prompt the user has sent, persisted in
 	// ~/.dmcode/history.jsonl and recalled with ↑/↓ like a shell. histPos ==
@@ -732,6 +731,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "esc":
+			// The command list closes on escape before anything else, so a user
+			// who opened it by accident gets their prompt back without losing the
+			// text they typed or stopping a turn they did not mean to stop.
+			if len(m.suggest) > 0 {
+				m.suggest = nil
+				return m, nil
+			}
 			if m.busy {
 				if m.cancelTurn != nil {
 					m.cancelTurn()
@@ -786,17 +792,20 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncVP()
 			return m, nil
 		case "tab":
-			// Tab keeps its old job inside a command, where a suggestion is the
-			// whole point of typing; everywhere else it switches the mode, which
-			// is the key a user reaches for without thinking about it.
-			if len(m.suggest) > 0 && strings.HasPrefix(strings.TrimSpace(m.input.Value()), "/") {
-				m.input.SetValue(m.suggest[0])
-				m.updateSuggest()
-				return m, nil
-			}
+			// Tab used to complete a suggestion here and switch the mode
+			// everywhere else, so one key meant two different things depending on
+			// what was in the input. The command list is now picked with the arrows
+			// and enter, which leaves tab meaning one thing everywhere: the mode.
 			return m, m.toggleMode()
 		case "up", "down":
 			if m.busy {
+				return m, nil
+			}
+			// While the command list is up the arrows belong to it, not to the
+			// prompt history. There is no way to reach both at once, and the list
+			// is the transient one: it disappears the moment the text stops being a
+			// command, and then the arrows are history again.
+			if m.moveSuggest(map[string]int{"up": -1, "down": 1}[msg.String()]) {
 				return m, nil
 			}
 			if msg.String() == "up" && len(m.promptHistory) > 0 && m.histPos > 0 {
@@ -818,6 +827,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
+			// A highlighted row in the command list wins over whatever is in the
+			// input. Typing "/" and pressing enter runs the first command, which
+			// is what it always did; arrowing down first runs whichever one is
+			// highlighted. Without this the arrows would only move a cursor and
+			// the user would still have to type the command exactly.
+			if m.suggestSel < len(m.suggest) && len(m.suggest) > 0 {
+				text := strings.TrimSpace(m.suggest[m.suggestSel].text)
+				m.input.SetValue(text)
+				m.suggest = nil
+				m.updateSuggest()
+				// A /model row carries its argument already; anything else goes
+				// through the command switch below as typed.
+			}
 			text := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
 			m.suggest = nil
@@ -1039,14 +1061,35 @@ func (m *uiModel) contentWidth() int {
 // On a terminal too short to hold the whole frame the hint is dropped: the
 // input box matters more than the completion, and a frame one row too tall
 // scrolls the input off the bottom of the screen.
+// suggestMaxRows caps the command list. It is a floor on the transcript's
+// height rather than a scrollable region: the list is transient and a user
+// arrowing through it wants to see the reply above it, not a scrolling pane.
+const suggestMaxRows = 6
+
+// suggestHeight is the number of rows the command list occupies, so the viewport
+// can be sized against it.
+//
+// The list is bounded by what the terminal can actually give up: layout() floors
+// the chat panel at minViewRows, and a list that pushed past that would make the
+// whole frame one row taller than the terminal — the input box, and the cursor
+// in it, would fall off the bottom. Below the bound the list is dropped
+// entirely rather than squeezed: the commands are still reachable by typing them,
+// which is the whole reason a picker is a convenience and not the only path.
 func (m *uiModel) suggestHeight() int {
 	if len(m.suggest) == 0 {
 		return 0
 	}
-	if m.height < chromeHeight+2 {
+	// Two rows is the floor: a header naming the keys above a list with no room
+	// for a single command is worse than no list at all — it looks broken, and
+	// the keys it advertises lead nowhere. One command and no marker, then.
+	const minSuggestRows = 2
+	// One row is the header naming the keys; the rest are the commands.
+	want := min(len(m.suggest)+1, suggestMaxRows)
+	room := m.height - chromeHeight - minViewRows
+	if room < minSuggestRows {
 		return 0
 	}
-	return 1
+	return min(want, room)
 }
 
 // layout sizes the viewport so that header + chat panel + status bar +
@@ -1142,8 +1185,23 @@ func (m *uiModel) followVP() {
 	}
 }
 
+// suggestion is one row of the command picker: the text that goes into the input
+// when it is chosen, and what it is, for the line beside it.
+type suggestion struct {
+	text string
+	desc string
+}
+
+// updateSuggest rebuilds the command list shown above the input.
+//
+// The list is a picker, not a completion hint: the arrow keys move through it and
+// enter runs whatever is highlighted, so there is no tab to press and nothing to
+// remember about which key does what. Typing narrows it, and the first match is
+// preselected, so "/" followed by enter still runs the first command — the
+// keyboard-only path a user already had keeps working unchanged.
 func (m *uiModel) updateSuggest() {
 	m.suggest = nil
+	m.suggestSel = 0
 	if m.palette.open || m.picker.open || m.setup.open {
 		return
 	}
@@ -1155,7 +1213,7 @@ func (m *uiModel) updateSuggest() {
 		prefix := strings.TrimPrefix(text, "/")
 		for _, c := range m.commands() {
 			if strings.HasPrefix(c.name, prefix) {
-				m.suggest = append(m.suggest, "/"+c.name)
+				m.suggest = append(m.suggest, suggestion{"/" + c.name, c.desc})
 			}
 		}
 		return
@@ -1164,13 +1222,31 @@ func (m *uiModel) updateSuggest() {
 		q := strings.TrimSpace(id)
 		for _, id := range m.picker.Models {
 			if q == "" || strings.Contains(id, q) {
-				m.suggest = append(m.suggest, "/model "+id)
+				m.suggest = append(m.suggest, suggestion{"/model " + id, i18n.T("switch to this model")})
 			}
 			if len(m.suggest) >= 8 {
 				break
 			}
 		}
 	}
+}
+
+// moveSuggest moves the highlight through the command list, stopping at the ends
+// rather than wrapping: a list that jumps from the last row back to the first on
+// one keypress is disorienting when the list is long and the intent was to stop.
+func (m *uiModel) moveSuggest(delta int) bool {
+	if len(m.suggest) == 0 {
+		return false
+	}
+	next := m.suggestSel + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > len(m.suggest)-1 {
+		next = len(m.suggest) - 1
+	}
+	m.suggestSel = next
+	return true
 }
 
 // transcriptRow describes how one history entry is laid out in the chat panel:
@@ -1968,25 +2044,42 @@ func (m *uiModel) sidebarView(height int) string {
 	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
-// statusBarView renders the single-row footer. Everything in it competes for
-// one line, so the model name and the hotkey list are fitted against the space
-// that is actually left and the rest is dropped. Overflowing is not cosmetic:
-// lipgloss word-wraps the surplus onto a second row, which makes the whole
-// frame one row taller than the terminal and scrolls the input off the bottom.
+// statusBarView renders the single-row footer.
+//
+// It carries the mode and the state, and nothing else. The model name used to sit
+// here too, which was the third place on screen showing it (the header and the
+// sidebar already do), and a hotkey list that repeated what /help is for. Both
+// were cut rather than rearranged: a status bar that only changes when the agent
+// or the user does something is a bar worth reading, and a permanently
+// half-illegible run of `ctrl+p │ ctrl+y │ esc` is not — the keys it advertised
+// dropped off the edge anyway as the terminal narrowed.
+//
+// Everything here competes for one line, so the free-text status is dropped
+// first and the two badges are the last thing standing. Overflowing is not
+// cosmetic: lipgloss word-wraps the surplus onto a second row, which makes the
+// whole frame one row taller than the terminal and scrolls the input off the
+// bottom.
+// stateBadge is the one piece of status the bar always carries: what the agent
+// is doing right now. It is a function so the width arithmetic in the bar and in
+// its tests both measure the rendered string rather than a copy of it — an emoji
+// in "⏳ WORKING" is two cells wide, and guessing one cell short is how a row ends
+// up a column wider than the terminal and wraps.
+func (m *uiModel) stateBadge() string {
+	switch {
+	case m.busy:
+		return styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
+		return styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
+	default:
+		return styleBadgeReady.Render(i18n.T("● READY"))
+	}
+}
+
 func (m *uiModel) statusBarView() string {
 	width := max(m.width, 16)
 	inner := width - 2 // the bar's own left/right padding
-	const sep = "  │  "
 
-	var badge string
-	switch {
-	case m.busy:
-		badge = styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
-	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
-		badge = styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
-	default:
-		badge = styleBadgeReady.Render(i18n.T("● READY"))
-	}
+	badge := m.stateBadge()
 
 	statusDesc := m.statusText
 	switch {
@@ -1998,49 +2091,17 @@ func (m *uiModel) statusBarView() string {
 		statusDesc = m.spin.View() + " " + statusDesc
 	}
 
-	left := badge + "  " + m.modeBadge() + "  " + statusDesc
-	// Two columns are always held back as the gutter between the two halves, so
-	// the gap can never collapse to zero and push the row over the wrap point.
-	avail := inner - ansi.StringWidth(left) - 2
-	if avail < 8 {
-		// Too narrow for two columns: the mode badge is the one piece of state
-		// that must never be the thing to disappear, so it is kept and the
-		// free-text status goes instead.
-		compact := badge + "  " + m.modeBadge()
-		if ansi.StringWidth(compact) <= inner {
-			return styleStatusBar.Width(width).Render(compact)
-		}
-		return styleStatusBar.Width(width).Render(truncate(badge, inner))
+	// The mode leads: it is the one thing a user must never have to hunt for,
+	// because it decides whether the agent is allowed to touch their files.
+	left := m.modeBadge() + "  " + badge
+	if ansi.StringWidth(left)+2+ansi.StringWidth(statusDesc) > inner && ansi.StringWidth(left)+2 <= inner {
+		return styleStatusBar.Width(width).Render(left)
 	}
-
-	// Right half, assembled most- to least-important so the hotkeys are what
-	// disappears on a narrow terminal.
-	var right string
-	fit := func(s string) bool {
-		cand := s
-		if right != "" {
-			cand = right + sep + s
-		}
-		if ansi.StringWidth(cand) > avail {
-			return false
-		}
-		right = cand
-		return true
+	if ansi.StringWidth(left)+2 > inner {
+		// Too narrow even for both badges: the mode is kept, the state goes.
+		return styleStatusBar.Width(width).Render(truncate(m.modeBadge(), inner))
 	}
-	if fit(truncate(m.prov.Model, avail)) {
-		for _, k := range statusHotkeys {
-			if !fit(k) {
-				break
-			}
-		}
-	}
-
-	content := left
-	if right != "" {
-		gap := inner - ansi.StringWidth(left) - ansi.StringWidth(right)
-		content = left + strings.Repeat(" ", max(gap, 2)) + right
-	}
-	return styleStatusBar.Width(width).Render(content)
+	return styleStatusBar.Width(width).Render(left + "  " + truncate(statusDesc, inner-ansi.StringWidth(left)-2))
 }
 
 // headerView renders the app name, the model and the session id on one row.
@@ -2068,41 +2129,82 @@ func (m *uiModel) headerView() string {
 		styleHeader.Render(name) + styleHint.Render(sep+model+sep+id))
 }
 
-// suggestView renders the tab-completion row. It is a single row, so the tail
-// of the list is cut instead of wrapped.
+// suggestView renders the command list above the input. The highlighted row is
+// the one enter will run, and it is marked rather than merely coloured, so the
+// list is still readable on a terminal whose font has no distinct bold face.
 func (m *uiModel) suggestView() string {
 	if len(m.suggest) == 0 {
 		return ""
 	}
-	const (
-		indent  = 2
-		tail    = "  (tab)"
-		maxShow = 6
-	)
+	const indent = 2
+	// Every row is padded or cut to exactly the terminal width: a row one cell
+	// wider than the rest shifts the whole frame sideways, and JoinVertical pads
+	// to the widest block. The width is measured with ansi.StringWidth on plain
+	// text, never on a styled string, because truncate counts bytes and an escape
+	// sequence is not a cell.
+	body := max(m.width-indent, 4)  // header rows, no gutter
+	row := max(m.width-indent-3, 4) // command rows carry a 3-cell marker
 
-	var b strings.Builder
-	b.WriteString(strings.Repeat(" ", indent))
-	used := indent
-	for i, s := range m.suggest {
-		if i >= maxShow {
-			break
-		}
-		seg := s
-		if i > 0 {
-			seg = "  " + s
-		}
-		if used+ansi.StringWidth(seg)+ansi.StringWidth(tail) > m.width {
-			break
-		}
-		if i == 0 {
-			b.WriteString(styleSuggest.Render(s))
-		} else {
-			b.WriteString(styleHint.Render(seg))
-		}
-		used += ansi.StringWidth(seg)
+	rows := []string{strings.Repeat(" ", indent) + fitCells(truncate(i18n.T("↑↓ choose · enter run · esc dismiss"), body), body)}
+
+	height := m.suggestHeight()
+	budget := height - 1 // the header above already took one
+	start := 0
+	if m.suggestSel >= budget {
+		// Scroll so the highlighted row is always on screen; without this the
+		// cursor walks off the bottom of the list and the user loses it.
+		start = m.suggestSel - budget + 1
 	}
-	b.WriteString(styleHint.Render(tail))
-	return b.String()
+	if start > len(m.suggest)-budget {
+		start = max(len(m.suggest)-budget, 0)
+	}
+
+	// The "↓ more" marker is only worth a row if one is left over. Shrinking the
+	// list to make room for it is what keeps it from being cut off by the height
+	// cap below — a marker that never renders is worse than none, because the
+	// list then looks complete when it is not.
+	more := len(m.suggest) - (start + budget)
+	if more > 0 && budget > 1 {
+		budget--
+		more = len(m.suggest) - (start + budget)
+	}
+
+	// The description is a hint, not the row: it goes first when the terminal is
+	// too narrow to carry both, and the command name is never truncated away.
+	for i := start; i < len(m.suggest) && i < start+budget; i++ {
+		s := m.suggest[i]
+		gutter := "   "
+		if i == m.suggestSel {
+			gutter = " ▸ "
+		}
+		text := s.text
+		if s.desc != "" {
+			if room := row - ansi.StringWidth(text) - 4; room >= 8 {
+				text += "  — " + truncate(s.desc, room)
+			}
+		}
+		rows = append(rows, strings.Repeat(" ", indent)+gutter+fitCells(text, row))
+	}
+	if more > 0 {
+		rows = append(rows, strings.Repeat(" ", indent)+
+			fitCells(truncate(i18n.T("↓ more")+" "+fmt.Sprint(more), body), body))
+	}
+	// Height is capped separately: on a very short terminal the rows are dropped
+	// from the bottom rather than wrapped, which would push the input off screen.
+	if len(rows) > height {
+		rows = rows[:height]
+	}
+	return strings.Join(rows, "\n")
+}
+
+// fitCells right-fills s with spaces to exactly w cells, and cuts it if it is
+// longer. The width is measured with ansi.StringWidth rather than len, so an
+// already-styled string is not counted in bytes.
+func fitCells(s string, w int) string {
+	if n := ansi.StringWidth(s); n < w {
+		return s + strings.Repeat(" ", w-n)
+	}
+	return truncate(s, max(w, 1))
 }
 
 // floatingWidth is the outer width of the palette and the model picker. Both
@@ -2387,7 +2489,7 @@ func (m *uiModel) View() tea.View {
 	// JoinVertical pads every block out to the widest one, so a single
 	// overflowing row is enough to shift the whole frame sideways.
 	parts := []string{m.headerView(), middle, m.statusBarView()}
-	if m.suggestHeight() == 1 {
+	if m.suggestHeight() > 0 {
 		parts = append(parts, m.suggestView())
 	}
 	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))

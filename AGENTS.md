@@ -93,7 +93,6 @@ If you are asked to fix or improve `dmcode`, be aware of these known architectur
 - **Model Switching Context Bug:** Switching models currently allocates a `newSessionID()`, wiping conversation history despite UI stating otherwise. The mode switch and `/cd` deliberately **do not** do this — they reuse the session service, and a regression test covers the tool set but not yet the session id.
 - **Render History Performance:** `renderHistory()` re-renders and re-wraps the entire history on every frame/token. Large sessions cause UI lag, and the markdown renderer made this more expensive. The cache is a single whole-transcript string, so it is invalidated on every streamed token; an incremental per-line cache is the obvious next step.
 - **Workspace boundary is lexical:** a symlink inside the workspace can still reach outside it. See §1.
-- **`tab` is overloaded:** it completes a suggestion inside a `/` command and switches mode everywhere else. A user who expected a tab character in a prompt gets a mode switch instead.
 
 ### Diagnosing "the TUI shows X but my test says otherwise"
 
@@ -114,6 +113,16 @@ Already fixed, and worth not regressing:
 - Monolithic `package main` — split into `internal/*` (see §1).
 - No path confinement — `tools.SetRoot`/`tools.resolve`.
 - `edit_file` rigidity — a whitespace-tolerant match was added.
+- **Overloaded `tab`** — it completed a suggestion inside a `/` command and
+  switched mode everywhere else, so the same key did two unrelated things
+  depending on what was in the input. The `/` command list is now picked with
+  `↑` `↓` + `enter` (`esc` dismisses it and keeps the typed text), which leaves
+  `tab` meaning one thing everywhere: the mode.
+- **The status bar carried a hotkey list and the model name** — the model was the
+  third place on screen showing it, the header and the sidebar already have it,
+  and the fixed `ctrl+p │ ctrl+y │ esc` run was the part that dropped off the edge
+  on a narrow terminal, leaving it half-printed. The bar is now the mode badge and
+  the state badge, and `TestStatusBarShowsTheModeAndNothingElse` pins it there.
 - **Markdown "working every other time"** — the per-turn text accumulator was never
   reset at the end of an LLM round, so a turn that used a tool had its second
   round's closing response appended on top of the deltas already shown. The
