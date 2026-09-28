@@ -370,6 +370,49 @@ func TestCommandListFitsTheFrame(t *testing.T) {
 	}
 }
 
+// The dialog shows a window of a longer list, and the window has to follow the
+// selection. It did not: the overflow marker was given the last row by trimming
+// the window from the bottom, which dropped the selected row first — so arrowing
+// down past the visible list left a dialog with no marker in it at all and the
+// user arrowing blind.
+func TestCommandDialogScrollsWithTheSelection(t *testing.T) {
+	m := modeModel(t)
+	m.width, m.height = 92, 26
+	m.layout()
+
+	var model tea.Model = m
+	model, _ = model.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if len(m.suggest) < 8 {
+		t.Fatalf("only %d commands, too few to need scrolling", len(m.suggest))
+	}
+
+	for i := range m.suggest {
+		if m.suggestSel != i {
+			t.Fatalf("step %d left the selection at %d, want the arrows to track it", i, m.suggestSel)
+		}
+		box := ansi.Strip(m.suggestBox())
+		// The selection is drawn, and it is the one drawn: the marker has to sit
+		// on the selected command, not on any other row.
+		want := m.suggest[i].text
+		if !strings.Contains(box, "▸ "+want) {
+			t.Errorf("step %d: %q is not marked in the dialog:\n%s", i, want, box)
+		}
+		// The list really is scrolling rather than sitting still: by the time the
+		// selection is past the visible rows, the first command has been dropped.
+		if i > 0 && i+1 < len(m.suggest) {
+			if m.suggest[0].text == m.suggest[i].text {
+				t.Errorf("step %d: the dialog still shows the very first command", i)
+			}
+		}
+		// The overflow marker is what admits the list does not fit; it must never
+		// be the row that gets trimmed.
+		if i+1 < len(m.suggest) && !strings.Contains(box, "more") {
+			t.Errorf("step %d: the list overflows but says nothing:\n%s", i, box)
+		}
+		model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+}
+
 // The sidebar shares the rows the list is drawn over, so it has to survive them:
 // blanking it would take the model, the folder and the tool list away for as long
 // as a "/" is on screen.

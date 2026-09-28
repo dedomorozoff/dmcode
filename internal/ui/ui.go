@@ -2157,27 +2157,27 @@ func (m *uiModel) suggestBox() string {
 
 	rows := append([]string{}, head...)
 
-	// Scroll so the highlighted row is always one of the rows drawn: walking the
-	// cursor down a list whose tail is cut off loses it entirely, and the user is
-	// then arrowing blind.
-	body := max(m.suggestHeight()-panelBorder-len(head), 1)
-	start := 0
-	if m.suggestSel >= body {
-		start = m.suggestSel - body + 1
-	}
-	if start > len(m.suggest)-body {
-		start = max(len(m.suggest)-body, 0)
+	// How many rows the commands may occupy, and how many of them are actually
+	// given to commands once the overflow marker has taken its row. Reserving it up
+	// front rather than trimming afterwards is what keeps the highlight on screen:
+	// a window trimmed from the bottom drops the selected row first, and the user
+	// is left arrowing at a list with nothing marked in it.
+	room := max(m.suggestHeight()-panelBorder-len(head), 1)
+	show := room
+	if len(m.suggest) > room && room > 1 {
+		show = room - 1
 	}
 
-	// The last row goes to the overflow marker when there is anything left, so the
-	// panel keeps its height and still admits that the list does not fit. A marker
-	// that got trimmed off is worse than none: the list would look complete.
-	limit := min(start+body, len(m.suggest))
-	more := len(m.suggest) - limit
-	if more > 0 && limit-start > 1 {
-		limit--
-		more = len(m.suggest) - limit
+	// The window is anchored on the selection: it starts at the top and follows
+	// the highlight down, so the selected command is always one of the drawn rows.
+	start := 0
+	if m.suggestSel >= start+show {
+		start = m.suggestSel - show + 1
 	}
+	if start > len(m.suggest)-show {
+		start = max(len(m.suggest)-show, 0)
+	}
+	limit := min(start+show, len(m.suggest))
 
 	for i := start; i < limit; i++ {
 		// The marker is the row's indent, so it is passed separately rather than
@@ -2202,7 +2202,7 @@ func (m *uiModel) suggestBox() string {
 		}
 		rows = append(rows, line...)
 	}
-	if more > 0 {
+	if more := len(m.suggest) - limit; more > 0 {
 		rows = append(rows, styleHint.Render("   "+i18n.T("↓ more ")+fmt.Sprint(more)))
 	}
 	return stylePanel.Width(width).Render(strings.Join(rows, "\n"))
