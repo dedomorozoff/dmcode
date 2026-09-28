@@ -74,12 +74,15 @@ and fails over to another one if the current provider dies mid-session.
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
 | **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
-| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models** | the key is already in `.env` or the environment |
+| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
-and it lands in `.env`. Some options need no key at all; others are your own
-endpoints (Unsloth, LM Studio, vLLM — anything speaking the OpenAI-compatible
-API).
+and it lands in `.env`. The free tiers that need no card are all in that list —
+Cerebras (`CEREBRAS_API_KEY`), NVIDIA NIM (`NVIDIA_API_KEY`), SambaNova
+(`SAMBANOVA_API_KEY`) and Hugging Face (`HF_TOKEN`) all hand out working keys
+on signup, and any of them is picked up automatically once the variable is set.
+Some options need no key at all; others are your own endpoints (Unsloth,
+LM Studio, vLLM — anything speaking the OpenAI-compatible API).
 
 A custom endpoint is three lines in `.env`:
 
@@ -145,8 +148,10 @@ are never treated as markdown, so a JSON payload containing `**` survives intact
 
 ## Plan and act modes
 
-`tab` switches between them (inside a `/` command, tab still completes
-suggestions):
+`tab` switches between them. Typing `/` opens a command dialog just above the
+input; `↑` `↓` move through it, `enter` runs the highlighted command, `esc`
+closes it and keeps what you typed. The dialog is drawn over the transcript, so
+nothing in the layout shifts and the sidebar stays readable.
 
 - **ACT** — the full tool set; the agent reads and writes.
 - **PLAN** — no write tools. The agent investigates and returns a plan without
@@ -176,12 +181,37 @@ is yours.
 | `ctrl+y` | copy the reply |
 | `ctrl+z` | undo the last message (rewind) |
 | `tab` | plan / act mode |
-| `esc` | stop the current turn |
-| `↑` `↓` | prompt history |
+| `esc` | close the command list, or stop the current turn |
+| `↑` `↓` | prompt history, or the command list while `/` is typed |
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/new` `/sessions` `/resume` `/rewind` `/todo` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+The status bar carries the mode and the state, and nothing else — the model is in
+the header and the sidebar, and the keys are in `/help`.
+
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+
+## HTTP proxy
+
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are honoured, so a proxy already
+configured for the rest of the system works with no setup. `/proxy` shows the
+setting and changes it:
+
+```
+/proxy                          show what is in effect, and whether it works
+/proxy 127.0.0.1:3128           set one (a bare host:port is fine)
+/proxy http://user:pass@host:8080
+/proxy off                      clear it
+/proxy no localhost,127.0.0.1   bypass list, without touching the proxy
+```
+
+The change applies to the running session — the next request goes through it —
+and is written to `.env`, so it survives a restart. `/proxy off` removes the
+variables from both, rather than leaving them in the file to be read back.
+
+`localhost` and the loopback addresses are never proxied: a proxy that cannot
+reach the machine's own services is common enough that following it would break
+local providers that otherwise work.
 
 ## Sessions and rewinding
 

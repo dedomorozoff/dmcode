@@ -3,6 +3,7 @@ package ui
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -36,6 +37,21 @@ func (d setupKeys) type_(text string) setupKeys {
 
 func (d setupKeys) enter() setupKeys { return d.send(tea.KeyPressMsg{Code: tea.KeyEnter}) }
 func (d setupKeys) down() setupKeys  { return d.send(tea.KeyPressMsg{Code: tea.KeyDown}) }
+func (d setupKeys) up() setupKeys    { return d.send(tea.KeyPressMsg{Code: tea.KeyUp}) }
+
+// walkTo drives the cursor from the top of the wizard list down to index i, the
+// way a user arrows through it. Going via the top rather than sending i+1 downs
+// keeps the test honest if the list order ever changes: it asserts the row that
+// is reached is the one the option list says sits at that index.
+func (d setupKeys) walkTo(i int) setupKeys {
+	for d.m.setup.selected > 0 {
+		d = d.up()
+	}
+	for d.m.setup.selected < i {
+		d = d.down()
+	}
+	return d
+}
 
 // newSetupModel builds the model exactly as main does. A hand-rolled uiModel
 // will not do: textinput needs a real cursor or Focus panics and typing is
@@ -125,6 +141,88 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 		if perm := fi.Mode().Perm(); perm != 0o600 {
 			t.Errorf(".env has mode %o, want 600", perm)
 		}
+	}
+}
+
+// TestEverySetupOptionIsReachableAndPersists walks the whole wizard list with the
+// arrow keys and checks that each entry can actually be selected and written to
+// .env. A provider that exists in config.SetupOptions but cannot be reached from
+// the keyboard is listed in /setup and unusable, which is the one failure this
+// guards: the option list grew by six entries in one go, and a row pushed past
+// the bottom of a short terminal would be exactly that bug, silently.
+//
+// The clean verdict is fed in directly rather than running the probe, so no
+// request leaves the machine.
+func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
+	opts := config.SetupOptions()
+	for i, want := range opts {
+		t.Run(strings.Fields(want.Label)[0], func(t *testing.T) {
+			dir := inTempDir(t)
+			m := newSetupModel(t)
+			d := setupKeys{m: m}.type_("/setup").enter().walkTo(i)
+
+			if m.setup.selected != i {
+				t.Fatalf("arrowing to row %d landed on %d (%s)", i, m.setup.selected,
+					opts[m.setup.selected].Label)
+			}
+
+			// The row has to be the option the list says sits there, and it has to
+			// be on screen: the panel is height-capped and reports how many rows it
+			// hid, so a list that outgrows a short terminal shows a "↓ more" marker
+			// instead of its bottom entries. Checked while the wizard is still
+			// open, because m.setup.opt is only filled in on enter and wiped again
+			// as soon as the choice is committed.
+			view := m.View().Content
+			if !strings.Contains(view, strings.SplitN(want.Label, " (", 2)[0]) {
+				t.Errorf("row %d (%s) is not drawn:\n%s", i, want.Label, view)
+			}
+
+			// Keyless options apply at once; keyed ones ask for a secret first.
+			if want.Keyless {
+				d = d.enter()
+			} else {
+				d = d.enter().type_("sk-test-123").enter()
+				if m.setup.stage != setupKey {
+					t.Fatalf("choosing %q skipped the key stage (stage=%d)", want.Label, m.setup.stage)
+				}
+				if got := m.setup.opt.Label; got != want.Label {
+					t.Fatalf("row %d holds %q, want %q", i, got, want.Label)
+				}
+				_, _ = m.Update(setupCheckMsg{
+					vars: config.SetupVars(m.setup.opt, "sk-test-123"),
+					opt:  m.setup.opt,
+				})
+			}
+			if m.setup.open {
+				t.Fatalf("wizard stayed open after choosing %q", want.Label)
+			}
+
+			// What the wizard claims to offer has to be what it wrote.
+			data, err := os.ReadFile(filepath.Join(dir, ".env"))
+			if err != nil {
+				t.Fatalf("%q wrote no .env: %v", want.Label, err)
+			}
+			text := string(data)
+			if want.BaseURL != "" && !strings.Contains(text, "OPENAI_BASE_URL="+want.BaseURL) {
+				t.Errorf("%q: .env is missing its base URL:\n%s", want.Label, text)
+			}
+			if want.Model != "" && !strings.Contains(text, "DMCODE_MODEL="+want.Model) {
+				t.Errorf("%q: .env is missing its model:\n%s", want.Label, text)
+			}
+			if want.Keyless && strings.Contains(text, "API_KEY") {
+				t.Errorf("%q is keyless but wrote a key variable:\n%s", want.Label, text)
+			}
+			if !want.Keyless && want.EnvKey != "" && !strings.Contains(text, want.EnvKey+"=sk-test-123") {
+				t.Errorf("%q: .env is missing %s:\n%s", want.Label, want.EnvKey, text)
+			}
+			// The running session has to move too, not just the file on disk.
+			if want.BaseURL != "" && m.prov.BaseURL != want.BaseURL {
+				t.Errorf("%q: the live provider is %q, want %q", want.Label, m.prov.BaseURL, want.BaseURL)
+			}
+			if m.prov.Wire() != want.API {
+				t.Errorf("%q: the live wire is %q, want %q", want.Label, m.prov.Wire(), want.API)
+			}
+		})
 	}
 }
 

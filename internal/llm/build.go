@@ -22,6 +22,11 @@ func BuildLLM(ctx context.Context, p config.Provider) (model.LLM, error) {
 	om, err := openaimodel.NewModel(ctx, p.Model, &openaimodel.ClientConfig{
 		APIKey:  p.APIKey,
 		BaseURL: p.BaseURL,
+		// The client is supplied rather than left to the library's default so the
+		// proxy is honoured here too. The default transport reads HTTP_PROXY once,
+		// on its first request, which would make a proxy set from /proxy apply
+		// only after a restart.
+		HTTPClient: config.Client(0),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create openai-compatible Model: %w", err)

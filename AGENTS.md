@@ -192,6 +192,9 @@ If you are asked to fix or improve `dmcode`, be aware of these known architectur
   on a cancellable context and `Esc`/`Ctrl+C` cancel it, but a tool that ignores
   its context — `run_command` on a child process, a sub-agent mid-model-call —
   finishes on its own schedule first.
+- **Session store and retries are unverified.** See the warning at the top: the
+  rewind, the JSONL round trip, the ask overlay's timer and the mode switch have
+  unit tests but no end-to-end check.
 
 Already fixed, and worth not regressing:
 
@@ -199,11 +202,16 @@ Already fixed, and worth not regressing:
 - No path confinement — `tools.SetRoot`/`tools.resolve`.
 - `edit_file` rigidity — a whitespace-tolerant match was added.
 - **Cancellation** — turns run on a cancellable context, and `Esc`/`Ctrl+C`
-  release the turn while keeping the conversation.
+  release the turn while keeping the conversation. `startTurn` uses
+  `context.WithCancel`; this was documented as missing here for a while after it
+  had already been fixed, so check the code rather than this list.
 - **Model switching wiping the session** — `switchModelCmd` keeps `m.sessionID`
   and the session service, so the conversation survives a `/model` change.
 - **A session you cannot take back** — `memsession` owns the store, which is what
   made ctrl+z and `/sessions` possible at all (see §1).
+- **A change tally outliving its session** — `newSession` calls
+  `dmtools.ResetChanges()`, so a fresh session does not report edits the previous
+  one made.
 
 ### Diagnosing "the TUI shows X but my test says otherwise"
 
@@ -224,6 +232,22 @@ Already fixed, and worth not regressing:
 - Monolithic `package main` — split into `internal/*` (see §1).
 - No path confinement — `tools.SetRoot`/`tools.resolve`.
 - `edit_file` rigidity — a whitespace-tolerant match was added.
+- **Overloaded `tab`** — it completed a suggestion inside a `/` command and
+  switched mode everywhere else, so the same key did two unrelated things
+  depending on what was in the input. The `/` commands are now a dialog picked
+  with `↑` `↓` + `enter` (`esc` dismisses it and keeps the typed text), which
+  leaves `tab` meaning one thing everywhere: the mode.
+- **The command list was a block of frame rows** — it shrank the transcript on
+  every `/`, jumped back when it closed, and on a short terminal ran into the
+  bottom of the screen with the input still to fit. It is now a bordered dialog
+  painted over the chat panel, anchored above the input, in the same chrome as
+  `ctrl+p`; the frame is byte-identical with it open and closed, and only the
+  chat panel's columns are rewritten so the sidebar survives.
+- **The status bar carried a hotkey list and the model name** — the model was the
+  third place on screen showing it, the header and the sidebar already have it,
+  and the fixed `ctrl+p │ ctrl+y │ esc` run was the part that dropped off the edge
+  on a narrow terminal, leaving it half-printed. The bar is now the mode badge and
+  the state badge, and `TestStatusBarShowsTheModeAndNothingElse` pins it there.
 - **Markdown "working every other time"** — the per-turn text accumulator was never
   reset at the end of an LLM round, so a turn that used a tool had its second
   round's closing response appended on top of the deltas already shown. The

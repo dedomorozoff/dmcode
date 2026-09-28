@@ -7,6 +7,7 @@ import (
 	"google.golang.org/adk/v2/session"
 
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
 // sessionApp and sessionUser are the ADK session identity. They are constants
@@ -123,6 +124,10 @@ func (m *uiModel) newSession(title string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.promptMarks = nil
+	// The change tally belongs to the session that produced it. Carrying the
+	// numbers into a fresh session would report edits the new one never made,
+	// against files it has never opened.
+	dmtools.ResetChanges()
 	if m.sessions != nil {
 		if id, err := m.sessions.Ensure(m.ctx, sessionApp, sessionUser, m.sessionID); err == nil {
 			m.sessionID = id

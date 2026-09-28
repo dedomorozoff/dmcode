@@ -1,15 +1,15 @@
-# dmCode v0.1.4
+# dmCode v0.1.5
 
 A conversation you can take back: undo the last message, keep several sessions and
 switch between them, and let the agent plan, ask and delegate.
 
-> ### ⚠️ Unverified — this release is a work in progress
+> ### ⚠️ Unverified — work in progress
 >
-> **Everything below compiles and passes unit tests, but none of it has been
-> verified end to end.** There are no live checks against a real endpoint, and no
-> TUI session has been driven through a rewind, a session switch, a question
-> overlay, a plan or a delegation. Treat this as a branch under construction:
-> test it, expect rough edges, and please report what breaks.
+> **Everything in this section compiles and passes unit tests, but none of it has
+> been verified end to end.** There are no live checks against a real endpoint,
+> and no TUI session has been driven through a rewind, a session switch, a
+> question overlay, a plan or a delegation. Treat this as a branch under
+> construction: test it, expect rough edges, and please report what breaks.
 >
 > What that leaves unproven: that a rewind cuts the model's memory and not just
 > the screen; that a session read back after a restart is what a live turn would
@@ -142,10 +142,10 @@ unable to publish one.
 | `DMCODE_LLM_RETRY_MS` | first backoff pause, doubling after that (default 500) |
 | `DMCODE_ASK_TIMEOUT` | seconds before a question picks its own answer (default 0 — off) |
 
-# dmCode v0.1.3
+# dmCode v0.1.4
 
-A working interface: markdown actually renders, the mouse wheel scrolls, and the
-agent can plan before it changes anything.
+The interface gets out of the way, there are more providers that are genuinely
+free, and dmcode works behind a proxy.
 
 ## Install
 
@@ -171,77 +171,105 @@ Or with Go 1.26+:
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-## What's new since v0.1.2
+## What's new since v0.1.3
 
-### Markdown renders
+### Four more free providers
 
-Replies were pushed through the same plain-text wrapper as everything else, which
-re-wrapped them on spaces: bold words showed their `**`, headings showed their
-`##`, and a code block lost every indent that made it readable. Replies are now
-laid out as markdown before wrapping.
+The setup wizard now offers **Cerebras**, **NVIDIA NIM**, **SambaNova** and
+**Hugging Face**. All four issue a working OpenAI-compatible key on signup with no
+card attached, and each was probed live before being listed — `/v1/models` answers,
+so a key from the signup page is all it takes to reach the agent. NVIDIA NIM alone
+serves eighty-odd models, including GLM, Kimi and Nemotron.
 
-- **Headings, `**bold**`, `*italic*` and `` `code` ``** are styled and the markers
-  are consumed. Emphasis carries colour as well as weight, so it stays visible on
-  terminals whose font has no separate bold face — a bold span in the same colour
-  as its surroundings is indistinguishable from plain text.
-- **Fenced code keeps its shape.** Indentation is preserved rather than re-flowed,
-  and an over-long line is cut rather than wrapped, because a wrapped code line
-  reads as a different line of code. A half-arrived reply with an unclosed fence —
-  the normal case mid-stream — renders as a block to the end of the text.
-- **Tables and blockquotes.** Pipe tables become aligned columns, dropping the
-  raw `|`; a table too wide for the panel sheds its borders and shrinks instead
-  of breaking the frame. A `>` line becomes an indented aside.
-- Prose without markup comes through unchanged, and tool output and your own
-  prompts are never treated as markdown — a JSON payload containing `**` survives
-  intact.
+**GitHub Models** and **Mistral** were already picked up from a key in the
+environment but were missing from the wizard, so they are offered there too.
 
-### The mouse wheel scrolls
+The preset table and the wizard are two hand-maintained copies of the same
+endpoints, free to drift with nothing to show it: a user with `NVIDIA_API_KEY`
+exported would run on one model, and the same user picking NVIDIA in `/setup` on
+another. The preset list is now a named function and a test compares it against the
+wizard by URL, model and wire.
 
-Two things were broken, and both had to be fixed. The view never enabled mouse
-mode, so the terminal did not report wheel events at all; and no event was ever
-passed to the viewport, which owns the wheel handling. Scrolling also released
-the follow-the-tail stick, so a streamed reply no longer yanks the view back down
-mid-read.
+### The status bar says what matters
 
-`/mouse` turns wheel scrolling off and gives native drag-select back, for when
-you want to copy by hand.
+It carried the model name, a run of hotkeys, the mode and the state. The model was
+the third place on screen showing it — the header and the sidebar already have it —
+and the hotkey list was a fixed string competing for one row, so on a narrow
+terminal it was the part that dropped off, leaving `ctrl+p │ ctrl+y │ esc` half
+printed. Neither earns its place.
 
-### Plan and act modes
+The bar is now the mode badge leading, then the state, then whatever status fits.
+The mode leads because it decides whether the agent is allowed to touch your files,
+so it is the one thing that must never be hunted for.
 
-`tab` switches between them. Inside a `/` command, tab still completes
-suggestions.
+### `tab` means one thing
 
-- **ACT** is the full tool set.
-- **PLAN** is `read_file`, `list_dir`, `grep` and `glob` only. The agent
-  investigates and returns a plan, changing nothing.
+It completed a suggestion inside a `/` command and switched mode everywhere else —
+the same key doing two unrelated things depending on what happened to be in the
+input. The command list is now picked with the arrows, which leaves `tab` meaning
+one thing everywhere: the mode.
 
-Plan mode withholds the write tools rather than asking the model in the prompt,
-and `run_command` is withheld too — a shell can write a file through `>` or
-`Out-File`, so "read-only" cannot be promised through it. The current mode shows
-as a badge in the status bar, the sidebar lists only the tools actually
-reachable, and a switch is refused while a turn is running. The conversation is
-kept across a switch.
+### The command list is a dialog
 
-### It works where you start it
+Typing `/` opens a bordered dialog just above the input, in the same chrome as
+`ctrl+p`. `↑` `↓` move through it, `enter` runs the highlighted command, `esc`
+closes it and keeps what you typed.
 
-`dmcode -C ~/projects/myapp` (or `--dir`) works in a directory other than the
-one you launched from, so a binary on `PATH` can be pointed at any project.
-`/cd <path>` moves the session at runtime and bare `/cd` reports where you are.
-The sidebar shows the full path, trimmed from the left.
+It is drawn **over** the chat panel rather than taking rows from it. As rows of the
+frame the list shrank the transcript every time a `/` was typed and jumped back when
+it closed, and on a short terminal it ran into the bottom of the screen with the
+input box still to fit. The frame is now identical with the dialog open and closed.
+Only the chat panel's columns are rewritten, so the sidebar — model, folder, tools —
+stays readable while you pick.
 
-**Every tool is now confined to that directory.** A path resolving outside it is
-refused with an error naming both directories, and `run_command`'s `work_dir` is
-checked the same way. Before this, `read_file` with `../../.ssh/id_rsa` simply
-succeeded.
+### The sidebar reports what changed
 
-### Diagnostics
+The SESSION block now carries a file count and a signed line count:
 
-- **`/debug`** prints the line kind, the markdown flag and the width of the last
-  transcript lines. A reply rendering as raw markup is a routing problem — the
-  text is stored under a kind that is not treated as markdown — rather than a
-  parsing problem, and one line of output tells the two apart.
-- The terminal's colour capabilities are now requested at startup, so styling is
-  not stuck in a conservative base palette on terminals that support more.
+```
+ SESSION
+  sess-1448381972…
+  turns: 4
+  tools: 11
+  files: 3
+  +128 -34
+```
+
+The numbers come from the tools, not the interface: every write passes through one
+place, and it is the only place that knows a file's before and after. The tally is
+diffed against the content a file had when the session first touched it, so an agent
+that rewrites one line three times has changed one line — the sidebar reports the
+end state, not the agent's steps. The block stays hidden until something has
+changed, and `/new` clears it.
+
+
+### Behind a proxy
+
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are honoured, so a proxy already
+configured for the rest of the system works with no setup. `/proxy` shows the
+setting, changes it, and says whether the provider answers through it:
+
+```
+/proxy                          show what is in effect
+/proxy 127.0.0.1:3128           set one (a bare host:port is fine)
+/proxy off                      clear it
+/proxy no localhost,127.0.0.1   bypass list, without touching the proxy
+```
+
+The change applies to the running session and is written to `.env`, so it survives
+a restart. Two details worth knowing:
+
+- Go's own `http.ProxyFromEnvironment` reads the environment once, on the first
+  request, and caches it — a proxy set from inside the program would appear to do
+  nothing until a restart. dmcode consults the proxy per request instead, which is
+  what makes `/proxy` take effect immediately.
+- `/proxy off` **removes** the variables from `.env` rather than just ceasing to
+  write them. A proxy left in the file would be read back on the next launch and
+  silently come back.
+
+`localhost` and the loopback addresses are never proxied: a proxy that cannot reach
+the machine's own services is common enough that following it would break local
+providers that otherwise work.
 
 ## Assets
 
@@ -264,8 +292,11 @@ section for what is still true.)*
 - The workspace boundary is a lexical check. A symlink *inside* the directory can
   still reach outside it, because `write_file` must be allowed to create files
   that do not exist yet and cannot be resolved first. **Still true.**
-- `tab` is overloaded: it completes a suggestion inside a `/` command and
-  switches mode everywhere else. **Still true.**
+- The change tally counts what passed through the tools. A file changed by
+  `run_command` is not counted, and neither is a change made outside the session.
+- ~~`tab` is overloaded: it completes a suggestion inside a `/` command and
+  switches mode everywhere else.~~ **Fixed in v0.1.4**: the command list is picked
+  with the arrows and `enter`, so `tab` only ever switches mode.
 - ~~`~/.dmcode/history.jsonl` is append-only~~ — a prompt that was rewound is
   still offered by `/history` until the next start. The session files are
   rewritten; the prompt history is not.

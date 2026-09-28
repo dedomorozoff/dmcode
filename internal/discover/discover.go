@@ -76,7 +76,7 @@ var hostedCandidates = []freeCandidate{
 var preferKeywords = []string{"coder", "code", "starcoder", "deepseek-coder"}
 
 func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]string, error) {
-	client := &http.Client{Timeout: timeout}
+	client := config.Client(timeout)
 	url := strings.TrimRight(BaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {

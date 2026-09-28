@@ -1,16 +1,19 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/cursor"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"google.golang.org/adk/v2/tool"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
@@ -173,9 +176,405 @@ func TestTabSwitchesModeAndToolSet(t *testing.T) {
 	}
 }
 
-// TestTabKeepsAutocompleteInsideACommand protects the other half of Tab: inside a
-// "/" command the suggestion is what the user is reaching for.
-func TestTabKeepsAutocompleteInsideACommand(t *testing.T) {
+// TestArrowsPickACommandFromTheList is the replacement for tab completion: the
+// command list is navigated with the arrow keys and enter runs what is
+// highlighted. It drives the real event loop, since the point is which key the
+// user actually presses.
+func TestArrowsPickACommandFromTheList(t *testing.T) {
+	m := modeModel(t)
+	m.promptHistory = []string{"/setup", "/clear"}
+	m.histPos = len(m.promptHistory)
+	m.draft = "/"
+
+	// Type the slash rather than setting the value, so the list is built by the
+	// same path a user's keystroke takes.
+	var model tea.Model = m
+	model, _ = model.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if len(m.suggest) < 3 {
+		t.Fatalf("typing / produced %d rows, want the whole command list", len(m.suggest))
+	}
+
+	// Down twice, then enter: the third command runs, not the first.
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	if m.suggestSel != 2 {
+		t.Fatalf("two downs left the highlight at %d, want 2", m.suggestSel)
+	}
+	// The prompt history must not have been touched: the arrows belonged to the
+	// list, and if they had also moved the history the user would lose their
+	// draft without seeing it happen.
+	if m.histPos != len(m.promptHistory) {
+		t.Errorf("the arrows moved the prompt history to %d while the list was open", m.histPos)
+	}
+
+	// The command ran rather than being typed and left there: /clear empties the
+	// transcript, which is observable without reaching into the model.
+	want := m.suggest[2].text
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.input.Value() != "" {
+		t.Errorf("enter left %q in the input, want it consumed", m.input.Value())
+	}
+	if want == "/clear" && len(m.history) != 0 {
+		t.Errorf("the highlighted command %q did not run", want)
+	}
+}
+
+// Up at the top and down at the bottom must stay put rather than wrap: a list
+// that jumps from the last row to the first turns "I meant that one" into a
+// command the user did not choose.
+func TestSuggestHighlightStopsAtTheEnds(t *testing.T) {
+	m := modeModel(t)
+	m.input.SetValue("/")
+	m.updateSuggest()
+	n := len(m.suggest)
+	if n < 2 {
+		t.Skip("the command list is too short to test the ends")
+	}
+
+	for i := 0; i < n+3; i++ {
+		m.moveSuggest(1)
+	}
+	if m.suggestSel != n-1 {
+		t.Errorf("downing past the end left the highlight at %d, want %d", m.suggestSel, n-1)
+	}
+	for i := 0; i < n+3; i++ {
+		m.moveSuggest(-1)
+	}
+	if m.suggestSel != 0 {
+		t.Errorf("upping past the top left the highlight at %d, want 0", m.suggestSel)
+	}
+}
+
+// Typing a filter resets the highlight, so a narrowed list never keeps a
+// selection that points past its own end. A blink, which changes no text, must
+// not: the text input emits one about twice a second and every one of them
+// reaches the rebuild, so resetting unconditionally threw the highlight away
+// twice a second and a single press of Down appeared to snap the cursor back to
+// the first row.
+func TestTypingResetsTheHighlightButABlinkDoesNot(t *testing.T) {
+	m := modeModel(t)
+	m.input.SetValue("/")
+	m.updateSuggest()
+	m.moveSuggest(1)
+	m.moveSuggest(1)
+	if m.suggestSel == 0 {
+		t.Skip("the command list has one row")
+	}
+
+	var model tea.Model = m
+	for b := 0; b < 3; b++ {
+		model, _ = model.Update(cursor.BlinkMsg{})
+	}
+	if m.suggestSel == 0 {
+		t.Errorf("a cursor blink reset the selection to the top")
+	}
+
+	m.input.SetValue("/cl")
+	m.updateSuggest()
+	if m.suggestSel != 0 {
+		t.Errorf("narrowing the list left the highlight at %d, want the top", m.suggestSel)
+	}
+	if len(m.suggest) == 0 || m.suggest[0].text != "/clear" {
+		t.Errorf("filtering by 'cl' gave %v, want /clear first", m.suggest)
+	}
+}
+
+// A selection carried into a shorter list must be pulled back inside it: an
+// index past the end would either panic or, once the dialog is drawn, mark a row
+// that is not there.
+func TestSelectionIsClampedToTheList(t *testing.T) {
+	m := modeModel(t)
+	m.input.SetValue("/")
+	m.updateSuggest()
+	if len(m.suggest) < 3 {
+		t.Skip("the command list is too short")
+	}
+	m.suggestSel = len(m.suggest) - 1
+
+	m.input.SetValue("/mode")
+	m.updateSuggest()
+
+	if m.suggestSel >= len(m.suggest) {
+		t.Fatalf("the selection is at %d but the list has %d rows", m.suggestSel, len(m.suggest))
+	}
+	if !strings.Contains(ansi.Strip(m.suggestBox()), "▸ "+m.suggest[m.suggestSel].text) {
+		t.Errorf("the dialog does not mark the clamped row:\n%s", ansi.Strip(m.suggestBox()))
+	}
+}
+
+// A Russian user has to be told which keys drive the list, in Russian. The keys
+// are looked up from the ui package and the catalog lives in i18n, so this
+// asserts the rendered Russian header rather than poking at the catalog: what
+// matters is what the user sees, not which map holds the entry.
+func TestCommandListHeaderIsTranslated(t *testing.T) {
+	m := modeModel(t)
+	m.width, m.height = 92, 30
+	restore := i18n.Current()
+	t.Cleanup(func() { i18n.Set(restore) })
+	if err := i18n.Set(i18n.Russian); err != nil {
+		t.Fatal(err)
+	}
+
+	m.input.SetValue("/")
+	m.updateSuggest()
+	if len(m.suggest) == 0 {
+		t.Skip("no commands")
+	}
+	// Row 0 is the box's own top border; the title is the row under it.
+	header := ansi.Strip(strings.Split(m.suggestBox(), "\n")[1])
+	// The arrow keys and the words around them: if the catalog lost the entry the
+	// whole line comes back in English, which is the thing to catch.
+	for _, want := range []string{"↑↓", "enter", "esc"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("the Russian header %q lost %q", header, want)
+		}
+	}
+	if strings.Contains(header, "choose") || strings.Contains(header, "dismiss") {
+		t.Errorf("the title is still English: %q", header)
+	}
+}
+
+// The command list is painted over the bottom of the chat panel, so the frame it
+// produces has to be indistinguishable from the closed one in everything but the
+// text it covers: same height, same width, input box unmoved. That is the whole
+// reason it is an overlay — as rows of the frame it shrank the transcript on
+// every "/" and ran into the bottom of the screen on a short terminal.
+//
+// The overflow marker has to survive the height cap too: a list that looks
+// complete because its "↓ more" row was trimmed away is the failure worth
+// guarding.
+func TestCommandListFitsTheFrame(t *testing.T) {
+	for _, size := range [][2]int{{120, 40}, {100, 30}, {92, 30}, {80, 24}, {60, 20}, {40, 12}, {30, 10}} {
+		w, h := size[0], size[1]
+		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
+			m := modeModel(t)
+			m.width, m.height = w, h
+			m.layout()
+			m.history = []line{{kindAgent, "an answer worth keeping on screen"}}
+			m.historyDirty = true
+			m.syncVP()
+			m.followVP()
+
+			// The frame is the baseline rather than a computed constant: the input
+			// box wraps its placeholder onto a second line on a narrow terminal, so
+			// the honest statement is "the list changes nothing" rather than a
+			// number that has to be re-derived for every width.
+			// The input already holds "/" for both frames: the placeholder is
+			// several words long and wraps onto a second line on a narrow terminal,
+			// so rendering the baseline before typing would compare two different
+			// input boxes. What is left between the frames is the dialog alone.
+			m.input.SetValue("/")
+			closed := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
+			want := len(closed)
+
+			m.updateSuggest()
+			if len(m.suggest) < 8 {
+				t.Fatalf("only %d commands, too few to overflow the list", len(m.suggest))
+			}
+
+			// Below the bound the list is dropped entirely rather than squeezed.
+			// The commands are still reachable by typing them, so nothing is lost.
+			if m.suggestHeight() == 0 {
+				if open := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n"); len(open) != want {
+					t.Errorf("with no room for the list the frame is %d rows, want %d", len(open), want)
+				}
+				return
+			}
+
+			lines := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
+			if len(lines) != want {
+				t.Fatalf("the frame with the list open is %d rows, want %d", len(lines), want)
+			}
+			for i, l := range lines {
+				if got := ansi.StringWidth(l); got != w {
+					t.Errorf("row %d is %d cells, want %d", i, got, w)
+				}
+			}
+			// The input box is the bottom of the frame and must not move a cell
+			// when the list opens, or the whole interface jumps under the cursor.
+			// Its borders are compared rather than the text between them: typing
+			// "/" legitimately changes what the box says.
+			if lines[want-1] != closed[want-1] || lines[want-3] != closed[want-3] {
+				t.Errorf("the input box moved:\nclosed %q\nopen   %q",
+					closed[want-3], lines[want-3])
+			}
+			// The status bar is directly above it and is state, not decoration.
+			if lines[want-inputHeight-statusHeight] != closed[want-inputHeight-statusHeight] {
+				t.Error("the status bar changed while the list was open")
+			}
+		})
+	}
+}
+
+// The dialog shows a window of a longer list, and the window has to follow the
+// selection. It did not: the overflow marker was given the last row by trimming
+// the window from the bottom, which dropped the selected row first — so arrowing
+// down past the visible list left a dialog with no marker in it at all and the
+// user arrowing blind.
+func TestCommandDialogScrollsWithTheSelection(t *testing.T) {
+	m := modeModel(t)
+	m.width, m.height = 92, 26
+	m.layout()
+
+	var model tea.Model = m
+	model, _ = model.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
+	if len(m.suggest) < 8 {
+		t.Fatalf("only %d commands, too few to need scrolling", len(m.suggest))
+	}
+
+	for i := range m.suggest {
+		if m.suggestSel != i {
+			t.Fatalf("step %d left the selection at %d, want the arrows to track it", i, m.suggestSel)
+		}
+		box := ansi.Strip(m.suggestBox())
+		// The selection is drawn, and it is the one drawn: the marker has to sit
+		// on the selected command, not on any other row.
+		want := m.suggest[i].text
+		if !strings.Contains(box, "▸ "+want) {
+			t.Errorf("step %d: %q is not marked in the dialog:\n%s", i, want, box)
+		}
+		// The list really is scrolling rather than sitting still: by the time the
+		// selection is past the visible rows, the first command has been dropped.
+		if i > 0 && i+1 < len(m.suggest) {
+			if m.suggest[0].text == m.suggest[i].text {
+				t.Errorf("step %d: the dialog still shows the very first command", i)
+			}
+		}
+		// The overflow marker is what admits the list does not fit; it must never
+		// be the row that gets trimmed.
+		if i+1 < len(m.suggest) && !strings.Contains(box, "more") {
+			t.Errorf("step %d: the list overflows but says nothing:\n%s", i, box)
+		}
+		model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	}
+}
+
+// The sidebar shares the rows the list is drawn over, so it has to survive them:
+// blanking it would take the model, the folder and the tool list away for as long
+// as a "/" is on screen.
+func TestCommandListKeepsTheSidebar(t *testing.T) {
+	m := modeModel(t)
+	m.width, m.height = 100, 30
+	m.showSidebar = true
+	m.layout()
+	m.history = []line{{kindAgent, "an answer"}}
+	m.historyDirty = true
+	m.syncVP()
+	m.followVP()
+
+	closed := strings.Split(m.View().Content, "\n")
+	m.input.SetValue("/")
+	m.updateSuggest()
+	if m.suggestHeight() == 0 {
+		t.Skip("no room for the list at this size")
+	}
+	open := strings.Split(m.View().Content, "\n")
+
+	end := len(closed) - inputHeight - statusHeight
+	for i := max(end-m.suggestHeight(), headerHeight); i < end; i++ {
+		sidebarClosed := ansi.StringWidth(closed[i]) - m.chatBoxWidth()
+		if got := ansi.StringWidth(open[i]) - m.chatBoxWidth(); got != sidebarClosed {
+			t.Errorf("row %d: the sidebar is %d cells with the list open, %d without",
+				i, got, sidebarClosed)
+		}
+	}
+}
+
+// Escape closes the list and leaves the typed text alone. Losing what you typed
+// because you opened a picker by accident is the failure this guards.
+func TestEscapeClosesTheListAndKeepsTheText(t *testing.T) {
+	m := modeModel(t)
+	m.input.SetValue("/mo")
+	m.updateSuggest()
+	if len(m.suggest) == 0 {
+		t.Skip("no match for /mo")
+	}
+
+	var model tea.Model = m
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+
+	if len(m.suggest) != 0 {
+		t.Error("escape did not close the command list")
+	}
+	if got := m.input.Value(); got != "/mo" {
+		t.Errorf("escape changed the input to %q, want the typed text kept", got)
+	}
+}
+
+// TestStatusBarShowsTheModeAndNothingElse pins the bar down to what it is for.
+//
+// It used to carry the model name and a run of hotkeys on top of the mode and
+// the state. The model was the third place on screen showing it — the header and
+// the sidebar already have it — and the hotkey list was a fixed string competing
+// with everything else for one row, so on a narrow terminal it was the part that
+// dropped off, leaving `ctrl+p │ ctrl+y │ esc` half-printed. Neither earns its
+// place now that the bar leads with the mode.
+func TestStatusBarShowsTheModeAndNothingElse(t *testing.T) {
+	m := modeModel(t)
+	m.prov = config.Provider{Label: "text.pollinations.ai", Model: "openai/gpt-oss-120b"}
+
+	for _, mode := range []agentMode{modePlan, modeAct} {
+		m.mode = mode
+		bar := ansi.Strip(m.statusBarView())
+
+		if !strings.Contains(bar, mode.String()) {
+			t.Errorf("%v: the status bar does not show the mode: %q", mode, bar)
+		}
+		if strings.Contains(bar, m.prov.Model) {
+			t.Errorf("%v: the status bar repeats the model name %q: %q", mode, m.prov.Model, bar)
+		}
+		for _, k := range []string{"ctrl+p", "ctrl+b", "ctrl+y"} {
+			if strings.Contains(bar, k) {
+				t.Errorf("%v: the status bar advertises %q again: %q", mode, k, bar)
+			}
+		}
+	}
+}
+
+// The state badge is the other half of the bar and has to survive every width
+// that can hold it, because "the agent is still working" and "the agent stopped"
+// are the two things a user glances at the bar for.
+//
+// Below about 30 cells the mode badge alone fills the row — it is padded to six
+// cells and the state badge is ten — and TestModeBadgeSurvivesANarrowStatusBar
+// already covers that end of the scale, so here the bar is only held to keeping
+// both for as long as both physically fit.
+func TestStatusBarKeepsBothBadgesAtEveryWidth(t *testing.T) {
+	for _, w := range []int{200, 120, 100, 80, 60, 40, 30, 20, 16} {
+		m := modeModel(t)
+		m.width, m.height = w, 30
+		m.busy = true
+		m.statusText = "calling: run_command"
+		bar := ansi.Strip(m.statusBarView())
+		// Measured from the rendered badges, not from a guess at their text: the
+		// emoji in WORKING is two cells wide, and a one-cell miss here is exactly
+		// what makes the bar wrap.
+		bothFit := ansi.StringWidth(m.modeBadge())+2+ansi.StringWidth(m.stateBadge()) <= max(w, 16)-2
+
+		if !strings.Contains(bar, m.mode.String()) {
+			t.Errorf("%d cells: the mode badge is gone: %q", w, bar)
+		}
+		if bothFit && !strings.Contains(bar, "WORKING") {
+			t.Errorf("%d cells: the state badge is gone although both fit: %q", w, bar)
+		}
+		// One row, exactly the terminal width: an overflowing bar wraps and pushes
+		// the input off the bottom of the screen.
+		lines := strings.Split(strings.TrimRight(bar, "\n"), "\n")
+		if len(lines) != 1 {
+			t.Errorf("%d cells: the bar wrapped onto %d rows", w, len(lines))
+		}
+		if got := ansi.StringWidth(lines[0]); got != max(w, 16) {
+			t.Errorf("%d cells: the bar is %d cells wide", w, got)
+		}
+	}
+}
+
+// TestTabAlwaysSwitchesMode covers the simplification of Tab. It used to mean
+// two things — complete the highlighted suggestion inside a "/" command, switch
+// the mode everywhere else — so a user who expected one got the other depending
+// on what happened to be in the input. The command list is now picked with the
+// arrows, which leaves Tab meaning one thing everywhere.
+func TestTabAlwaysSwitchesMode(t *testing.T) {
 	m := modeModel(t)
 	m.input.SetValue("/mod")
 	m.updateSuggest()
@@ -186,11 +585,15 @@ func TestTabKeepsAutocompleteInsideACommand(t *testing.T) {
 	var model tea.Model = m
 	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 
-	if m.mode != modeAct {
-		t.Errorf("Tab inside a command switched the mode to %v", m.mode)
+	if m.mode != modePlan {
+		t.Errorf("Tab inside a command left the mode at %v, want plan", m.mode)
 	}
-	if !strings.HasPrefix(m.input.Value(), "/model") {
-		t.Errorf("Tab did not complete the command: %q", m.input.Value())
+	// The list is untouched by Tab: the arrows still own it.
+	if len(m.suggest) == 0 {
+		t.Error("Tab closed the command list instead of switching the mode")
+	}
+	if got := m.input.Value(); got != "/mod" {
+		t.Errorf("Tab rewrote the input to %q, want the typed text kept", got)
 	}
 }
 

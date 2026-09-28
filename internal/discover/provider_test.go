@@ -120,7 +120,7 @@ func TestKiloPresetSelected(t *testing.T) {
 	t.Setenv("KILO_API_KEY", "kilo-key")
 	// The preset scan stops at the first key it finds, so the other preset
 	// variables must be emptied even when the developer's shell carries them.
-	for _, k := range []string{"OPENCODE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
+	for _, k := range []string{"OPENCODE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "SAMBANOVA_API_KEY", "HF_TOKEN", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
 		t.Setenv(k, "")
 	}
 	provs, err := DetectProviders()
@@ -130,5 +130,39 @@ func TestKiloPresetSelected(t *testing.T) {
 	if len(provs) != 1 || provs[0].BaseURL != "https://api.kilo.ai/api/gateway" ||
 		provs[0].Model != "kilo-auto/free" || provs[0].Wire() != config.APIChat {
 		t.Errorf("KILO_API_KEY did not select the Kilo provider: %+v", provs)
+	}
+}
+
+// A provider found automatically from an environment variable and the same
+// provider chosen through /setup must land on the same endpoint and the same
+// model. Otherwise a user with, say, NVIDIA_API_KEY exported runs on one model,
+// and the same user picking NVIDIA in the wizard runs on another, with nothing
+// in the UI to explain the difference.
+//
+// Presets are matched by URL rather than by key variable: the wizard writes the
+// generic OPENAI_API_KEY for most providers (it also writes OPENAI_BASE_URL,
+// which detect prefers), while a preset key of the same name is only a shortcut
+// for people who set the variable by hand. The key name is therefore allowed to
+// differ; the endpoint, the model and the wire are not.
+func TestSetupOptionsCoverTheKeyedPresets(t *testing.T) {
+	byURL := map[string]config.SetupOption{}
+	for _, o := range config.SetupOptions() {
+		if o.Keyless || o.BaseURL == "" {
+			continue
+		}
+		byURL[o.BaseURL] = o
+	}
+	for _, p := range keyedPresets() {
+		o, ok := byURL[p.url]
+		if !ok {
+			t.Errorf("%s selects %q but /setup does not offer it", p.env, p.Label)
+			continue
+		}
+		if o.Model != p.Model {
+			t.Errorf("%s: the preset uses model %q, /setup writes %q", p.env, p.Model, o.Model)
+		}
+		if o.API != p.API {
+			t.Errorf("%s: the preset uses the %q wire, /setup writes %q", p.env, p.API, o.API)
+		}
 	}
 }

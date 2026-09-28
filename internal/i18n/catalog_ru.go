@@ -95,6 +95,7 @@ var catalog = map[Lang]map[string]string{
 		"TOOLS":               "ИНСТРУМЕНТЫ",
 		"HOTKEYS":             "ГОРЯЧИЕ КЛАВИШИ",
 		"turns: %d":           " ходов: %d",
+		"files: %d":           " файлов: %d",
 		"tools: %d":           " тулов: %d",
 		" ctrl+p  commands":   " ctrl+p  команды",
 		" ctrl+b  hide panel": " ctrl+b  скрыть панель",
@@ -111,6 +112,7 @@ var catalog = map[Lang]map[string]string{
 		"esc — close":      "esc — закрыть",
 		"   nothing found": "   ничего не найдено",
 		"⌘ commands":       "⌘ команды",
+		"↑↓ · enter · esc": "↑↓ выбор · enter запуск · esc закрыть",
 		"⌘ models":         "⌘ модели",
 
 		// Boot.
@@ -138,6 +140,16 @@ var catalog = map[Lang]map[string]string{
 		" tab     plan/act":                                 " tab    план/работа",
 		"tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel": "tab — режим план/работа · колесо — скролл · /mouse — переключить мышь",
 
+		// Proxy.
+		"show or set the HTTP proxy":              "показать или задать HTTP-прокси",
+		"proxy: none (direct connection)":         "прокси: нет (прямое соединение)",
+		"proxy: cleared, connecting directly":     "прокси: сброшен, прямое соединение",
+		"proxy: bypass list cleared":              "прокси: список исключений очищен",
+		"proxy: the provider answered through it": "прокси: провайдер ответил через него",
+		"proxy: the request failed — ":            "прокси: запрос не удался — ",
+		"set one with: /proxy <url> · clear with: /proxy off · bypass with: /proxy no <list>": "задать: /proxy <url> · отключить: /proxy off · исключения: /proxy no <список>",
+		"checking the proxy…": "проверяю прокси…",
+
 		// Provider options.
 		"No key — Pollinations (OpenAI-compatible, anonymous)":                       "Без ключа — Pollinations (OpenAI-совместимый, анонимно)",
 		"Local — Ollama (http://127.0.0.1:11434/v1)":                                 "Локально — Ollama (http://127.0.0.1:11434/v1)",
@@ -146,6 +158,12 @@ var catalog = map[Lang]map[string]string{
 		"Kilo — gateway with free models (kilo-auto/free, account key)":              "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)",
 		"OpenCode Zen — free models (nemotron, mimo, big-pickle)":                    "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)",
 		"Groq — free, fast, tool calling works":                                      "Groq — бесплатно, быстро, tool calling работает",
+		"GitHub Models — free with a GitHub token":                                   "GitHub Models — бесплатно по токену GitHub",
+		"Mistral — codestral, paid tier has a free slice":                            "Mistral — codestral, у платного тарифа есть бесплатная часть",
+		"Cerebras — free tier, no card, very fast":                                   "Cerebras — бесплатный тариф, без карты, очень быстро",
+		"NVIDIA NIM — free credits, many coding models":                              "NVIDIA NIM — бесплатные кредиты, много кодовых моделей",
+		"SambaNova — free key, fast OpenAI-compatible":                               "SambaNova — бесплатный ключ, быстрый OpenAI-совместимый",
+		"Hugging Face — free credits, OpenAI-compatible router":                      "Hugging Face — бесплатные кредиты, OpenAI-совместимый роутер",
 		"Your own OpenAI-compatible endpoint":                                        "Свой OpenAI-совместимый endpoint",
 
 		// Setup wizard (stdin).

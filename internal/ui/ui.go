@@ -98,6 +98,11 @@ var (
 	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
 	styleHint    = lipgloss.NewStyle().Foreground(cDim)
 	styleSuggest = lipgloss.NewStyle().Bold(true).Foreground(cTool)
+	// The change tally. Additions and removals are coloured apart because a
+	// signed count read at a glance is the whole point of showing them, and
+	// "+12 -3" in one colour is just a number pair.
+	styleAdd = lipgloss.NewStyle().Foreground(cSuccess)
+	styleDel = lipgloss.NewStyle().Foreground(cErr)
 
 	styleBadgeReady = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cSuccess).Padding(0, 1)
 	styleBadgeBusy  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cWarning).Padding(0, 1)
@@ -138,10 +143,6 @@ const (
 	// the status bar, the input box and the chat panel's own two borders.
 	chromeHeight = headerHeight + statusHeight + inputHeight + panelBorder
 )
-
-// statusHotkeys are dropped from the status bar one by one as the terminal
-// narrows, so the model name survives longest.
-var statusHotkeys = []string{"ctrl+p", "ctrl+b", "ctrl+y", "esc"}
 
 // deltaMsg carries one text part of a round to the event loop. It is a spoken
 // rather than a wrapper of one, so the field names read the same on both sides
@@ -307,8 +308,15 @@ type uiModel struct {
 	picker    modelPicker
 	setup     setupState
 	lang      langState
-	suggest   []string
-	stick     bool
+	suggest   []suggestion
+	// suggestSel is the highlighted row of the command list. It is reset on every
+	// keystroke, so a narrowed list always starts at the top.
+	suggestSel int
+	// suggestFor is the input text the list was last built from. It is what keeps
+	// a cursor blink from resetting suggestSel: the rebuild runs on every message,
+	// not only on the ones that change the text.
+	suggestFor string
+	stick      bool
 
 	// Prompt history: every prompt the user has sent, persisted in
 	// ~/.dmcode/history.jsonl and recalled with ↑/↓ like a shell. histPos ==
@@ -518,6 +526,9 @@ func (m *uiModel) commands() []command {
 			}
 			m.historyDirty = true
 			return nil
+		}},
+		{name: "proxy", desc: i18n.T("show or set the HTTP proxy"), run: func(m *uiModel) tea.Cmd {
+			return m.showProxy()
 		}},
 		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
 	}
@@ -801,6 +812,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "esc":
+			// The command list closes on escape before anything else, so a user
+			// who opened it by accident gets their prompt back without losing the
+			// text they typed or stopping a turn they did not mean to stop.
+			if len(m.suggest) > 0 {
+				m.suggest = nil
+				return m, nil
+			}
 			if m.busy {
 				if m.cancelTurn != nil {
 					m.cancelTurn()
@@ -858,17 +876,20 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.syncVP()
 			return m, nil
 		case "tab":
-			// Tab keeps its old job inside a command, where a suggestion is the
-			// whole point of typing; everywhere else it switches the mode, which
-			// is the key a user reaches for without thinking about it.
-			if len(m.suggest) > 0 && strings.HasPrefix(strings.TrimSpace(m.input.Value()), "/") {
-				m.input.SetValue(m.suggest[0])
-				m.updateSuggest()
-				return m, nil
-			}
+			// Tab used to complete a suggestion here and switch the mode
+			// everywhere else, so one key meant two different things depending on
+			// what was in the input. The command list is now picked with the arrows
+			// and enter, which leaves tab meaning one thing everywhere: the mode.
 			return m, m.toggleMode()
 		case "up", "down":
 			if m.busy {
+				return m, nil
+			}
+			// While the command list is up the arrows belong to it, not to the
+			// prompt history. There is no way to reach both at once, and the list
+			// is the transient one: it disappears the moment the text stops being a
+			// command, and then the arrows are history again.
+			if m.moveSuggest(map[string]int{"up": -1, "down": 1}[msg.String()]) {
 				return m, nil
 			}
 			if msg.String() == "up" && len(m.promptHistory) > 0 && m.histPos > 0 {
@@ -890,6 +911,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
+			// A highlighted row in the command list wins over whatever is in the
+			// input. Typing "/" and pressing enter runs the first command, which
+			// is what it always did; arrowing down first runs whichever one is
+			// highlighted. Without this the arrows would only move a cursor and
+			// the user would still have to type the command exactly.
+			if m.suggestSel < len(m.suggest) && len(m.suggest) > 0 {
+				text := strings.TrimSpace(m.suggest[m.suggestSel].text)
+				m.input.SetValue(text)
+				m.suggest = nil
+				m.updateSuggest()
+				// A /model row carries its argument already; anything else goes
+				// through the command switch below as typed.
+			}
 			text := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
 			m.suggest = nil
@@ -924,6 +958,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showRecentPrompts()
 				m.followVP()
 				return m, nil
+			case "/proxy":
+				return m, m.applyProxy(text)
 			case "/sidebar":
 				m.showSidebar = !m.showSidebar
 				m.layout()
@@ -1148,6 +1184,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyDirty = true
 	case toolCheckMsg:
 		m.handleToolCheck(msg)
+	case proxyCheckMsg:
+		m.handleProxyCheck(msg)
 	case failoverMsg:
 		extra = m.handleFailover(msg)
 	}
@@ -1184,28 +1222,53 @@ func (m *uiModel) contentWidth() int {
 	return max(m.chatBoxWidth()-panelBorder, 8)
 }
 
-// suggestHeight is the row the tab-completion hint occupies, or 0 when hidden.
-// On a terminal too short to hold the whole frame the hint is dropped: the
-// input box matters more than the completion, and a frame one row too tall
-// scrolls the input off the bottom of the screen.
+// suggestHeight is how many rows the command list paints over the transcript, or
+// 0 when it is closed.
+//
+// The list is an overlay, not a row of the frame: it is drawn on top of the
+// chat panel instead of taking rows from it. Laying it out as real rows meant
+// the transcript shrank every time a "/" was typed and jumped back when it was
+// closed, and on a short terminal the list ran into the bottom of the screen
+// with the input box still to fit. Painting over the transcript costs the
+// newest reply for as long as the list is up and nothing else at all: the frame
+// is identical with the list open and closed, so nothing shifts and nothing is
+// ever pushed off screen.
 func (m *uiModel) suggestHeight() int {
 	if len(m.suggest) == 0 {
 		return 0
 	}
-	if m.height < chromeHeight+2 {
+	// The list paints over the chat panel, so the rows available are everything
+	// above the input box, less the header and the status bar it must not cover.
+	room := m.height - inputHeight - headerHeight - statusHeight
+	if room < minSuggestRows {
+		// Too little to draw a list over. The commands are still reachable by
+		// typing them, which is the whole reason a picker is a convenience and
+		// not the only path.
 		return 0
 	}
-	return 1
+	return min(min(len(m.suggest)+2, suggestMaxRows), room)
 }
 
-// layout sizes the viewport so that header + chat panel + status bar +
-// suggestion row + input box add up to exactly the terminal height. The
-// viewport receives the panel's *inner* row count; View adds the borders back.
+// minSuggestRows is one command plus the header naming the keys, and the row the
+// overflow marker takes when the list is longer than the space allows. A header
+// with no command under it is worse than nothing: it advertises keys that lead
+// nowhere and looks broken.
+const minSuggestRows = 2
+
+// suggestMaxRows caps the list. A user arrowing through commands wants to read
+// the reply they are answering, not scroll a pane that swallowed it.
+const suggestMaxRows = 8
+
+// layout sizes the viewport so that header + chat panel + status bar + input box
+// add up to exactly the terminal height. The command list is not part of it: it
+// is painted over the panel afterwards, so the frame does not change when it
+// opens or closes. The viewport receives the panel's *inner* row count; View adds
+// the borders back.
 func (m *uiModel) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	rows := max(m.height-chromeHeight-m.suggestHeight(), minViewRows)
+	rows := max(m.height-chromeHeight, minViewRows)
 	m.vp.SetWidth(m.contentWidth())
 	m.vp.SetHeight(rows)
 	// The input scrolls horizontally within one row; without an explicit width
@@ -1291,12 +1354,45 @@ func (m *uiModel) followVP() {
 	}
 }
 
+// suggestion is one row of the command picker: the text that goes into the input
+// when it is chosen, and what it is, for the line beside it.
+type suggestion struct {
+	text string
+	desc string
+}
+
+// updateSuggest rebuilds the command list shown above the input.
+//
+// The list is a picker, not a completion hint: the arrow keys move through it and
+// enter runs whatever is highlighted, so there is no tab to press and nothing to
+// remember about which key does what. Typing narrows it, and the first match is
+// preselected, so "/" followed by enter still runs the first command — the
+// keyboard-only path a user already had keeps working unchanged.
+// The input text the current command list was built from. It is what tells a
+// keystroke apart from the rest of the program's chatter: the text input emits a
+// cursor blink roughly twice a second, and every one of those messages reaches
+// the rebuild below. Without the memo the highlight was thrown away twice a
+// second, so a single press of Down appeared to snap the cursor back to the top.
+
 func (m *uiModel) updateSuggest() {
+	m.rebuildSuggest(m.input.Value())
+}
+
+// rebuildSuggest rebuilds the command list for text, keeping the highlighted row
+// when the list it was picked from is the same one. Typing narrows the list, and
+// a selection that pointed past the new end has to go — but nothing else may
+// move it.
+func (m *uiModel) rebuildSuggest(text string) {
+	keepSel := text == m.suggestFor
 	m.suggest = nil
+	if !keepSel {
+		m.suggestSel = 0
+	}
+	m.suggestFor = text
+
 	if m.palette.open || m.picker.open || m.setup.open {
 		return
 	}
-	text := m.input.Value()
 	if m.busy || !strings.HasPrefix(text, "/") {
 		return
 	}
@@ -1304,22 +1400,51 @@ func (m *uiModel) updateSuggest() {
 		prefix := strings.TrimPrefix(text, "/")
 		for _, c := range m.commands() {
 			if strings.HasPrefix(c.name, prefix) {
-				m.suggest = append(m.suggest, "/"+c.name)
+				m.suggest = append(m.suggest, suggestion{"/" + c.name, c.desc})
 			}
 		}
+		m.clampSuggest()
 		return
 	}
 	if id, ok := strings.CutPrefix(text, "/model "); ok {
 		q := strings.TrimSpace(id)
 		for _, id := range m.picker.Models {
 			if q == "" || strings.Contains(id, q) {
-				m.suggest = append(m.suggest, "/model "+id)
+				m.suggest = append(m.suggest, suggestion{"/model " + id, i18n.T("switch to this model")})
 			}
 			if len(m.suggest) >= 8 {
 				break
 			}
 		}
 	}
+	m.clampSuggest()
+}
+
+// clampSuggest pulls the highlighted row back inside the list. Typing narrows the
+// list, so a selection that survived a rebuild can point past its new end, and an
+// index out of range would either panic or silently select the wrong command.
+func (m *uiModel) clampSuggest() {
+	if m.suggestSel >= len(m.suggest) {
+		m.suggestSel = max(len(m.suggest)-1, 0)
+	}
+}
+
+// moveSuggest moves the highlight through the command list, stopping at the ends
+// rather than wrapping: a list that jumps from the last row back to the first on
+// one keypress is disorienting when the list is long and the intent was to stop.
+func (m *uiModel) moveSuggest(delta int) bool {
+	if len(m.suggest) == 0 {
+		return false
+	}
+	next := m.suggestSel + delta
+	if next < 0 {
+		next = 0
+	}
+	if next > len(m.suggest)-1 {
+		next = len(m.suggest) - 1
+	}
+	m.suggestSel = next
+	return true
 }
 
 // transcriptRow describes how one history entry is laid out in the chat panel:
@@ -1541,6 +1666,165 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // openSetup starts /setup at the provider list.
+// showProxy reports the proxy in effect and, when a provider has failed through
+// it, says so — a proxy that is silently dropping every request looks exactly
+// like a provider that is down, and the two have opposite fixes.
+//
+// It is a report rather than a prompt because the wizard already has a way to ask
+// for a value, and reusing it here would mean /proxy behaved differently from
+// every other command that needs input.
+// applyProxy handles "/proxy" with or without an argument.
+//
+// With no argument it reports the current setting. With one it sets the proxy,
+// and the change is written to .env as well as the live environment, because a
+// proxy that survives only until the program exits is not really configured: the
+// next start would go direct and the failure would look like the provider's.
+//
+// The set-then-check order matters. A malformed URL is rejected before anything
+// moves, so a typo cannot leave the session half configured, and the request
+// that follows is what turns "the proxy is set" into "the proxy works".
+func (m *uiModel) applyProxy(arg string) tea.Cmd {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return m.showProxy()
+	}
+
+	fail := func(err error) tea.Cmd {
+		m.history = append(m.history, line{kindErr, "proxy: " + err.Error()})
+		m.historyDirty = true
+		m.followVP()
+		return nil
+	}
+
+	// "no" sets the bypass list rather than the proxy, so a user with a proxy
+	// already in the environment can exempt their own services without turning
+	// the proxy off entirely.
+	if rest, ok := strings.CutPrefix(arg, "no "); ok {
+		if err := config.SetNoProxy(strings.TrimSpace(rest)); err != nil {
+			return fail(err)
+		}
+	} else if err := config.SetProxy(arg); err != nil {
+		return fail(err)
+	}
+
+	s := config.CurrentProxy()
+	if err := m.persistProxy(s); err != nil {
+		return fail(err)
+	}
+	if s.Active {
+		m.history = append(m.history, line{kindSys, "proxy: " + s.HTTPS})
+	} else {
+		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
+	}
+	m.historyDirty = true
+	m.followVP()
+	return m.showProxy()
+}
+
+// persistProxy brings .env in line with the environment.
+//
+// MergeDotEnv only adds and replaces, so a proxy that has been turned off has to
+// be removed from the file explicitly: left there it would be read back on the
+// next start and the session would silently keep going through a proxy the user
+// has switched off.
+func (m *uiModel) persistProxy(s config.ProxySettings) error {
+	lines, err := config.ReadDotEnv()
+	if err != nil {
+		return err
+	}
+	// Start from the file as it is, drop every proxy variable, then write the
+	// current ones back. In that order, so a variable that no longer has a value
+	// cannot survive, which is the whole point of "off".
+	merged, _ := config.MergeDotEnv(lines, nil)
+	for _, k := range append(config.ProxyEnvKeys(), config.EnvNoProxy) {
+		merged = dropEnvKey(merged, k)
+	}
+	if s.Active {
+		vars := map[string]string{}
+		if s.HTTP != "" {
+			vars[config.EnvHTTPProxy] = s.HTTP
+		}
+		if s.HTTPS != "" {
+			vars[config.EnvHTTPSProxy] = s.HTTPS
+		}
+		if s.NoProxy != "" {
+			vars[config.EnvNoProxy] = s.NoProxy
+		}
+		merged, _ = config.MergeDotEnv(merged, vars)
+	}
+	var sb strings.Builder
+	for _, l := range merged {
+		sb.WriteString(l + "\n")
+	}
+	return os.WriteFile(".env", []byte(sb.String()), 0o600)
+}
+
+// dropEnvKey removes every line assigning key, leaving comments and other
+// variables alone.
+func dropEnvKey(lines []string, key string) []string {
+	out := lines[:0]
+	for _, l := range lines {
+		if k, _, ok := config.DotEnvPair(l); ok && k == key {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+func (m *uiModel) showProxy() tea.Cmd {
+	s := config.CurrentProxy()
+	add := func(s string) {
+		m.history = append(m.history, line{kindSys, s})
+	}
+	if !s.Active {
+		add(i18n.T("proxy: none (direct connection)"))
+	} else {
+		// http and https are shown separately because they are separate
+		// variables; a user who set one on the command line and not the other
+		// would otherwise have no way to see which is which.
+		for _, p := range []struct{ label, val string }{
+			{"https", s.HTTPS}, {"http", s.HTTP},
+		} {
+			if p.val != "" {
+				add("proxy " + p.label + ": " + p.val)
+			}
+		}
+		if s.NoProxy != "" {
+			add("proxy bypass: " + s.NoProxy)
+		}
+	}
+	add(i18n.T("set one with: /proxy <url> · clear with: /proxy off · bypass with: /proxy no <list>"))
+
+	// The probe is what turns "the proxy is set" into "the proxy works", which
+	// is the thing a user behind one actually needs to know. A failure here is
+	// reported as inconclusive rather than as a dead provider, because the
+	// request may never have left the machine.
+	m.statusText = i18n.T("checking the proxy…")
+	return func() tea.Msg {
+		_, err := config.ListModels(m.prov)
+		return proxyCheckMsg{err: err}
+	}
+}
+
+type proxyCheckMsg struct{ err error }
+
+// handleProxyCheck reports whether a request through the current proxy reaches
+// the provider. It deliberately does not change the running provider on a
+// failure: a proxy problem is a reason to fix the proxy, not to silently switch
+// the user onto a different endpoint and hide the reason their setup is broken.
+func (m *uiModel) handleProxyCheck(msg proxyCheckMsg) {
+	m.statusText = ""
+	kind, text := kindSys, i18n.T("proxy: the provider answered through it")
+	if msg.err != nil {
+		kind, text = kindErr, i18n.T("proxy: the request failed — ")
+		text += msg.err.Error()
+	}
+	m.history = append(m.history, line{kind, text})
+	m.historyDirty = true
+	m.followVP()
+}
+
 func (m *uiModel) openSetup() tea.Cmd {
 	m.setup.reset()
 	m.setup.open = true
@@ -2097,6 +2381,15 @@ func (m *uiModel) sidebarView(height int) string {
 	row(styleHint, " "+truncate(m.sessionID, sbInner-1))
 	row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
 	row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
+	// What the agent actually changed. The counts come from the tools, which are
+	// the only place that knows a file's before and after, so this is the real
+	// diff of the session rather than a sum of the write calls that produced it.
+	// It stays hidden until something has changed: a column of zeroes on a fresh
+	// session is noise, and its absence is the information.
+	if cs := dmtools.Changes(); cs.Files > 0 {
+		row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
+		row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
+	}
 	b.WriteString("\n")
 
 	row(styleSidebarLabel, i18n.T("FOLDER"))
@@ -2151,25 +2444,42 @@ func (m *uiModel) sidebarView(height int) string {
 	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
-// statusBarView renders the single-row footer. Everything in it competes for
-// one line, so the model name and the hotkey list are fitted against the space
-// that is actually left and the rest is dropped. Overflowing is not cosmetic:
-// lipgloss word-wraps the surplus onto a second row, which makes the whole
-// frame one row taller than the terminal and scrolls the input off the bottom.
+// statusBarView renders the single-row footer.
+//
+// It carries the mode and the state, and nothing else. The model name used to sit
+// here too, which was the third place on screen showing it (the header and the
+// sidebar already do), and a hotkey list that repeated what /help is for. Both
+// were cut rather than rearranged: a status bar that only changes when the agent
+// or the user does something is a bar worth reading, and a permanently
+// half-illegible run of `ctrl+p │ ctrl+y │ esc` is not — the keys it advertised
+// dropped off the edge anyway as the terminal narrowed.
+//
+// Everything here competes for one line, so the free-text status is dropped
+// first and the two badges are the last thing standing. Overflowing is not
+// cosmetic: lipgloss word-wraps the surplus onto a second row, which makes the
+// whole frame one row taller than the terminal and scrolls the input off the
+// bottom.
+// stateBadge is the one piece of status the bar always carries: what the agent
+// is doing right now. It is a function so the width arithmetic in the bar and in
+// its tests both measure the rendered string rather than a copy of it — an emoji
+// in "⏳ WORKING" is two cells wide, and guessing one cell short is how a row ends
+// up a column wider than the terminal and wraps.
+func (m *uiModel) stateBadge() string {
+	switch {
+	case m.busy:
+		return styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
+		return styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
+	default:
+		return styleBadgeReady.Render(i18n.T("● READY"))
+	}
+}
+
 func (m *uiModel) statusBarView() string {
 	width := max(m.width, 16)
 	inner := width - 2 // the bar's own left/right padding
-	const sep = "  │  "
 
-	var badge string
-	switch {
-	case m.busy:
-		badge = styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
-	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
-		badge = styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
-	default:
-		badge = styleBadgeReady.Render(i18n.T("● READY"))
-	}
+	badge := m.stateBadge()
 
 	statusDesc := m.statusText
 	switch {
@@ -2181,49 +2491,17 @@ func (m *uiModel) statusBarView() string {
 		statusDesc = m.spin.View() + " " + statusDesc
 	}
 
-	left := badge + "  " + m.modeBadge() + "  " + statusDesc
-	// Two columns are always held back as the gutter between the two halves, so
-	// the gap can never collapse to zero and push the row over the wrap point.
-	avail := inner - ansi.StringWidth(left) - 2
-	if avail < 8 {
-		// Too narrow for two columns: the mode badge is the one piece of state
-		// that must never be the thing to disappear, so it is kept and the
-		// free-text status goes instead.
-		compact := badge + "  " + m.modeBadge()
-		if ansi.StringWidth(compact) <= inner {
-			return styleStatusBar.Width(width).Render(compact)
-		}
-		return styleStatusBar.Width(width).Render(truncate(badge, inner))
+	// The mode leads: it is the one thing a user must never have to hunt for,
+	// because it decides whether the agent is allowed to touch their files.
+	left := m.modeBadge() + "  " + badge
+	if ansi.StringWidth(left)+2+ansi.StringWidth(statusDesc) > inner && ansi.StringWidth(left)+2 <= inner {
+		return styleStatusBar.Width(width).Render(left)
 	}
-
-	// Right half, assembled most- to least-important so the hotkeys are what
-	// disappears on a narrow terminal.
-	var right string
-	fit := func(s string) bool {
-		cand := s
-		if right != "" {
-			cand = right + sep + s
-		}
-		if ansi.StringWidth(cand) > avail {
-			return false
-		}
-		right = cand
-		return true
+	if ansi.StringWidth(left)+2 > inner {
+		// Too narrow even for both badges: the mode is kept, the state goes.
+		return styleStatusBar.Width(width).Render(truncate(m.modeBadge(), inner))
 	}
-	if fit(truncate(m.prov.Model, avail)) {
-		for _, k := range statusHotkeys {
-			if !fit(k) {
-				break
-			}
-		}
-	}
-
-	content := left
-	if right != "" {
-		gap := inner - ansi.StringWidth(left) - ansi.StringWidth(right)
-		content = left + strings.Repeat(" ", max(gap, 2)) + right
-	}
-	return styleStatusBar.Width(width).Render(content)
+	return styleStatusBar.Width(width).Render(left + "  " + truncate(statusDesc, inner-ansi.StringWidth(left)-2))
 }
 
 // headerView renders the app name, the model and the session id on one row.
@@ -2251,43 +2529,132 @@ func (m *uiModel) headerView() string {
 		styleHeader.Render(name) + styleHint.Render(sep+model+sep+id))
 }
 
-// suggestView renders the tab-completion row. It is a single row, so the tail
-// of the list is cut instead of wrapped.
-func (m *uiModel) suggestView() string {
-	if len(m.suggest) == 0 {
-		return ""
-	}
-	const (
-		indent  = 2
-		tail    = "  (tab)"
-		maxShow = 6
-	)
+// suggestBox renders the command list as a bordered panel, in the same chrome as
+// the ctrl+p palette, and anchored directly above the input box.
+//
+// It is drawn over the chat panel rather than added to the frame. As rows of the
+// frame the list shrank the transcript every time a "/" was typed, jumped back
+// when it closed, and on a short terminal ran into the bottom of the screen with
+// the input still to fit. As a panel it costs the same on every terminal and
+// nothing in the layout moves.
+func (m *uiModel) suggestBox() string {
+	// As wide as the chat panel, so it lines up with the text it sits above
+	// instead of stretching under the sidebar or floating free of both.
+	width := max(min(m.chatBoxWidth(), floatingBoxMaxWidth), 24)
+	inner := width - panelBorder
+	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 
-	var b strings.Builder
-	b.WriteString(strings.Repeat(" ", indent))
-	used := indent
-	for i, s := range m.suggest {
-		if i >= maxShow {
-			break
-		}
-		seg := s
-		if i > 0 {
-			seg = "  " + s
-		}
-		if used+ansi.StringWidth(seg)+ansi.StringWidth(tail) > m.width {
-			break
-		}
-		if i == 0 {
-			b.WriteString(styleSuggest.Render(s))
-		} else {
-			b.WriteString(styleHint.Render(seg))
-		}
-		used += ansi.StringWidth(seg)
+	// The title names the keys, and the commands follow directly: a blank spacer
+	// row here is a row the list cannot use, and on a short terminal it is the
+	// difference between showing another command and showing the overflow marker.
+	head := []string{
+		styleHeader.Render(" "+i18n.T("⌘ commands")+" ") + styleHint.Render(i18n.T("↑↓ · enter · esc")),
 	}
-	b.WriteString(styleHint.Render(tail))
-	return b.String()
+
+	rows := append([]string{}, head...)
+
+	// How many rows the commands may occupy, and how many of them are actually
+	// given to commands once the overflow marker has taken its row. Reserving it up
+	// front rather than trimming afterwards is what keeps the highlight on screen:
+	// a window trimmed from the bottom drops the selected row first, and the user
+	// is left arrowing at a list with nothing marked in it.
+	room := max(m.suggestHeight()-panelBorder-len(head), 1)
+	show := room
+	if len(m.suggest) > room && room > 1 {
+		show = room - 1
+	}
+
+	// The window is anchored on the selection: it starts at the top and follows
+	// the highlight down, so the selected command is always one of the drawn rows.
+	start := 0
+	if m.suggestSel >= start+show {
+		start = m.suggestSel - show + 1
+	}
+	if start > len(m.suggest)-show {
+		start = max(len(m.suggest)-show, 0)
+	}
+	limit := min(start+show, len(m.suggest))
+
+	for i := start; i < limit; i++ {
+		// The marker is the row's indent, so it is passed separately rather than
+		// glued onto the text: wrapIndent then hangs the wrapped lines under the
+		// text, and no marker is doubled up.
+		marker := "   "
+		if i == m.suggestSel {
+			marker = " ▸ "
+		}
+		s := m.suggest[i]
+		text := s.text
+		if s.desc != "" {
+			if room := inner - ansi.StringWidth(text) - 4; room >= 8 {
+				text += "  — " + truncate(s.desc, room)
+			}
+		}
+		line := wrapIndent(text, inner, marker, "     ")
+		if i == m.suggestSel {
+			for j := range line {
+				line[j] = styleSel.Render(line[j])
+			}
+		}
+		rows = append(rows, line...)
+	}
+	if more := len(m.suggest) - limit; more > 0 {
+		rows = append(rows, styleHint.Render("   "+i18n.T("↓ more ")+fmt.Sprint(more)))
+	}
+	return stylePanel.Width(width).Render(strings.Join(rows, "\n"))
 }
 
+// floatingBoxMaxWidth keeps a dialog from stretching the full width of a wide
+// terminal, where a list of short command names would sit in a vast empty box.
+const floatingBoxMaxWidth = 68
+
+// overlaySuggest paints the command dialog over the bottom of the chat panel,
+// immediately above the input box.
+//
+// It rewrites rows of the frame that are already there rather than appending any,
+// so the frame keeps exactly m.height rows and nothing in the interface moves:
+// the input box, the status bar and the panel's top border are all still where
+// they were. The dialog is anchored to the bottom because that is where the eye
+// already is, next to the cursor.
+//
+// Only the chat panel's columns are rewritten. The sidebar shares those rows, and
+// blanking it would take the model, the folder and the tool list away for as long
+// as a "/" is on screen — the very information a user reaches for to decide what
+// to type next. What is left of the row after the panel is kept verbatim.
+func overlaySuggest(frame string, m *uiModel, rows int) string {
+	lines := strings.Split(frame, "\n")
+	// The dialog ends where the status bar starts: header + panel + status + input
+	// is the whole frame, and the last row of the panel is the one above the badge.
+	end := len(lines) - inputHeight - statusHeight
+	start := max(end-rows, headerHeight)
+	if end <= headerHeight || start >= end {
+		return frame
+	}
+
+	box := strings.Split(m.suggestBox(), "\n")
+	if len(box) > end-start {
+		box = box[:end-start]
+	}
+	panel := m.chatBoxWidth()
+	keep := max(m.width-panel, 0) // the sidebar's columns, or nothing when hidden
+	for i, l := range box {
+		row := lines[start+i]
+		// The dialog is narrower than the panel on a wide terminal, so the gap
+		// between it and the panel's right border is filled rather than left as a
+		// ragged hole. TruncateLeft removes a count from the head rather than
+		// keeping a tail, so the number is what has to come off.
+		fill := panel - ansi.StringWidth(l)
+		if fill < 0 {
+			l = ansi.Truncate(l, panel, "")
+			fill = 0
+		}
+		drop := ansi.StringWidth(row) - keep
+		lines[start+i] = l + strings.Repeat(" ", fill) + ansi.TruncateLeft(row, max(drop, 0), "")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// fitCells right-fills s with spaces to exactly w cells, and cuts it if it is
 // floatingWidth is the outer width of the palette and the model picker. Both
 // list model identifiers, which are unbounded, so their rows are wrapped inside
 // a frame that fits the terminal instead of growing past it.
@@ -2572,14 +2939,17 @@ func (m *uiModel) View() tea.View {
 	}
 
 	// JoinVertical pads every block out to the widest one, so a single
-	// overflowing row is enough to shift the whole frame sideways.
+	// overflowing row is enough to shift the whole frame sideways. The command
+	// list is deliberately not a part: it is painted over the panel below, so
+	// opening and closing it leaves the frame byte-identical.
 	parts := []string{m.headerView(), middle, m.statusBarView()}
-	if m.suggestHeight() == 1 {
-		parts = append(parts, m.suggestView())
-	}
 	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
-	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	if rows := m.suggestHeight(); rows > 0 {
+		frame = overlaySuggest(frame, m, rows)
+	}
+	v := tea.NewView(frame)
 	v.AltScreen = true
 	// Cell motion is what makes the terminal report the wheel at all; without it
 	// no MouseWheelMsg is ever produced and scrolling cannot work. The cost is

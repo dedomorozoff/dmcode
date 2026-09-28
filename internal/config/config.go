@@ -98,7 +98,7 @@ func AskTimeout() time.Duration {
 }
 
 func ListModels(p Provider) ([]string, error) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := Client(15 * time.Second)
 	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(p.BaseURL, "/")+"/models", nil)
 	if err != nil {
 		return nil, err
