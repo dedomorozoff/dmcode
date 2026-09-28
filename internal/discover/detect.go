@@ -20,6 +20,40 @@ func DetectProvider() (config.Provider, error) {
 	return pool[0], nil
 }
 
+// keyedPreset ties an environment variable to the endpoint it selects, so a
+// provider can be found with no configuration at all.
+//
+// The list is a named function rather than an inline literal because
+// TestSetupOptionsCoverTheKeyedPresets compares it against config.SetupOptions:
+// a second, hand-written copy of these endpoints would be free to drift, and the
+// drift would only show up as "the wizard set up a different model than the one
+// I get automatically", with nothing in the UI to explain it.
+type keyedPreset struct {
+	env   string
+	url   string
+	Model string
+	API   string
+	Label string
+}
+
+func keyedPresets() []keyedPreset {
+	return []keyedPreset{
+		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free", config.APIResponses, "OpenCode Zen"},
+		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", config.APIResponses, "Groq"},
+		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIResponses, "GitHub Models"},
+		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", config.APIResponses, "Mistral"},
+		{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", config.APIChat, "OpenRouter"},
+		{"KILO_API_KEY", "https://api.kilo.ai/api/gateway", "kilo-auto/free", config.APIChat, "Kilo"},
+		// The four below issue a working key on signup with no card attached, and
+		// each was probed live before being listed: /v1/models answers, so a key
+		// from the signup page is enough to reach the agent.
+		{"CEREBRAS_API_KEY", "https://api.cerebras.ai/v1", "qwen-3.8-27b", config.APIChat, "Cerebras"},
+		{"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1", "z-ai/glm-5.3", config.APIChat, "NVIDIA NIM"},
+		{"SAMBANOVA_API_KEY", "https://api.sambanova.ai/v1", "Meta-Llama-3.3-70B-Instruct", config.APIChat, "SambaNova"},
+		{"HF_TOKEN", "https://router.huggingface.co/v1", "Qwen/Qwen3-Coder-30B-A3B-Instruct", config.APIChat, "Hugging Face"},
+	}
+}
+
 // detectProviders returns the session's pool in preference order.
 //
 // A configured endpoint is always first and always alone: the user chose it, and
@@ -47,21 +81,7 @@ func DetectProviders() ([]config.Provider, error) {
 		}}, nil
 	}
 
-	type preset struct {
-		env   string
-		url   string
-		Model string
-		API   string
-		Label string
-	}
-	for _, p := range []preset{
-		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free", config.APIResponses, "OpenCode Zen"},
-		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", config.APIResponses, "Groq"},
-		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIResponses, "GitHub Models"},
-		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", config.APIResponses, "Mistral"},
-		{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", config.APIChat, "OpenRouter"},
-		{"KILO_API_KEY", "https://api.kilo.ai/api/gateway", "kilo-auto/free", config.APIChat, "Kilo"},
-	} {
+	for _, p := range keyedPresets() {
 		if key := os.Getenv(p.env); key != "" {
 			return []config.Provider{{
 				BaseURL: p.url,

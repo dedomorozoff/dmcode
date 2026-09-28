@@ -48,12 +48,15 @@ and fails over to another one if the current provider dies mid-session.
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
 | **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
-| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models** | the key is already in `.env` or the environment |
+| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
-and it lands in `.env`. Some options need no key at all; others are your own
-endpoints (Unsloth, LM Studio, vLLM — anything speaking the OpenAI-compatible
-API).
+and it lands in `.env`. The free tiers that need no card are all in that list —
+Cerebras (`CEREBRAS_API_KEY`), NVIDIA NIM (`NVIDIA_API_KEY`), SambaNova
+(`SAMBANOVA_API_KEY`) and Hugging Face (`HF_TOKEN`) all hand out working keys
+on signup, and any of them is picked up automatically once the variable is set.
+Some options need no key at all; others are your own endpoints (Unsloth,
+LM Studio, vLLM — anything speaking the OpenAI-compatible API).
 
 A custom endpoint is three lines in `.env`:
 

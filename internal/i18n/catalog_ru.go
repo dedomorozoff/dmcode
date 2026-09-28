@@ -146,6 +146,12 @@ var catalog = map[Lang]map[string]string{
 		"Kilo — gateway with free models (kilo-auto/free, account key)":              "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)",
 		"OpenCode Zen — free models (nemotron, mimo, big-pickle)":                    "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)",
 		"Groq — free, fast, tool calling works":                                      "Groq — бесплатно, быстро, tool calling работает",
+		"GitHub Models — free with a GitHub token":                                   "GitHub Models — бесплатно по токену GitHub",
+		"Mistral — codestral, paid tier has a free slice":                            "Mistral — codestral, у платного тарифа есть бесплатная часть",
+		"Cerebras — free tier, no card, very fast":                                   "Cerebras — бесплатный тариф, без карты, очень быстро",
+		"NVIDIA NIM — free credits, many coding models":                              "NVIDIA NIM — бесплатные кредиты, много кодовых моделей",
+		"SambaNova — free key, fast OpenAI-compatible":                               "SambaNova — бесплатный ключ, быстрый OpenAI-совместимый",
+		"Hugging Face — free credits, OpenAI-compatible router":                      "Hugging Face — бесплатные кредиты, OpenAI-совместимый роутер",
 		"Your own OpenAI-compatible endpoint":                                        "Свой OpenAI-совместимый endpoint",
 
 		// Setup wizard (stdin).
