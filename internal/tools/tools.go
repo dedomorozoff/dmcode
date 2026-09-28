@@ -18,6 +18,8 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+
+	"github.com/dedomorozoff/dmcode/internal/todo"
 )
 
 const maxReadBytes = 256 * 1024
@@ -851,18 +853,36 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []tool.Tool{readFileTool, writeFileTool, editFileTool, listDirTool, grepTool, globTool2, runCommandTool}, nil
+	// The plan tools live in their own package but belong to the same set: the
+	// agent publishes a plan through them and the user reads it with /todo, so
+	// one without the other would show a user a plan the agent cannot keep.
+	todoTools, err := todo.Default.MakeTools()
+	if err != nil {
+		return nil, err
+	}
+	out := []tool.Tool{
+		readFileTool, writeFileTool, editFileTool, listDirTool,
+		grepTool, globTool2, runCommandTool,
+	}
+	return append(out, todoTools...), nil
 }
 
 // readOnlyNames are the tools a planning turn may use. run_command is absent on
 // purpose: a shell can write a file through >, Out-File, tee or touch, so
 // "read-only" cannot be enforced from the prompt alone and the tool is withheld
 // instead of trusted.
+//
+// The plan tools are here for the same reason they are in the full set: a plan
+// is a document, not an edit. Withholding them from plan mode would leave the
+// mode whose entire output is a plan unable to publish one.
 var readOnlyNames = map[string]bool{
-	"read_file": true,
-	"list_dir":  true,
-	"grep":      true,
-	"glob":      true,
+	"read_file":  true,
+	"list_dir":   true,
+	"grep":       true,
+	"glob":       true,
+	"todo_write": true,
+	"todo_set":   true,
+	"todo_read":  true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the

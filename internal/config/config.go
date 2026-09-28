@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,6 +62,39 @@ func OrDefaultModel(m string) string {
 		return m
 	}
 	return "qwen2.5-coder:7b"
+}
+
+// SessionsDir is where conversations are kept between runs, defaulting to
+// ~/.dmcode/sessions. DMCODE_SESSIONS_DIR overrides it, which is what the
+// tests use and what a user sets to keep sessions beside a project instead of
+// in their home directory.
+//
+// An unresolvable home is reported rather than fatal: the session store falls
+// back to memory, and losing history on exit is better than not starting.
+func SessionsDir() string {
+	if p := os.Getenv("DMCODE_SESSIONS_DIR"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".dmcode", "sessions")
+}
+
+// AskTimeout is how long a question from the agent waits for an answer before
+// the recommended option is chosen for the user. DMCODE_ASK_TIMEOUT sets it in
+// seconds.
+//
+// Zero means off, which is the default: an agent that picks for a user who is
+// still reading is worse than one that waits, so the timer is something a user
+// turns on for themselves rather than something that happens to them.
+func AskTimeout() time.Duration {
+	v, err := strconv.Atoi(os.Getenv("DMCODE_ASK_TIMEOUT"))
+	if err != nil || v <= 0 {
+		return 0
+	}
+	return time.Duration(v) * time.Second
 }
 
 func ListModels(p Provider) ([]string, error) {

@@ -9,6 +9,32 @@ Built on [google/adk-go](https://github.com/google/adk-go) and [Bubble Tea](http
 
 One static binary. No API key required.
 
+> ### ⚠️ Unverified — work in progress
+>
+> **The features marked below as new are not verified end to end.** They compile
+> and carry unit tests, but nobody has run a real agent through them yet: there
+> are no live checks against a real endpoint, and no TUI session has been driven
+> through `ctrl+z`, the session switcher, a question overlay, a plan or a
+> delegation. Treat them as a branch under construction, expect rough edges, and
+> test before you rely on them.
+>
+> Specifically **not yet tested**: that a rewind really cuts the model's memory
+> and not just the screen; that a session written to disk is byte-for-byte what
+> comes back after a restart; that the question timer and its overlay behave
+> correctly against a live turn; that `switch_mode` lands between turns without
+> stranding the runner; and that a sub-agent's report survives the trip back
+> into the parent's context.
+>
+> Known gaps, stated plainly: `~/.dmcode/history.jsonl` is not rewritten by a
+> rewind, so an undone prompt is still offered by `/history` until the next
+> start. Cancellation reaches the context but not the process, so a running
+> `run_command` finishes on its own schedule. The workspace boundary is a
+> lexical check, and a symlink inside the directory can still reach outside it.
+> File permissions on the session store cannot be asserted on Windows, so that
+> test is skipped there.
+>
+> Please report what breaks.
+
 </div>
 
 ---
@@ -78,6 +104,13 @@ The agent works on files and a shell, rather than just talking:
 
 `read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command`
 
+On top of those, five that change how it works rather than what it touches —
+see [the plan, questions and sub-agents](#the-plan-questions-and-sub-agents):
+
+`todo_write` · `todo_set` · `todo_read` · `ask_user` · `sub_agent`
+
+and, in plan mode only, `switch_mode`.
+
 ## Working directory
 
 dmcode works in the directory it was started in. To point it somewhere else
@@ -116,14 +149,23 @@ are never treated as markdown, so a JSON payload containing `**` survives intact
 suggestions):
 
 - **ACT** — the full tool set; the agent reads and writes.
-- **PLAN** — `read_file`, `list_dir`, `grep` and `glob` only. The agent
-  investigates and returns a plan without changing anything.
+- **PLAN** — no write tools. The agent investigates and returns a plan without
+  changing anything.
 
-Plan mode is enforced by withholding the write tools, not by asking the model
-in the prompt. `run_command` is excluded too, because a shell can write a file
-through `>` or `Out-File`. The current mode is shown as a badge in the status
-bar and the sidebar lists only the tools actually reachable. A switch is refused
+Plan mode is enforced by withholding the write tools, not by asking the model in
+the prompt. `run_command` is withheld too, because a shell can write a file
+through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `grep`, `glob`,
+the plan tools, `ask_user`, `sub_agent` and `switch_mode` — a plan is a document
+and a question is a question, so a mode whose whole output is a plan should not
+be unable to publish one. The current mode is shown as a badge in the status bar
+and the sidebar lists only the tools actually reachable. A switch is refused
 while a turn is running; the conversation is kept across a switch.
+
+The agent can also ask to leave plan mode by itself, through `switch_mode`, once
+it has a plan it is confident in. The switch lands at the end of that turn — the
+runner cannot be rebuilt underneath a running one — and the conversation carries
+over. It cannot go the other way: returning to plan mode is `Tab`, and that one
+is yours.
 
 ## Keys
 
@@ -132,13 +174,56 @@ while a turn is running; the conversation is kept across a switch.
 | `ctrl+p` | command palette |
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
+| `ctrl+z` | undo the last message (rewind) |
 | `tab` | plan / act mode |
 | `esc` | stop the current turn |
 | `↑` `↓` | prompt history |
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/new` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/new` `/sessions` `/resume` `/rewind` `/todo` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+
+## Sessions and rewinding
+
+Conversations are kept in `~/.dmcode/sessions`, one JSONL file each, and survive
+a restart. Set `DMCODE_SESSIONS_DIR` to keep them beside a project instead.
+
+- `ctrl+z` (or `/rewind`) undoes the last turn: the prompt comes back to the
+  input for editing, the transcript loses the exchange, and the model's memory
+  is cut at the same place — so the next reply cannot be to a question the user
+  can no longer see. Press it again to go back further.
+- `/new [name]` starts a fresh conversation. The previous one is **kept**, not
+  discarded, so a `/new` pressed by mistake costs one keypress.
+- `/sessions` lists what is there, searchable by typing; `enter` switches,
+  `d` deletes (twice — a deleted session cannot be brought back), `esc` closes.
+  `/resume <id>` opens one directly.
+
+A failed request is retried on the same endpoint before the pool moves on: three
+attempts by default, with a growing pause, so a rate limit no longer ends a turn.
+Set `DMCODE_LLM_RETRIES` and `DMCODE_LLM_RETRY_MS` to change that. A request the
+provider rejected is not retried, and neither is one that already streamed part
+of an answer.
+
+## The plan, questions and sub-agents
+
+- `todo_write` / `todo_set` / `todo_read` are the agent's plan. It publishes it
+  before it starts and moves each step along as it works; `/todo` prints it and
+  the sidebar shows how far along it is. `/todo clear` empties it.
+- `ask_user` puts a decision to you. The agent gives two to five concrete
+  options and marks the one it recommends; you pick with `↑` `↓` and `enter`,
+  tick several with `space` when it is a multi question, or type your own with
+  `c`. `esc` skips the question and the agent carries on with its best guess.
+  The wait is **off by default** — set `DMCODE_ASK_TIMEOUT=60` to have the
+  recommended option chosen for you after a minute, with a countdown on screen.
+- `sub_agent` delegates one research task to a separate agent with its own
+  context: surveying how something works across many files, tracing a call path,
+  listing call sites. It cannot write anything and cannot ask you anything, and
+  its session is throwaway — its reading does not end up in your conversation.
+
+In plan mode the agent can call `switch_mode` to move the session to act mode on
+its own, once it has a plan it is confident in. The switch happens at the end of
+that turn. It cannot go back to plan mode itself — that is `Tab`, and it is
+yours.
 
 ## Troubleshooting
 
@@ -189,17 +274,34 @@ plus `.deb`, `.rpm`, an Arch package and a Windows zip.
 
 ```
 main.go              chains the packages together, nothing else
-internal/agent       builds the agent and its system prompt
+internal/agent       the agent, its instructions, sub-agents, the mode switch
+internal/ask         the ask_user broker and its timer
 internal/config      .env, endpoints, the setup wizard
 internal/discover    finds the providers that actually answer
 internal/i18n        English source strings and the Russian catalog
-internal/llm         OpenAI-compatible wire, failover between endpoints
-internal/tools       the agent's tools
+internal/llm         OpenAI-compatible wire, failover, retries
+internal/memsession  the session store and its JSONL persistence
+internal/todo        the agent's plan
+internal/tools       the workspace tools and the boundary they are confined to
 internal/ui          the Bubble Tea terminal interface
 ```
 
+## Configuration
+
+Everything is optional; the defaults work without any of it.
+
+| Variable | What it does |
+|---|---|
+| `DMCODE_SESSIONS_DIR` | where conversations are kept (default `~/.dmcode/sessions`) |
+| `DMCODE_LLM_RETRIES` | attempts per endpoint before failing over (default 3) |
+| `DMCODE_LLM_RETRY_MS` | first backoff pause, doubling after that (default 500) |
+| `DMCODE_ASK_TIMEOUT` | seconds before a question picks its own recommended answer (**default 0 — off**) |
+| `DMCODE_LANG` | `en` or `ru` for one run |
+| `DMCODE_API` | `chat` to force the `/chat/completions` wire |
+| `DMCODE_REASONING_EFFORT` | caps the reasoning channel |
+
 ## Roadmap
 
-Plans are in [ROADMAP.md](ROADMAP.md): turn cancellation, permissions for
-dangerous commands, session persistence, MCP and LSP.
+Plans are in [ROADMAP.md](ROADMAP.md): permissions for dangerous commands,
+context compaction, MCP and LSP.
 

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"sync"
+	"time"
 
 	"google.golang.org/adk/v2/model"
 
@@ -59,6 +61,8 @@ type failoverModel struct {
 	backupsTried bool
 	active       int
 	onSwitch     func(SwitchEvent)
+	onRetry      func(RetryEvent)
+	retry        RetryPolicy
 }
 
 // NewFailoverModel builds the pool for a session: the providers the user asked
@@ -78,7 +82,38 @@ type failoverModel struct {
 // with nowhere to go when it starts returning 429s. backups may be nil: a pool
 // without a reserve simply reports the first failure instead of hunting for a
 // free endpoint mid-turn.
-func NewFailoverModel(ctx context.Context, pool []config.Provider, backups BackupSource, onSwitch func(SwitchEvent)) (model.LLM, error) {
+// RetryEvent records a retry that is about to happen, so the transcript can say
+// what the wait is for instead of showing a spinner that looks hung.
+type RetryEvent struct {
+	// Attempt is the try about to be made, counting from 2 — the first attempt
+	// is not a retry and is never announced.
+	Attempt int
+	// Max is the total number of attempts this endpoint gets.
+	Max int
+	// Wait is how long the pause before it lasts.
+	Wait time.Duration
+	// Reason is the short form of the failure that forced the retry.
+	Reason string
+	// Provider names the endpoint being retried, which may not be the one the
+	// session started on: the pool has already moved by the time a retry
+	// happens on a later member.
+	Provider config.Provider
+}
+
+// NewFailoverModel builds the pool for a session: the providers the user asked
+// for, in order, with the free endpoints behind them as a lazily probed
+// reserve.
+//
+// The wrapper is kept even for a single configured provider, because that is
+// precisely the case where the reserve is worth having. Returning the bare
+// client instead would make a working Groq key indistinguishable from a session
+// with nowhere to go when it starts returning 429s. backups may be nil: a pool
+// without a reserve simply reports the first failure instead of hunting for a
+// free endpoint mid-turn.
+//
+// onRetry may be nil; it is called before each retry pause so the UI can say
+// what is being waited out.
+func NewFailoverModel(ctx context.Context, pool []config.Provider, backups BackupSource, onSwitch func(SwitchEvent), onRetry func(RetryEvent)) (model.LLM, error) {
 	members := make([]PoolMember, 0, len(pool))
 	for _, p := range pool {
 		LLM, err := BuildLLM(ctx, p)
@@ -90,7 +125,13 @@ func NewFailoverModel(ctx context.Context, pool []config.Provider, backups Backu
 	if len(members) == 0 {
 		return nil, fmt.Errorf("dmcode: empty provider pool")
 	}
-	return &failoverModel{members: members, backups: backups, onSwitch: onSwitch}, nil
+	return &failoverModel{
+		members:  members,
+		backups:  backups,
+		onSwitch: onSwitch,
+		onRetry:  onRetry,
+		retry:    RetryPolicyFromEnv(),
+	}, nil
 }
 
 func (f *failoverModel) Name() string {
@@ -201,21 +242,60 @@ func (f *failoverModel) GenerateContent(ctx context.Context, req *model.LLMReque
 				emitted   bool
 				abandoned bool
 			)
-			for resp, err := range m.LLM.GenerateContent(ctx, req, stream) {
-				if err != nil {
-					callErr = err
+			// Attempts are spent on this member before the pool moves on. The
+			// retryable cases are narrow, and all of them are about the endpoint
+			// rather than the request: a rate limit, a gateway hiccup, a socket
+			// that dropped before the server saw anything. A rejected request is
+			// rejected by every host, so repeating it here would only spend the
+			// user's time arriving at the same answer.
+			attempts := max(f.retry.MaxAttempts, 1)
+			for attempt := 1; ; attempt++ {
+				// Reset per attempt: callErr belongs to the attempt that is
+				// running, and a success after two failures must not be judged by
+				// the failure that came before it.
+				callErr = nil
+				for resp, err := range m.LLM.GenerateContent(ctx, req, stream) {
+					if err != nil {
+						callErr = err
+						break
+					}
+					if resp == nil {
+						continue
+					}
+					emitted = true
+					if !yield(resp, nil) {
+						// The consumer stopped taking events — Esc, or a quit. The
+						// turn is over for reasons that have nothing to do with
+						// this endpoint, so there is nothing to reroute.
+						abandoned = true
+						break
+					}
+				}
+				if abandoned || callErr == nil {
 					break
 				}
-				if resp == nil {
-					continue
-				}
-				emitted = true
-				if !yield(resp, nil) {
-					// The consumer stopped taking events — Esc, or a quit. The
-					// turn is over for reasons that have nothing to do with this
-					// endpoint, so there is nothing to reroute.
-					abandoned = true
+				// Once anything has been yielded the user is looking at a partial
+				// answer. Re-running the request would print a second one, and the
+				// transcript has no way to retract the first.
+				if emitted || attempt >= attempts || !sameEndpointRetryable(callErr) {
 					break
+				}
+				wait := f.retry.delay(attempt)
+				if f.onRetry != nil {
+					f.onRetry(RetryEvent{
+						Attempt:  attempt + 1,
+						Max:      attempts,
+						Wait:     wait,
+						Reason:   shortReason(callErr),
+						Provider: m.Prov,
+					})
+				}
+				if err := sleep(ctx, wait); err != nil {
+					// Esc during the backoff: the turn is over by the user's own
+					// hand, so that is the error reported, not the one that
+					// started the wait.
+					yield(nil, err)
+					return
 				}
 			}
 			if abandoned {
@@ -255,6 +335,32 @@ func retryable(err error) bool {
 	var pe *providerError
 	if errors.As(err, &pe) {
 		return pe.retryable()
+	}
+	return true
+}
+
+// sameEndpointRetryable reports whether asking the *same* endpoint again could
+// plausibly work.
+//
+// This is a different question from retryable(), which asks whether another
+// host in the pool stands a chance — and answers yes for a 401, because a
+// different endpoint may hold a different key. Repeating a rejected request on
+// the host that just rejected it has no such escape: the answer will be the
+// same answer, one round trip later.
+//
+// What is left is the failures that are about the moment rather than the
+// request: a rate limit that will lift, a gateway hiccup, a socket that
+// dropped. An unrecognised error is treated as transient, matching the
+// conservative default the pool already uses.
+func sameEndpointRetryable(err error) bool {
+	var pe *providerError
+	if errors.As(err, &pe) && pe.reason == failHTTP {
+		switch pe.status {
+		case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+			http.StatusNotFound, http.StatusRequestEntityTooLarge,
+			http.StatusUnprocessableEntity:
+			return false
+		}
 	}
 	return true
 }

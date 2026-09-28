@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/dedomorozoff/dmcode/internal/todo"
 )
 
 // withRoot scopes the tools to dir for the duration of the test and clears the
@@ -206,6 +208,44 @@ func TestMakeReadOnlyToolsExcludesEveryMutator(t *testing.T) {
 	for _, banned := range []string{"write_file", "edit_file", "run_command"} {
 		if got[banned] {
 			t.Errorf("the read-only set contains %q, which can modify the workspace", banned)
+		}
+	}
+}
+
+// TestReadOnlySetCarriesThePlanTools: a plan is a document, not an edit, and
+// plan mode's whole output is a plan. Withholding todo_write there would leave
+// the mode unable to publish the thing it exists to produce.
+func TestReadOnlySetCarriesThePlanTools(t *testing.T) {
+	ro, err := MakeReadOnlyTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, tl := range ro {
+		got[tl.Name()] = true
+	}
+	for _, want := range todo.Names {
+		if !got[want] {
+			t.Errorf("the read-only set is missing %q", want)
+		}
+	}
+}
+
+// TestFullSetCarriesThePlanTools: the counterpart — a plan tool the sidebar does
+// not list is a plan the user cannot see being kept.
+func TestFullSetCarriesThePlanTools(t *testing.T) {
+	all, err := MakeTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := ToolNames(all)
+	got := map[string]bool{}
+	for _, n := range names {
+		got[n] = true
+	}
+	for _, want := range todo.Names {
+		if !got[want] {
+			t.Errorf("the full set is missing %q", want)
 		}
 	}
 }
