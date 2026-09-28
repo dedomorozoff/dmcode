@@ -77,7 +77,7 @@ func TestPromptHistoryToleratesLegacyLines(t *testing.T) {
 // round trip.
 func TestPromptHistoryRecallKeys(t *testing.T) {
 	withTempHistory(t)
-	m := InitialModel(nil, nil, config.Provider{}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{}, nil, nil, nil)
 	m.promptHistory = []string{"первый", "второй"}
 	m.histPos = len(m.promptHistory)
 	m.input.SetValue("набираю черновик")
@@ -108,7 +108,7 @@ func TestPromptHistoryRecallKeys(t *testing.T) {
 // recall cursor back at the live draft, and persists the entry.
 func TestSavePromptResetsRecallPosition(t *testing.T) {
 	p := withTempHistory(t)
-	m := InitialModel(nil, nil, config.Provider{}, nil, nil)
+	m := InitialModel(nil, nil, config.Provider{}, nil, nil, nil)
 	m.promptHistory = []string{"старый"}
 	m.histPos = 1
 

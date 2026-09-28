@@ -1,7 +1,7 @@
-# dmCode v0.1.2
+# dmCode v0.1.3
 
-The interface now speaks English by default, with Russian one keystroke away.
-Also adds `make install`, and replaces the previous `v0.1.1` release.
+A working interface: markdown actually renders, the mouse wheel scrolls, and the
+agent can plan before it changes anything.
 
 ## Install
 
@@ -27,34 +27,77 @@ Or with Go 1.26+:
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-## What's new since v0.1.1
+## What's new since v0.1.2
 
-- **English is the default interface.** The TUI, sidebar, status bar, setup
-  wizard and provider labels are all English now. English strings are the
-  source language, so an untranslated string falls back to readable English
-  rather than rendering blank.
-- **Russian via `/lang`.** A command in the palette switches the language
-  immediately and saves the choice to `~/.dmcode/settings.json`, so the next
-  start comes up in the same language. `DMCODE_LANG=ru` overrides it for a
-  single run.
-- **`make install` and `make uninstall`.** Install into `$(go env GOBIN)`,
-  falling back to `GOPATH/bin` — both writable without root and both present on
-  Windows. Pass `PREFIX=/usr/local` for a system-wide install.
-- **Pasting works in the setup wizard.** Pasting a key with `ctrl+v` or the
-  terminal's own paste did nothing before: pastes arrive as a message the
-  overlays were not listening for, and `ctrl+v` was unbound. Both now work in
-  `/setup`, the command palette and the model picker. Pasted text is collapsed
-  to a single line, so a key copied from a web page no longer lands in `.env`
-  with a trailing newline and silently fails to load on the next start.
-- **The setup wizard checks your key before saving it.** Picking a provider and
-  pasting a key used to save the pair and report success straight away, with no
-  check that the endpoint accepted the key. A key belonging to a different
-  provider therefore looked configured until your first message failed with a
-  401 — by which point the working `OPENAI_API_KEY` had already been
-  overwritten. The key is now verified first; on rejection `.env` is left
-  untouched, the transcript says so, and the wizard offers a retry.
-- **README in English**, covering install, the tools, the hotkeys and the
-  language setting.
+### Markdown renders
+
+Replies were pushed through the same plain-text wrapper as everything else, which
+re-wrapped them on spaces: bold words showed their `**`, headings showed their
+`##`, and a code block lost every indent that made it readable. Replies are now
+laid out as markdown before wrapping.
+
+- **Headings, `**bold**`, `*italic*` and `` `code` ``** are styled and the markers
+  are consumed. Emphasis carries colour as well as weight, so it stays visible on
+  terminals whose font has no separate bold face — a bold span in the same colour
+  as its surroundings is indistinguishable from plain text.
+- **Fenced code keeps its shape.** Indentation is preserved rather than re-flowed,
+  and an over-long line is cut rather than wrapped, because a wrapped code line
+  reads as a different line of code. A half-arrived reply with an unclosed fence —
+  the normal case mid-stream — renders as a block to the end of the text.
+- **Tables and blockquotes.** Pipe tables become aligned columns, dropping the
+  raw `|`; a table too wide for the panel sheds its borders and shrinks instead
+  of breaking the frame. A `>` line becomes an indented aside.
+- Prose without markup comes through unchanged, and tool output and your own
+  prompts are never treated as markdown — a JSON payload containing `**` survives
+  intact.
+
+### The mouse wheel scrolls
+
+Two things were broken, and both had to be fixed. The view never enabled mouse
+mode, so the terminal did not report wheel events at all; and no event was ever
+passed to the viewport, which owns the wheel handling. Scrolling also released
+the follow-the-tail stick, so a streamed reply no longer yanks the view back down
+mid-read.
+
+`/mouse` turns wheel scrolling off and gives native drag-select back, for when
+you want to copy by hand.
+
+### Plan and act modes
+
+`tab` switches between them. Inside a `/` command, tab still completes
+suggestions.
+
+- **ACT** is the full tool set.
+- **PLAN** is `read_file`, `list_dir`, `grep` and `glob` only. The agent
+  investigates and returns a plan, changing nothing.
+
+Plan mode withholds the write tools rather than asking the model in the prompt,
+and `run_command` is withheld too — a shell can write a file through `>` or
+`Out-File`, so "read-only" cannot be promised through it. The current mode shows
+as a badge in the status bar, the sidebar lists only the tools actually
+reachable, and a switch is refused while a turn is running. The conversation is
+kept across a switch.
+
+### It works where you start it
+
+`dmcode -C ~/projects/myapp` (or `--dir`) works in a directory other than the
+one you launched from, so a binary on `PATH` can be pointed at any project.
+`/cd <path>` moves the session at runtime and bare `/cd` reports where you are.
+The sidebar shows the full path, trimmed from the left.
+
+**Every tool is now confined to that directory.** A path resolving outside it is
+refused with an error naming both directories, and `run_command`'s `work_dir` is
+checked the same way. Before this, `read_file` with `../../.ssh/id_rsa` simply
+succeeded.
+
+### Diagnostics
+
+- **`/debug`** prints the line kind, the markdown flag and the width of the last
+  transcript lines. A reply rendering as raw markup is a routing problem — the
+  text is stored under a kind that is not treated as markdown — rather than a
+  parsing problem, and one line of output tells the two apart.
+- The terminal's colour capabilities are now requested at startup, so styling is
+  not stuck in a conservative base palette on terminals that support more.
 
 ## Assets
 
@@ -67,8 +110,13 @@ and `arm64`, plus `windows-amd64` as both a raw `.exe` and a zip. Packages:
 - No cancellation yet: `Esc` interrupts a turn, but a running shell command is
   not cancellable.
 - Switching models starts a new session, so conversation history is dropped.
-- `edit_file` is a strict literal match and can fail on CRLF or whitespace
-  drift; `glob` does not support `**`.
+- The transcript is re-rendered on every streamed token, so a long session can
+  lag. The fix is an incremental per-line cache.
+- The workspace boundary is a lexical check. A symlink *inside* the directory can
+  still reach outside it, because `write_file` must be allowed to create files
+  that do not exist yet and cannot be resolved first.
+- `tab` is overloaded: it completes a suggestion inside a `/` command and
+  switches mode everywhere else.
 
 See [ROADMAP.md](https://github.com/dedomorozoff/dmcode/blob/main/ROADMAP.md)
 for what is planned next.

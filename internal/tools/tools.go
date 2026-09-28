@@ -1,3 +1,5 @@
+// Package tools implements the agent's instruments and the workspace boundary
+// every one of them is confined to.
 package tools
 
 import (
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -19,6 +22,134 @@ import (
 
 const maxReadBytes = 256 * 1024
 const maxWalkFiles = 2000
+
+// root is the directory the session is scoped to. It is empty until SetRoot
+// runs, which is the "no boundary configured" case every tool tolerates: the
+// agent still works, it just may reach outside.
+var (
+	rootMu sync.RWMutex
+	root   string
+)
+
+// SetRoot scopes the tools to dir. Every subsequent path argument is resolved
+// against the process working directory first and then checked against this
+// root, so a relative path and the absolute path it denotes are treated alike.
+//
+// A non-nil error means the session carries no boundary, and the reason why —
+// the caller decides whether that is fatal.
+func SetRoot(dir string) error {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("cannot resolve the working directory: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return fmt.Errorf("cannot use the working directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", abs)
+	}
+	// Follow symlinks on the root itself so a link in the path does not make
+	// every check below compare against a different spelling of the same tree.
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	rootMu.Lock()
+	root = abs
+	rootMu.Unlock()
+	return nil
+}
+
+// Root reports the directory the tools are confined to, or "" when no boundary
+// is configured.
+func Root() string {
+	rootMu.RLock()
+	defer rootMu.RUnlock()
+	return root
+}
+
+// ErrOutsideRoot is returned when a path argument leaves the workspace. The
+// message names both directories so the user can see where the agent tried to
+// go, and the fix is obvious from the text alone.
+var ErrOutsideRoot = fmt.Errorf("outside the working directory")
+
+// resolve validates a tool path argument and returns the absolute path to use.
+// An empty p means the working directory itself.
+//
+// A relative path is interpreted against the workspace root rather than against
+// the process directory. The two are the same in a normal session, but resolving
+// against the root is what makes /cd and the boundary impossible to disagree: a
+// path means the same thing no matter which directory the process happens to be
+// sitting in.
+//
+// The check is lexical on purpose: resolve() must decide before the file is
+// touched, and a path that does not exist yet (write_file) has no symlink to
+// resolve. A symlink inside the tree is therefore the known soft spot — the
+// alternative is refusing to create any file that does not exist yet, which
+// would break write_file outright.
+func resolve(p string) (string, error) {
+	if p == "" {
+		p = "."
+	}
+	base := Root()
+	if base != "" && !filepath.IsAbs(p) {
+		p = filepath.Join(base, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("cannot resolve path %q: %w", p, err)
+	}
+	if base == "" {
+		return abs, nil
+	}
+	rel, err := filepath.Rel(base, abs)
+	if err != nil {
+		// Different volumes on Windows, so there is no relative path at all;
+		// that can only mean the two are unrelated trees.
+		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
+	}
+	return abs, nil
+}
+
+// checkPatternRoot validates the directory a glob pattern is rooted at. Only the
+// part before the first wildcard is a real path — "src/**/*.go" roots at "src",
+// "*.go" and "../*.go" root at the working directory and one level up — so the
+// segment is trimmed to the last separator and handed to resolve.
+func checkPatternRoot(pattern string) error {
+	// A pattern anchored at a filesystem root is never inside the workspace.
+	// It has to be caught here rather than left to resolve: on Windows
+	// filepath.IsAbs treats "\etc\passwd" as *relative* (a rooted path still
+	// needs a volume name to count as absolute), so resolve would join it onto
+	// the root and wave it through as workspace-local.
+	if strings.HasPrefix(pattern, "/") || strings.HasPrefix(pattern, `\`) {
+		return fmt.Errorf("%s is %w: %s", pattern, ErrOutsideRoot, Root())
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(pattern))
+	cut := strings.IndexAny(cleaned, "*?[")
+	if cut < 0 {
+		cut = len(cleaned)
+	}
+	root := cleaned[:cut]
+	i := strings.LastIndexAny(root, `/\`)
+	switch {
+	case i < 0:
+		// No separator at all ("*.go"): the pattern sits in the working
+		// directory itself.
+		root = "."
+	case i == 0:
+		// The pattern is anchored at the filesystem root ("/etc/passwd"). Keep
+		// the separator: dropping it would leave an empty root, which resolve
+		// reads as "." and would wave the pattern through as workspace-local.
+		root = cleaned[:1]
+	default:
+		root = root[:i]
+	}
+	_, err := resolve(root)
+	return err
+}
 
 type readFileArgs struct {
 	Path   string `json:"path"`
@@ -32,7 +163,11 @@ type readFileResult struct {
 }
 
 func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
-	data, err := os.ReadFile(in.Path)
+	path, err := resolve(in.Path)
+	if err != nil {
+		return readFileResult{}, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return readFileResult{}, err
 	}
@@ -70,12 +205,16 @@ type writeFileResult struct {
 }
 
 func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
-	if dir := filepath.Dir(in.Path); dir != "." && dir != "" {
+	path, err := resolve(in.Path)
+	if err != nil {
+		return writeFileResult{}, err
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return writeFileResult{}, err
 		}
 	}
-	if err := writeFileAtomic(in.Path, []byte(in.Content)); err != nil {
+	if err := writeFileAtomic(path, []byte(in.Content)); err != nil {
 		return writeFileResult{}, err
 	}
 	return writeFileResult{BytesWritten: len(in.Content)}, nil
@@ -118,7 +257,11 @@ type editFileResult struct {
 }
 
 func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
-	data, err := os.ReadFile(in.Path)
+	path, err := resolve(in.Path)
+	if err != nil {
+		return editFileResult{}, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return editFileResult{}, err
 	}
@@ -129,7 +272,7 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 
 	// 1. Try exact match
 	write := func(content string) (editFileResult, error) {
-		if err := writeFileAtomic(in.Path, []byte(content)); err != nil {
+		if err := writeFileAtomic(path, []byte(content)); err != nil {
 			return editFileResult{}, err
 		}
 		return editFileResult{}, nil
@@ -335,9 +478,9 @@ type listDirResult struct {
 }
 
 func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
-	dir := in.Path
-	if dir == "" {
-		dir = "."
+	dir, err := resolve(in.Path)
+	if err != nil {
+		return listDirResult{}, err
 	}
 	var b strings.Builder
 	if !in.Recursive {
@@ -364,7 +507,7 @@ func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
 		return listDirResult{Entries: b.String()}, nil
 	}
 	count := 0
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -402,9 +545,9 @@ func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
 	if err != nil {
 		return grepResult{}, fmt.Errorf("invalid regex: %w", err)
 	}
-	root := in.Path
-	if root == "" {
-		root = "."
+	root, err := resolve(in.Path)
+	if err != nil {
+		return grepResult{}, err
 	}
 	var fileFilter *regexp.Regexp
 	if in.Glob != "" {
@@ -520,6 +663,13 @@ type globResult struct {
 
 func glob(ctx agent.Context, in globArgs) (globResult, error) {
 	pattern := in.Pattern
+	// The pattern's leading directory is a real path argument and must clear the
+	// workspace boundary, but the *result* stays relative: the agent reads these
+	// back to pass to read_file, and "."-relative output keeps that round trip
+	// working whichever directory the session was started in.
+	if err := checkPatternRoot(pattern); err != nil {
+		return globResult{}, err
+	}
 	// If pattern contains ** or path separators, perform recursive walk matching
 	if strings.Contains(pattern, "**") || strings.Contains(pattern, "/") || strings.Contains(pattern, "\\") {
 		rePattern, err := regexp.Compile(globToRegex(filepath.ToSlash(pattern)))
@@ -619,6 +769,10 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	if workDir == "" {
 		workDir = "."
 	}
+	dir, err := resolve(workDir)
+	if err != nil {
+		return runCommandResult{}, err
+	}
 	shell, flags := detectShell()
 
 	parentCtx := context.Background()
@@ -630,7 +784,7 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 
 	args := append(append([]string{}, flags...), in.Command)
 	cmd := exec.CommandContext(cmdCtx, shell, args...)
-	cmd.Dir = workDir
+	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	result := runCommandResult{Output: truncate(string(out), 20000)}
 	if cmdCtx.Err() != nil {
@@ -698,6 +852,44 @@ func MakeTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 	return []tool.Tool{readFileTool, writeFileTool, editFileTool, listDirTool, grepTool, globTool2, runCommandTool}, nil
+}
+
+// readOnlyNames are the tools a planning turn may use. run_command is absent on
+// purpose: a shell can write a file through >, Out-File, tee or touch, so
+// "read-only" cannot be enforced from the prompt alone and the tool is withheld
+// instead of trusted.
+var readOnlyNames = map[string]bool{
+	"read_file": true,
+	"list_dir":  true,
+	"grep":      true,
+	"glob":      true,
+}
+
+// MakeReadOnlyTools returns the subset MakeTools builds that only inspects the
+// workspace. The functions themselves are the same ones MakeTools uses, so the
+// plan mode is the same agent with less reach — not a different implementation
+// that could drift from the real one.
+func MakeReadOnlyTools() ([]tool.Tool, error) {
+	all, err := MakeTools()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tool.Tool, 0, len(readOnlyNames))
+	for _, t := range all {
+		if readOnlyNames[t.Name()] {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// ToolNames lists the names of ts, in order, for the sidebar and the plan check.
+func ToolNames(ts []tool.Tool) []string {
+	out := make([]string, 0, len(ts))
+	for _, t := range ts {
+		out = append(out, t.Name())
+	}
+	return out
 }
 
 // truncate shortens s to at most n bytes, marking the cut with an ellipsis.

@@ -36,31 +36,74 @@ Safety & Coding Guidelines:
 - Keep edits minimal and focused on the user's explicit request. Do not introduce unnecessary refactoring or style drift.
 - Never delete or modify files outside the workspace unless explicitly instructed.`
 
-func BuildAgent(ctx context.Context, p config.Provider, tools []tool.Tool) (agent.Agent, error) {
+// Mode selects which instructions the agent runs under. The tool set is chosen
+// alongside it by the caller, so the two always agree about what the agent may
+// do.
+type Mode int
+
+const (
+	// ModeAct is the working mode: read and write.
+	ModeAct Mode = iota
+	// ModePlan is the read-only mode: investigate and propose, change nothing.
+	ModePlan
+)
+
+// planInstruction replaces the act workflow in plan mode. It asks for a plan
+// rather than an edit, and names the boundary the tools already enforce, so the
+// model does not waste a turn discovering it by hitting a wall.
+const planInstruction = `You are dmcode in PLAN mode. You investigate and propose; you never modify anything.
+
+Your only goal is to produce a concrete, actionable plan the user can approve.
+
+Workflow:
+1. INVESTIGATE: use list_dir, glob, grep and read_file to understand the code. Read before you conclude.
+2. LOCATE: cite exact file paths and line numbers for everything you refer to.
+3. PLAN: describe each change as a numbered step — the file, what changes, and why.
+4. RISKS: call out anything that could break, and what you would verify afterwards.
+
+Hard rules:
+- You have no write tools. Do not attempt edits, and do not ask the user to run commands for you.
+- Do not claim a change was made. Describe what should change, not what you did.
+- If the request is ambiguous, ask a focused question instead of guessing.
+- When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.`
+
+func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	return BuildAgentWithModel(m, tools)
+	return BuildAgentWithModel(m, ts)
 }
 
 // buildAgentWithModel wraps a client — plain or pooled — in the coding agent.
-func BuildAgentWithModel(m model.LLM, tools []tool.Tool) (agent.Agent, error) {
+func BuildAgentWithModel(m model.LLM, ts []tool.Tool) (agent.Agent, error) {
+	return BuildAgentMode(m, ts, ModeAct)
+}
+
+// BuildAgentMode wraps a client in the coding agent under the given mode. The
+// instructions are the only thing that differs: the caller has already chosen
+// the tool set, so an agent in plan mode is told to plan *and* has no way to
+// write.
+func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode) (agent.Agent, error) {
+	inst := instruction
+	if mode == ModePlan {
+		inst = planInstruction
+	}
 	return llmagent.New(llmagent.Config{
 		Name:        "dmcode",
 		Model:       m,
 		Description: "Autonomous coding agent that reads, writes, and builds code.",
-		Instruction: instruction,
-		Tools:       tools,
+		Instruction: inst,
+		Tools:       ts,
 	})
 }
 
-// buildPooledAgent builds the agent over a failover pool, so a 429 or a dropped
+// BuildPooledAgent builds the agent over a failover pool, so a 429 or a dropped
 // connection on the configured endpoint does not end the turn.
-func BuildPooledAgent(ctx context.Context, pool []config.Provider, tools []tool.Tool, onSwitch func(llm.SwitchEvent)) (agent.Agent, error) {
+func BuildPooledAgent(ctx context.Context, pool []config.Provider, ts []tool.Tool, onSwitch func(llm.SwitchEvent), mode Mode) (agent.Agent, error) {
 	m, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, onSwitch)
 	if err != nil {
 		return nil, err
 	}
-	return BuildAgentWithModel(m, tools)
+	return BuildAgentMode(m, ts, mode)
 }
