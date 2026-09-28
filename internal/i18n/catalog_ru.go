@@ -95,6 +95,7 @@ var catalog = map[Lang]map[string]string{
 		"TOOLS":               "ИНСТРУМЕНТЫ",
 		"HOTKEYS":             "ГОРЯЧИЕ КЛАВИШИ",
 		"turns: %d":           " ходов: %d",
+		"files: %d":           " файлов: %d",
 		"tools: %d":           " тулов: %d",
 		" ctrl+p  commands":   " ctrl+p  команды",
 		" ctrl+b  hide panel": " ctrl+b  скрыть панель",
@@ -138,6 +139,16 @@ var catalog = map[Lang]map[string]string{
 		"mouse off — the wheel is ignored":                  "мышь выключена — колесо не работает",
 		" tab     plan/act":                                 " tab    план/работа",
 		"tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel": "tab — режим план/работа · колесо — скролл · /mouse — переключить мышь",
+
+		// Proxy.
+		"show or set the HTTP proxy":              "показать или задать HTTP-прокси",
+		"proxy: none (direct connection)":         "прокси: нет (прямое соединение)",
+		"proxy: cleared, connecting directly":     "прокси: сброшен, прямое соединение",
+		"proxy: bypass list cleared":              "прокси: список исключений очищен",
+		"proxy: the provider answered through it": "прокси: провайдер ответил через него",
+		"proxy: the request failed — ":            "прокси: запрос не удался — ",
+		"set one with: /proxy <url> · clear with: /proxy off · bypass with: /proxy no <list>": "задать: /proxy <url> · отключить: /proxy off · исключения: /proxy no <список>",
+		"checking the proxy…": "проверяю прокси…",
 
 		// Provider options.
 		"No key — Pollinations (OpenAI-compatible, anonymous)":                       "Без ключа — Pollinations (OpenAI-совместимый, анонимно)",

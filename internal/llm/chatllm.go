@@ -13,6 +13,8 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/dedomorozoff/dmcode/internal/config"
 )
 
 // chatModel implements model.LLM on top of the classic OpenAI
@@ -224,7 +226,7 @@ func NewChatModel(BaseURL, APIKey, name string) *chatModel {
 		BaseURL: strings.TrimRight(BaseURL, "/"),
 		APIKey:  APIKey,
 		name:    name,
-		client:  &http.Client{Timeout: 0},
+		client:  config.Client(0),
 	}
 }
 

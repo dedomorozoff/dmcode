@@ -146,7 +146,29 @@ while a turn is running; the conversation is kept across a switch.
 The status bar carries the mode and the state, and nothing else — the model is in
 the header and the sidebar, and the keys are in `/help`.
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/new` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+
+## HTTP proxy
+
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are honoured, so a proxy already
+configured for the rest of the system works with no setup. `/proxy` shows the
+setting and changes it:
+
+```
+/proxy                          show what is in effect, and whether it works
+/proxy 127.0.0.1:3128           set one (a bare host:port is fine)
+/proxy http://user:pass@host:8080
+/proxy off                      clear it
+/proxy no localhost,127.0.0.1   bypass list, without touching the proxy
+```
+
+The change applies to the running session — the next request goes through it —
+and is written to `.env`, so it survives a restart. `/proxy off` removes the
+variables from both, rather than leaving them in the file to be read back.
+
+`localhost` and the loopback addresses are never proxied: a proxy that cannot
+reach the machine's own services is common enough that following it would break
+local providers that otherwise work.
 
 ## Troubleshooting
 

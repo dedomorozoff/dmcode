@@ -224,7 +224,19 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 // and a rename, so an unexpected exit cannot leave a truncated or half-written
 // file behind. os.Rename replaces an existing destination on all platforms
 // dmcode supports.
+//
+// This is also the single point every write passes through — write_file and
+// edit_file both land here — so it is where the session's change tally is kept.
+// Doing it here rather than in each tool means no write can reach disk without
+// being counted.
 func writeFileAtomic(path string, data []byte) error {
+	// What is being replaced, read before the rename. A read failure other than
+	// "not there" is not fatal to the write: the tool's job is to write, and
+	// refusing to overwrite a file that cannot be read would be a worse outcome
+	// than a tally that undercounts. The failure is therefore swallowed and the
+	// write counted as wholly additive.
+	before, _ := readIfExists(path)
+
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".dmcode-*")
 	if err != nil {
 		return err
@@ -243,6 +255,7 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
+	recordChange(path, before, string(data))
 	return nil
 }
 

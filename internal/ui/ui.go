@@ -93,6 +93,11 @@ var (
 	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
 	styleHint    = lipgloss.NewStyle().Foreground(cDim)
 	styleSuggest = lipgloss.NewStyle().Bold(true).Foreground(cTool)
+	// The change tally. Additions and removals are coloured apart because a
+	// signed count read at a glance is the whole point of showing them, and
+	// "+12 -3" in one colour is just a number pair.
+	styleAdd = lipgloss.NewStyle().Foreground(cSuccess)
+	styleDel = lipgloss.NewStyle().Foreground(cErr)
 
 	styleBadgeReady = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cSuccess).Padding(0, 1)
 	styleBadgeBusy  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("0")).Background(cWarning).Padding(0, 1)
@@ -429,6 +434,10 @@ func (m *uiModel) commands() []command {
 			m.sessionID = newSessionID()
 			m.turnCount = 0
 			m.toolCallCount = 0
+			// The change tally belongs to the session that produced it. Carrying
+			// the numbers into a fresh session would report edits the new one
+			// never made, against files it has never opened.
+			dmtools.ResetChanges()
 			m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
 			m.historyDirty = true
 			return nil
@@ -460,6 +469,9 @@ func (m *uiModel) commands() []command {
 			}
 			m.historyDirty = true
 			return nil
+		}},
+		{name: "proxy", desc: i18n.T("show or set the HTTP proxy"), run: func(m *uiModel) tea.Cmd {
+			return m.showProxy()
 		}},
 		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
 	}
@@ -878,10 +890,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showRecentPrompts()
 				m.followVP()
 				return m, nil
+			case "/proxy":
+				return m, m.applyProxy(text)
 			case "/new":
 				m.sessionID = newSessionID()
 				m.turnCount = 0
 				m.toolCallCount = 0
+				// The change tally belongs to the session that produced it. Carrying
+				// the numbers into a fresh session would report edits the new one
+				// never made, against files it has never opened.
+				dmtools.ResetChanges()
 				m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
 				m.historyDirty = true
 				m.followVP()
@@ -1025,6 +1043,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyDirty = true
 	case toolCheckMsg:
 		m.handleToolCheck(msg)
+	case proxyCheckMsg:
+		m.handleProxyCheck(msg)
 	case failoverMsg:
 		extra = m.handleFailover(msg)
 	}
@@ -1505,6 +1525,165 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 // openSetup starts /setup at the provider list.
+// showProxy reports the proxy in effect and, when a provider has failed through
+// it, says so — a proxy that is silently dropping every request looks exactly
+// like a provider that is down, and the two have opposite fixes.
+//
+// It is a report rather than a prompt because the wizard already has a way to ask
+// for a value, and reusing it here would mean /proxy behaved differently from
+// every other command that needs input.
+// applyProxy handles "/proxy" with or without an argument.
+//
+// With no argument it reports the current setting. With one it sets the proxy,
+// and the change is written to .env as well as the live environment, because a
+// proxy that survives only until the program exits is not really configured: the
+// next start would go direct and the failure would look like the provider's.
+//
+// The set-then-check order matters. A malformed URL is rejected before anything
+// moves, so a typo cannot leave the session half configured, and the request
+// that follows is what turns "the proxy is set" into "the proxy works".
+func (m *uiModel) applyProxy(arg string) tea.Cmd {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return m.showProxy()
+	}
+
+	fail := func(err error) tea.Cmd {
+		m.history = append(m.history, line{kindErr, "proxy: " + err.Error()})
+		m.historyDirty = true
+		m.followVP()
+		return nil
+	}
+
+	// "no" sets the bypass list rather than the proxy, so a user with a proxy
+	// already in the environment can exempt their own services without turning
+	// the proxy off entirely.
+	if rest, ok := strings.CutPrefix(arg, "no "); ok {
+		if err := config.SetNoProxy(strings.TrimSpace(rest)); err != nil {
+			return fail(err)
+		}
+	} else if err := config.SetProxy(arg); err != nil {
+		return fail(err)
+	}
+
+	s := config.CurrentProxy()
+	if err := m.persistProxy(s); err != nil {
+		return fail(err)
+	}
+	if s.Active {
+		m.history = append(m.history, line{kindSys, "proxy: " + s.HTTPS})
+	} else {
+		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
+	}
+	m.historyDirty = true
+	m.followVP()
+	return m.showProxy()
+}
+
+// persistProxy brings .env in line with the environment.
+//
+// MergeDotEnv only adds and replaces, so a proxy that has been turned off has to
+// be removed from the file explicitly: left there it would be read back on the
+// next start and the session would silently keep going through a proxy the user
+// has switched off.
+func (m *uiModel) persistProxy(s config.ProxySettings) error {
+	lines, err := config.ReadDotEnv()
+	if err != nil {
+		return err
+	}
+	// Start from the file as it is, drop every proxy variable, then write the
+	// current ones back. In that order, so a variable that no longer has a value
+	// cannot survive, which is the whole point of "off".
+	merged, _ := config.MergeDotEnv(lines, nil)
+	for _, k := range append(config.ProxyEnvKeys(), config.EnvNoProxy) {
+		merged = dropEnvKey(merged, k)
+	}
+	if s.Active {
+		vars := map[string]string{}
+		if s.HTTP != "" {
+			vars[config.EnvHTTPProxy] = s.HTTP
+		}
+		if s.HTTPS != "" {
+			vars[config.EnvHTTPSProxy] = s.HTTPS
+		}
+		if s.NoProxy != "" {
+			vars[config.EnvNoProxy] = s.NoProxy
+		}
+		merged, _ = config.MergeDotEnv(merged, vars)
+	}
+	var sb strings.Builder
+	for _, l := range merged {
+		sb.WriteString(l + "\n")
+	}
+	return os.WriteFile(".env", []byte(sb.String()), 0o600)
+}
+
+// dropEnvKey removes every line assigning key, leaving comments and other
+// variables alone.
+func dropEnvKey(lines []string, key string) []string {
+	out := lines[:0]
+	for _, l := range lines {
+		if k, _, ok := config.DotEnvPair(l); ok && k == key {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+func (m *uiModel) showProxy() tea.Cmd {
+	s := config.CurrentProxy()
+	add := func(s string) {
+		m.history = append(m.history, line{kindSys, s})
+	}
+	if !s.Active {
+		add(i18n.T("proxy: none (direct connection)"))
+	} else {
+		// http and https are shown separately because they are separate
+		// variables; a user who set one on the command line and not the other
+		// would otherwise have no way to see which is which.
+		for _, p := range []struct{ label, val string }{
+			{"https", s.HTTPS}, {"http", s.HTTP},
+		} {
+			if p.val != "" {
+				add("proxy " + p.label + ": " + p.val)
+			}
+		}
+		if s.NoProxy != "" {
+			add("proxy bypass: " + s.NoProxy)
+		}
+	}
+	add(i18n.T("set one with: /proxy <url> · clear with: /proxy off · bypass with: /proxy no <list>"))
+
+	// The probe is what turns "the proxy is set" into "the proxy works", which
+	// is the thing a user behind one actually needs to know. A failure here is
+	// reported as inconclusive rather than as a dead provider, because the
+	// request may never have left the machine.
+	m.statusText = i18n.T("checking the proxy…")
+	return func() tea.Msg {
+		_, err := config.ListModels(m.prov)
+		return proxyCheckMsg{err: err}
+	}
+}
+
+type proxyCheckMsg struct{ err error }
+
+// handleProxyCheck reports whether a request through the current proxy reaches
+// the provider. It deliberately does not change the running provider on a
+// failure: a proxy problem is a reason to fix the proxy, not to silently switch
+// the user onto a different endpoint and hide the reason their setup is broken.
+func (m *uiModel) handleProxyCheck(msg proxyCheckMsg) {
+	m.statusText = ""
+	kind, text := kindSys, i18n.T("proxy: the provider answered through it")
+	if msg.err != nil {
+		kind, text = kindErr, i18n.T("proxy: the request failed — ")
+		text += msg.err.Error()
+	}
+	m.history = append(m.history, line{kind, text})
+	m.historyDirty = true
+	m.followVP()
+}
+
 func (m *uiModel) openSetup() tea.Cmd {
 	m.setup.reset()
 	m.setup.open = true
@@ -2033,6 +2212,15 @@ func (m *uiModel) sidebarView(height int) string {
 	row(styleHint, " "+truncate(m.sessionID, sbInner-1))
 	row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
 	row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
+	// What the agent actually changed. The counts come from the tools, which are
+	// the only place that knows a file's before and after, so this is the real
+	// diff of the session rather than a sum of the write calls that produced it.
+	// It stays hidden until something has changed: a column of zeroes on a fresh
+	// session is noise, and its absence is the information.
+	if cs := dmtools.Changes(); cs.Files > 0 {
+		row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
+		row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
+	}
 	b.WriteString("\n")
 
 	row(styleSidebarLabel, i18n.T("FOLDER"))
