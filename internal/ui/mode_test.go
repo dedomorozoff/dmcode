@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/cursor"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"google.golang.org/adk/v2/tool"
@@ -245,8 +246,12 @@ func TestSuggestHighlightStopsAtTheEnds(t *testing.T) {
 }
 
 // Typing a filter resets the highlight, so a narrowed list never keeps a
-// selection that points past its own end.
-func TestTypingResetsTheHighlight(t *testing.T) {
+// selection that points past its own end. A blink, which changes no text, must
+// not: the text input emits one about twice a second and every one of them
+// reaches the rebuild, so resetting unconditionally threw the highlight away
+// twice a second and a single press of Down appeared to snap the cursor back to
+// the first row.
+func TestTypingResetsTheHighlightButABlinkDoesNot(t *testing.T) {
 	m := modeModel(t)
 	m.input.SetValue("/")
 	m.updateSuggest()
@@ -256,6 +261,14 @@ func TestTypingResetsTheHighlight(t *testing.T) {
 		t.Skip("the command list has one row")
 	}
 
+	var model tea.Model = m
+	for b := 0; b < 3; b++ {
+		model, _ = model.Update(cursor.BlinkMsg{})
+	}
+	if m.suggestSel == 0 {
+		t.Errorf("a cursor blink reset the selection to the top")
+	}
+
 	m.input.SetValue("/cl")
 	m.updateSuggest()
 	if m.suggestSel != 0 {
@@ -263,6 +276,29 @@ func TestTypingResetsTheHighlight(t *testing.T) {
 	}
 	if len(m.suggest) == 0 || m.suggest[0].text != "/clear" {
 		t.Errorf("filtering by 'cl' gave %v, want /clear first", m.suggest)
+	}
+}
+
+// A selection carried into a shorter list must be pulled back inside it: an
+// index past the end would either panic or, once the dialog is drawn, mark a row
+// that is not there.
+func TestSelectionIsClampedToTheList(t *testing.T) {
+	m := modeModel(t)
+	m.input.SetValue("/")
+	m.updateSuggest()
+	if len(m.suggest) < 3 {
+		t.Skip("the command list is too short")
+	}
+	m.suggestSel = len(m.suggest) - 1
+
+	m.input.SetValue("/mode")
+	m.updateSuggest()
+
+	if m.suggestSel >= len(m.suggest) {
+		t.Fatalf("the selection is at %d but the list has %d rows", m.suggestSel, len(m.suggest))
+	}
+	if !strings.Contains(ansi.Strip(m.suggestBox()), "▸ "+m.suggest[m.suggestSel].text) {
+		t.Errorf("the dialog does not mark the clamped row:\n%s", ansi.Strip(m.suggestBox()))
 	}
 }
 

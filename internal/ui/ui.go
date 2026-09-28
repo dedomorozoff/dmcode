@@ -298,6 +298,10 @@ type uiModel struct {
 	// suggestSel is the highlighted row of the command list. It is reset on every
 	// keystroke, so a narrowed list always starts at the top.
 	suggestSel int
+	// suggestFor is the input text the list was last built from. It is what keeps
+	// a cursor blink from resetting suggestSel: the rebuild runs on every message,
+	// not only on the ones that change the text.
+	suggestFor string
 	stick      bool
 
 	// Prompt history: every prompt the user has sent, persisted in
@@ -1203,13 +1207,31 @@ type suggestion struct {
 // remember about which key does what. Typing narrows it, and the first match is
 // preselected, so "/" followed by enter still runs the first command — the
 // keyboard-only path a user already had keeps working unchanged.
+// The input text the current command list was built from. It is what tells a
+// keystroke apart from the rest of the program's chatter: the text input emits a
+// cursor blink roughly twice a second, and every one of those messages reaches
+// the rebuild below. Without the memo the highlight was thrown away twice a
+// second, so a single press of Down appeared to snap the cursor back to the top.
+
 func (m *uiModel) updateSuggest() {
+	m.rebuildSuggest(m.input.Value())
+}
+
+// rebuildSuggest rebuilds the command list for text, keeping the highlighted row
+// when the list it was picked from is the same one. Typing narrows the list, and
+// a selection that pointed past the new end has to go — but nothing else may
+// move it.
+func (m *uiModel) rebuildSuggest(text string) {
+	keepSel := text == m.suggestFor
 	m.suggest = nil
-	m.suggestSel = 0
+	if !keepSel {
+		m.suggestSel = 0
+	}
+	m.suggestFor = text
+
 	if m.palette.open || m.picker.open || m.setup.open {
 		return
 	}
-	text := m.input.Value()
 	if m.busy || !strings.HasPrefix(text, "/") {
 		return
 	}
@@ -1220,6 +1242,7 @@ func (m *uiModel) updateSuggest() {
 				m.suggest = append(m.suggest, suggestion{"/" + c.name, c.desc})
 			}
 		}
+		m.clampSuggest()
 		return
 	}
 	if id, ok := strings.CutPrefix(text, "/model "); ok {
@@ -1232,6 +1255,16 @@ func (m *uiModel) updateSuggest() {
 				break
 			}
 		}
+	}
+	m.clampSuggest()
+}
+
+// clampSuggest pulls the highlighted row back inside the list. Typing narrows the
+// list, so a selection that survived a rebuild can point past its new end, and an
+// index out of range would either panic or silently select the wrong command.
+func (m *uiModel) clampSuggest() {
+	if m.suggestSel >= len(m.suggest) {
+		m.suggestSel = max(len(m.suggest)-1, 0)
 	}
 }
 
