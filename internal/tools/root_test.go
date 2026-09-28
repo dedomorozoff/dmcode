@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -169,7 +170,15 @@ func TestCheckPatternRootFindsTheRealDirectory(t *testing.T) {
 			t.Errorf("checkPatternRoot(%q) = %v, want it accepted", p, err)
 		}
 	}
-	for _, p := range []string{"../*.go", "/etc/passwd", "C:/Windows/system32/*.dll"} {
+	// The absolute case has to be spelled with a path the running OS considers
+	// absolute. "C:/Windows/system32/*.dll" is only such a path on Windows; on
+	// Unix it is a relative name, so resolve joins it onto the root and the
+	// pattern is workspace-local by every rule the code follows.
+	anchored := []string{"/etc/passwd"}
+	if runtime.GOOS == "windows" {
+		anchored = []string{`C:\Windows\system32\*.dll`, "C:/Windows/system32/*.dll"}
+	}
+	for _, p := range append([]string{"../*.go"}, anchored...) {
 		if err := checkPatternRoot(p); err == nil {
 			t.Errorf("checkPatternRoot(%q) was allowed, want it rejected", p)
 		}
