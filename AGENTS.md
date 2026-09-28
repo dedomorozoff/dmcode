@@ -115,9 +115,15 @@ Already fixed, and worth not regressing:
 - `edit_file` rigidity — a whitespace-tolerant match was added.
 - **Overloaded `tab`** — it completed a suggestion inside a `/` command and
   switched mode everywhere else, so the same key did two unrelated things
-  depending on what was in the input. The `/` command list is now picked with
-  `↑` `↓` + `enter` (`esc` dismisses it and keeps the typed text), which leaves
-  `tab` meaning one thing everywhere: the mode.
+  depending on what was in the input. The `/` commands are now a dialog picked
+  with `↑` `↓` + `enter` (`esc` dismisses it and keeps the typed text), which
+  leaves `tab` meaning one thing everywhere: the mode.
+- **The command list was a block of frame rows** — it shrank the transcript on
+  every `/`, jumped back when it closed, and on a short terminal ran into the
+  bottom of the screen with the input still to fit. It is now a bordered dialog
+  painted over the chat panel, anchored above the input, in the same chrome as
+  `ctrl+p`; the frame is byte-identical with it open and closed, and only the
+  chat panel's columns are rewritten so the sidebar survives.
 - **The status bar carried a hotkey list and the model name** — the model was the
   third place on screen showing it, the header and the sidebar already have it,
   and the fixed `ctrl+p │ ctrl+y │ esc` run was the part that dropped off the edge

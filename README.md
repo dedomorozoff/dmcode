@@ -115,8 +115,10 @@ are never treated as markdown, so a JSON payload containing `**` survives intact
 
 ## Plan and act modes
 
-`tab` switches between them. Typing `/` opens a command list you move through
-with `↑` `↓` and run with `enter`; `esc` closes it and keeps what you typed.
+`tab` switches between them. Typing `/` opens a command dialog just above the
+input; `↑` `↓` move through it, `enter` runs the highlighted command, `esc`
+closes it and keeps what you typed. The dialog is drawn over the transcript, so
+nothing in the layout shifts and the sidebar stays readable.
 
 - **ACT** — the full tool set; the agent reads and writes.
 - **PLAN** — `read_file`, `list_dir`, `grep` and `glob` only. The agent

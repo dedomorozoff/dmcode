@@ -284,7 +284,8 @@ func TestCommandListHeaderIsTranslated(t *testing.T) {
 	if len(m.suggest) == 0 {
 		t.Skip("no commands")
 	}
-	header := strings.Split(m.suggestView(), "\n")[0]
+	// Row 0 is the box's own top border; the title is the row under it.
+	header := ansi.Strip(strings.Split(m.suggestBox(), "\n")[1])
 	// The arrow keys and the words around them: if the catalog lost the entry the
 	// whole line comes back in English, which is the thing to catch.
 	for _, want := range []string{"↑↓", "enter", "esc"} {
@@ -293,62 +294,110 @@ func TestCommandListHeaderIsTranslated(t *testing.T) {
 		}
 	}
 	if strings.Contains(header, "choose") || strings.Contains(header, "dismiss") {
-		t.Errorf("the header is still English: %q", header)
+		t.Errorf("the title is still English: %q", header)
 	}
 }
 
-// The command list is part of the frame, not a floating overlay, so every row of
-// it has to be exactly the terminal wide. A row one cell over makes JoinVertical
-// pad the whole frame sideways; a row wrapping onto a second line makes the frame
-// a row taller than the terminal and pushes the input off the bottom.
+// The command list is painted over the bottom of the chat panel, so the frame it
+// produces has to be indistinguishable from the closed one in everything but the
+// text it covers: same height, same width, input box unmoved. That is the whole
+// reason it is an overlay — as rows of the frame it shrank the transcript on
+// every "/" and ran into the bottom of the screen on a short terminal.
 //
-// It is also bounded in height, and the "↓ more" marker has to survive that cap —
-// a list that looks complete because its overflow marker got cut off is the exact
-// failure worth guarding.
+// The overflow marker has to survive the height cap too: a list that looks
+// complete because its "↓ more" row was trimmed away is the failure worth
+// guarding.
 func TestCommandListFitsTheFrame(t *testing.T) {
 	for _, size := range [][2]int{{120, 40}, {100, 30}, {92, 30}, {80, 24}, {60, 20}, {40, 12}, {30, 10}} {
 		w, h := size[0], size[1]
 		t.Run(fmt.Sprintf("%dx%d", w, h), func(t *testing.T) {
 			m := modeModel(t)
 			m.width, m.height = w, h
+			m.layout()
+			m.history = []line{{kindAgent, "an answer worth keeping on screen"}}
+			m.historyDirty = true
+			m.syncVP()
+			m.followVP()
+
+			// The frame is the baseline rather than a computed constant: the input
+			// box wraps its placeholder onto a second line on a narrow terminal, so
+			// the honest statement is "the list changes nothing" rather than a
+			// number that has to be re-derived for every width.
+			// The input already holds "/" for both frames: the placeholder is
+			// several words long and wraps onto a second line on a narrow terminal,
+			// so rendering the baseline before typing would compare two different
+			// input boxes. What is left between the frames is the dialog alone.
 			m.input.SetValue("/")
+			closed := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
+			want := len(closed)
+
 			m.updateSuggest()
 			if len(m.suggest) < 8 {
 				t.Fatalf("only %d commands, too few to overflow the list", len(m.suggest))
 			}
-			m.layout()
 
-			// Below the bound the list is dropped entirely rather than squeezed
-			// into a chat panel that has already hit its floor. The commands are
-			// still reachable by typing them, so nothing is lost.
+			// Below the bound the list is dropped entirely rather than squeezed.
+			// The commands are still reachable by typing them, so nothing is lost.
 			if m.suggestHeight() == 0 {
-				if m.suggestView() != "" {
-					t.Error("the list is not budgeted any rows but still renders")
+				if open := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n"); len(open) != want {
+					t.Errorf("with no room for the list the frame is %d rows, want %d", len(open), want)
 				}
 				return
 			}
 
-			lines := strings.Split(m.suggestView(), "\n")
-			if len(lines) > m.suggestHeight() {
-				t.Errorf("the list is %d rows but only %d were budgeted", len(lines), m.suggestHeight())
+			lines := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
+			if len(lines) != want {
+				t.Fatalf("the frame with the list open is %d rows, want %d", len(lines), want)
 			}
 			for i, l := range lines {
 				if got := ansi.StringWidth(l); got != w {
 					t.Errorf("row %d is %d cells, want %d", i, got, w)
 				}
 			}
-			// The whole frame, list included, still has to be exactly the terminal.
-			view := strings.Split(strings.TrimRight(m.View().Content, "\n"), "\n")
-			if len(view) != max(h, chromeHeight) {
-				t.Errorf("the frame is %d rows, want %d", len(view), max(h, chromeHeight))
+			// The input box is the bottom of the frame and must not move a cell
+			// when the list opens, or the whole interface jumps under the cursor.
+			// Its borders are compared rather than the text between them: typing
+			// "/" legitimately changes what the box says.
+			if lines[want-1] != closed[want-1] || lines[want-3] != closed[want-3] {
+				t.Errorf("the input box moved:\nclosed %q\nopen   %q",
+					closed[want-3], lines[want-3])
 			}
-
-			// With the list overflowing, the marker must be on screen: the user
-			// cannot tell there are more commands if it is not.
-			if len(m.suggest) > m.suggestHeight()-1 && !strings.Contains(m.suggestView(), "more") {
-				t.Error("the list overflows but shows no overflow marker")
+			// The status bar is directly above it and is state, not decoration.
+			if lines[want-inputHeight-statusHeight] != closed[want-inputHeight-statusHeight] {
+				t.Error("the status bar changed while the list was open")
 			}
 		})
+	}
+}
+
+// The sidebar shares the rows the list is drawn over, so it has to survive them:
+// blanking it would take the model, the folder and the tool list away for as long
+// as a "/" is on screen.
+func TestCommandListKeepsTheSidebar(t *testing.T) {
+	m := modeModel(t)
+	m.width, m.height = 100, 30
+	m.showSidebar = true
+	m.layout()
+	m.history = []line{{kindAgent, "an answer"}}
+	m.historyDirty = true
+	m.syncVP()
+	m.followVP()
+
+	closed := strings.Split(m.View().Content, "\n")
+	m.input.SetValue("/")
+	m.updateSuggest()
+	if m.suggestHeight() == 0 {
+		t.Skip("no room for the list at this size")
+	}
+	open := strings.Split(m.View().Content, "\n")
+
+	end := len(closed) - inputHeight - statusHeight
+	for i := max(end-m.suggestHeight(), headerHeight); i < end; i++ {
+		sidebarClosed := ansi.StringWidth(closed[i]) - m.chatBoxWidth()
+		if got := ansi.StringWidth(open[i]) - m.chatBoxWidth(); got != sidebarClosed {
+			t.Errorf("row %d: the sidebar is %d cells with the list open, %d without",
+				i, got, sidebarClosed)
+		}
 	}
 }
 

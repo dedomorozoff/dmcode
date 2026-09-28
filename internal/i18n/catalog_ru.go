@@ -59,8 +59,6 @@ var catalog = map[Lang]map[string]string{
 		" (context kept)":   " (контекст сохранён)",
 		"· model → ":        "· модель → ",
 		"   ↓ more ":        "   ↓ ещё ",
-		"↑↓ choose · enter run · esc dismiss": "↑↓ выбор · enter запуск · esc закрыть",
-		"↓ more": "↓ ещё",
 
 		// Setup wizard.
 		"setup cancelled":                                  "настройка отменена",
@@ -113,6 +111,7 @@ var catalog = map[Lang]map[string]string{
 		"esc — close":      "esc — закрыть",
 		"   nothing found": "   ничего не найдено",
 		"⌘ commands":       "⌘ команды",
+		"↑↓ · enter · esc": "↑↓ выбор · enter запуск · esc закрыть",
 		"⌘ models":         "⌘ модели",
 
 		// Boot.

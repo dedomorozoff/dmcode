@@ -1057,49 +1057,53 @@ func (m *uiModel) contentWidth() int {
 	return max(m.chatBoxWidth()-panelBorder, 8)
 }
 
-// suggestHeight is the row the tab-completion hint occupies, or 0 when hidden.
-// On a terminal too short to hold the whole frame the hint is dropped: the
-// input box matters more than the completion, and a frame one row too tall
-// scrolls the input off the bottom of the screen.
-// suggestMaxRows caps the command list. It is a floor on the transcript's
-// height rather than a scrollable region: the list is transient and a user
-// arrowing through it wants to see the reply above it, not a scrolling pane.
-const suggestMaxRows = 6
-
-// suggestHeight is the number of rows the command list occupies, so the viewport
-// can be sized against it.
+// suggestHeight is how many rows the command list paints over the transcript, or
+// 0 when it is closed.
 //
-// The list is bounded by what the terminal can actually give up: layout() floors
-// the chat panel at minViewRows, and a list that pushed past that would make the
-// whole frame one row taller than the terminal — the input box, and the cursor
-// in it, would fall off the bottom. Below the bound the list is dropped
-// entirely rather than squeezed: the commands are still reachable by typing them,
-// which is the whole reason a picker is a convenience and not the only path.
+// The list is an overlay, not a row of the frame: it is drawn on top of the
+// chat panel instead of taking rows from it. Laying it out as real rows meant
+// the transcript shrank every time a "/" was typed and jumped back when it was
+// closed, and on a short terminal the list ran into the bottom of the screen
+// with the input box still to fit. Painting over the transcript costs the
+// newest reply for as long as the list is up and nothing else at all: the frame
+// is identical with the list open and closed, so nothing shifts and nothing is
+// ever pushed off screen.
 func (m *uiModel) suggestHeight() int {
 	if len(m.suggest) == 0 {
 		return 0
 	}
-	// Two rows is the floor: a header naming the keys above a list with no room
-	// for a single command is worse than no list at all — it looks broken, and
-	// the keys it advertises lead nowhere. One command and no marker, then.
-	const minSuggestRows = 2
-	// One row is the header naming the keys; the rest are the commands.
-	want := min(len(m.suggest)+1, suggestMaxRows)
-	room := m.height - chromeHeight - minViewRows
+	// The list paints over the chat panel, so the rows available are everything
+	// above the input box, less the header and the status bar it must not cover.
+	room := m.height - inputHeight - headerHeight - statusHeight
 	if room < minSuggestRows {
+		// Too little to draw a list over. The commands are still reachable by
+		// typing them, which is the whole reason a picker is a convenience and
+		// not the only path.
 		return 0
 	}
-	return min(want, room)
+	return min(min(len(m.suggest)+2, suggestMaxRows), room)
 }
 
-// layout sizes the viewport so that header + chat panel + status bar +
-// suggestion row + input box add up to exactly the terminal height. The
-// viewport receives the panel's *inner* row count; View adds the borders back.
+// minSuggestRows is one command plus the header naming the keys, and the row the
+// overflow marker takes when the list is longer than the space allows. A header
+// with no command under it is worse than nothing: it advertises keys that lead
+// nowhere and looks broken.
+const minSuggestRows = 2
+
+// suggestMaxRows caps the list. A user arrowing through commands wants to read
+// the reply they are answering, not scroll a pane that swallowed it.
+const suggestMaxRows = 8
+
+// layout sizes the viewport so that header + chat panel + status bar + input box
+// add up to exactly the terminal height. The command list is not part of it: it
+// is painted over the panel afterwards, so the frame does not change when it
+// opens or closes. The viewport receives the panel's *inner* row count; View adds
+// the borders back.
 func (m *uiModel) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	rows := max(m.height-chromeHeight-m.suggestHeight(), minViewRows)
+	rows := max(m.height-chromeHeight, minViewRows)
 	m.vp.SetWidth(m.contentWidth())
 	m.vp.SetHeight(rows)
 	// The input scrolls horizontally within one row; without an explicit width
@@ -2129,84 +2133,132 @@ func (m *uiModel) headerView() string {
 		styleHeader.Render(name) + styleHint.Render(sep+model+sep+id))
 }
 
-// suggestView renders the command list above the input. The highlighted row is
-// the one enter will run, and it is marked rather than merely coloured, so the
-// list is still readable on a terminal whose font has no distinct bold face.
-func (m *uiModel) suggestView() string {
-	if len(m.suggest) == 0 {
-		return ""
+// suggestBox renders the command list as a bordered panel, in the same chrome as
+// the ctrl+p palette, and anchored directly above the input box.
+//
+// It is drawn over the chat panel rather than added to the frame. As rows of the
+// frame the list shrank the transcript every time a "/" was typed, jumped back
+// when it closed, and on a short terminal ran into the bottom of the screen with
+// the input still to fit. As a panel it costs the same on every terminal and
+// nothing in the layout moves.
+func (m *uiModel) suggestBox() string {
+	// As wide as the chat panel, so it lines up with the text it sits above
+	// instead of stretching under the sidebar or floating free of both.
+	width := max(min(m.chatBoxWidth(), floatingBoxMaxWidth), 24)
+	inner := width - panelBorder
+	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+
+	// The title names the keys, and the commands follow directly: a blank spacer
+	// row here is a row the list cannot use, and on a short terminal it is the
+	// difference between showing another command and showing the overflow marker.
+	head := []string{
+		styleHeader.Render(" "+i18n.T("⌘ commands")+" ") + styleHint.Render(i18n.T("↑↓ · enter · esc")),
 	}
-	const indent = 2
-	// Every row is padded or cut to exactly the terminal width: a row one cell
-	// wider than the rest shifts the whole frame sideways, and JoinVertical pads
-	// to the widest block. The width is measured with ansi.StringWidth on plain
-	// text, never on a styled string, because truncate counts bytes and an escape
-	// sequence is not a cell.
-	body := max(m.width-indent, 4)  // header rows, no gutter
-	row := max(m.width-indent-3, 4) // command rows carry a 3-cell marker
 
-	rows := []string{strings.Repeat(" ", indent) + fitCells(truncate(i18n.T("↑↓ choose · enter run · esc dismiss"), body), body)}
+	rows := append([]string{}, head...)
 
-	height := m.suggestHeight()
-	budget := height - 1 // the header above already took one
+	// Scroll so the highlighted row is always one of the rows drawn: walking the
+	// cursor down a list whose tail is cut off loses it entirely, and the user is
+	// then arrowing blind.
+	body := max(m.suggestHeight()-panelBorder-len(head), 1)
 	start := 0
-	if m.suggestSel >= budget {
-		// Scroll so the highlighted row is always on screen; without this the
-		// cursor walks off the bottom of the list and the user loses it.
-		start = m.suggestSel - budget + 1
+	if m.suggestSel >= body {
+		start = m.suggestSel - body + 1
 	}
-	if start > len(m.suggest)-budget {
-		start = max(len(m.suggest)-budget, 0)
+	if start > len(m.suggest)-body {
+		start = max(len(m.suggest)-body, 0)
 	}
 
-	// The "↓ more" marker is only worth a row if one is left over. Shrinking the
-	// list to make room for it is what keeps it from being cut off by the height
-	// cap below — a marker that never renders is worse than none, because the
-	// list then looks complete when it is not.
-	more := len(m.suggest) - (start + budget)
-	if more > 0 && budget > 1 {
-		budget--
-		more = len(m.suggest) - (start + budget)
+	// The last row goes to the overflow marker when there is anything left, so the
+	// panel keeps its height and still admits that the list does not fit. A marker
+	// that got trimmed off is worse than none: the list would look complete.
+	limit := min(start+body, len(m.suggest))
+	more := len(m.suggest) - limit
+	if more > 0 && limit-start > 1 {
+		limit--
+		more = len(m.suggest) - limit
 	}
 
-	// The description is a hint, not the row: it goes first when the terminal is
-	// too narrow to carry both, and the command name is never truncated away.
-	for i := start; i < len(m.suggest) && i < start+budget; i++ {
-		s := m.suggest[i]
-		gutter := "   "
+	for i := start; i < limit; i++ {
+		// The marker is the row's indent, so it is passed separately rather than
+		// glued onto the text: wrapIndent then hangs the wrapped lines under the
+		// text, and no marker is doubled up.
+		marker := "   "
 		if i == m.suggestSel {
-			gutter = " ▸ "
+			marker = " ▸ "
 		}
+		s := m.suggest[i]
 		text := s.text
 		if s.desc != "" {
-			if room := row - ansi.StringWidth(text) - 4; room >= 8 {
+			if room := inner - ansi.StringWidth(text) - 4; room >= 8 {
 				text += "  — " + truncate(s.desc, room)
 			}
 		}
-		rows = append(rows, strings.Repeat(" ", indent)+gutter+fitCells(text, row))
+		line := wrapIndent(text, inner, marker, "     ")
+		if i == m.suggestSel {
+			for j := range line {
+				line[j] = styleSel.Render(line[j])
+			}
+		}
+		rows = append(rows, line...)
 	}
 	if more > 0 {
-		rows = append(rows, strings.Repeat(" ", indent)+
-			fitCells(truncate(i18n.T("↓ more")+" "+fmt.Sprint(more), body), body))
+		rows = append(rows, styleHint.Render("   "+i18n.T("↓ more ")+fmt.Sprint(more)))
 	}
-	// Height is capped separately: on a very short terminal the rows are dropped
-	// from the bottom rather than wrapped, which would push the input off screen.
-	if len(rows) > height {
-		rows = rows[:height]
+	return stylePanel.Width(width).Render(strings.Join(rows, "\n"))
+}
+
+// floatingBoxMaxWidth keeps a dialog from stretching the full width of a wide
+// terminal, where a list of short command names would sit in a vast empty box.
+const floatingBoxMaxWidth = 68
+
+// overlaySuggest paints the command dialog over the bottom of the chat panel,
+// immediately above the input box.
+//
+// It rewrites rows of the frame that are already there rather than appending any,
+// so the frame keeps exactly m.height rows and nothing in the interface moves:
+// the input box, the status bar and the panel's top border are all still where
+// they were. The dialog is anchored to the bottom because that is where the eye
+// already is, next to the cursor.
+//
+// Only the chat panel's columns are rewritten. The sidebar shares those rows, and
+// blanking it would take the model, the folder and the tool list away for as long
+// as a "/" is on screen — the very information a user reaches for to decide what
+// to type next. What is left of the row after the panel is kept verbatim.
+func overlaySuggest(frame string, m *uiModel, rows int) string {
+	lines := strings.Split(frame, "\n")
+	// The dialog ends where the status bar starts: header + panel + status + input
+	// is the whole frame, and the last row of the panel is the one above the badge.
+	end := len(lines) - inputHeight - statusHeight
+	start := max(end-rows, headerHeight)
+	if end <= headerHeight || start >= end {
+		return frame
 	}
-	return strings.Join(rows, "\n")
+
+	box := strings.Split(m.suggestBox(), "\n")
+	if len(box) > end-start {
+		box = box[:end-start]
+	}
+	panel := m.chatBoxWidth()
+	keep := max(m.width-panel, 0) // the sidebar's columns, or nothing when hidden
+	for i, l := range box {
+		row := lines[start+i]
+		// The dialog is narrower than the panel on a wide terminal, so the gap
+		// between it and the panel's right border is filled rather than left as a
+		// ragged hole. TruncateLeft removes a count from the head rather than
+		// keeping a tail, so the number is what has to come off.
+		fill := panel - ansi.StringWidth(l)
+		if fill < 0 {
+			l = ansi.Truncate(l, panel, "")
+			fill = 0
+		}
+		drop := ansi.StringWidth(row) - keep
+		lines[start+i] = l + strings.Repeat(" ", fill) + ansi.TruncateLeft(row, max(drop, 0), "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // fitCells right-fills s with spaces to exactly w cells, and cuts it if it is
-// longer. The width is measured with ansi.StringWidth rather than len, so an
-// already-styled string is not counted in bytes.
-func fitCells(s string, w int) string {
-	if n := ansi.StringWidth(s); n < w {
-		return s + strings.Repeat(" ", w-n)
-	}
-	return truncate(s, max(w, 1))
-}
-
 // floatingWidth is the outer width of the palette and the model picker. Both
 // list model identifiers, which are unbounded, so their rows are wrapped inside
 // a frame that fits the terminal instead of growing past it.
@@ -2487,14 +2539,17 @@ func (m *uiModel) View() tea.View {
 	}
 
 	// JoinVertical pads every block out to the widest one, so a single
-	// overflowing row is enough to shift the whole frame sideways.
+	// overflowing row is enough to shift the whole frame sideways. The command
+	// list is deliberately not a part: it is painted over the panel below, so
+	// opening and closing it leaves the frame byte-identical.
 	parts := []string{m.headerView(), middle, m.statusBarView()}
-	if m.suggestHeight() > 0 {
-		parts = append(parts, m.suggestView())
-	}
 	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
-	v := tea.NewView(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	if rows := m.suggestHeight(); rows > 0 {
+		frame = overlaySuggest(frame, m, rows)
+	}
+	v := tea.NewView(frame)
 	v.AltScreen = true
 	// Cell motion is what makes the terminal report the wheel at all; without it
 	// no MouseWheelMsg is ever produced and scrolling cannot work. The cost is
