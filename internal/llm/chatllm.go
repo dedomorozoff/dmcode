@@ -72,11 +72,153 @@ func genaiToolsToChat(tools []*genai.Tool) []chatTool {
 			ct.Type = "function"
 			ct.Function.Name = fd.Name
 			ct.Function.Description = fd.Description
-			ct.Function.Parameters = genaiSchemaToJSON(fd.Parameters)
+			ct.Function.Parameters = declParams(fd)
 			out = append(out, ct)
 		}
 	}
 	return out
+}
+
+// declParams renders a tool's argument schema for the chat format.
+//
+// It has to look at ParametersJsonSchema as well as Parameters, because
+// functiontool fills in the former and leaves the latter nil — the two fields
+// are mutually exclusive in genai. Reading only Parameters sent every tool as
+// {"type":"object"}, telling the model the instruments take no arguments at
+// all. A model that cannot see a tool's contract cannot call it correctly: it
+// invents argument names, a tool silently ignores the ones it does not know,
+// the answer comes back unchanged, and the model tries the next guess — the
+// same list_dir call over and over until the endpoint gives up.
+func declParams(fd *genai.FunctionDeclaration) map[string]any {
+	if fd.Parameters != nil {
+		return genaiSchemaToJSON(fd.Parameters)
+	}
+	if fd.ParametersJsonSchema != nil {
+		if m, ok := jsonSchemaToJSON(fd.ParametersJsonSchema); ok {
+			return m
+		}
+	}
+	// A tool with no declared arguments is still sent an object schema: the
+	// chat format expects one, and an absent "parameters" is a rejected
+	// request rather than a permissive one.
+	return map[string]any{"type": "object"}
+}
+
+// jsonSchemaToJSON normalises an arbitrary JSON Schema value into the map the
+// chat format wants: the type is lowercased, and the keys the format cares
+// about are pulled out of a schema that arrived as untyped JSON.
+//
+// The value reaches us as `any` — jsonschema-go and hand-written declarations
+// both land there — so it is walked rather than type-asserted. Anything that is
+// not a schema object is reported as unusable and the caller falls back.
+func jsonSchemaToJSON(v any) (map[string]any, bool) {
+	switch s := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(s))
+		for k, val := range s {
+			switch k {
+			case "type":
+				if t, ok := val.(string); ok {
+					out["type"] = normalizeSchemaType(t)
+					continue
+				}
+				out["type"] = val
+			case "properties":
+				if props, ok := val.(map[string]any); ok {
+					conv := make(map[string]any, len(props))
+					for name, pv := range props {
+						if pm, ok := jsonSchemaToJSON(pv); ok {
+							conv[name] = pm
+						} else {
+							conv[name] = map[string]any{}
+						}
+					}
+					out["properties"] = conv
+					continue
+				}
+			case "items", "additionalProperties":
+				if m, ok := jsonSchemaToJSON(val); ok {
+					out[k] = m
+					continue
+				}
+			case "required":
+				// A required list is []string on the typed path and []any on
+				// the untyped one; the wire wants []any either way.
+				out[k] = stringSliceToAny(val)
+				continue
+			}
+			out[k] = val
+		}
+		if _, ok := out["type"]; !ok {
+			out["type"] = "object"
+		}
+		return out, true
+	case *genai.Schema:
+		if s == nil {
+			return nil, false
+		}
+		return genaiSchemaToJSON(s), true
+	default:
+		// functiontool hands over a *jsonschema.Schema, which is a typed struct
+		// rather than a map. Round-tripping it through JSON is the honest way
+		// to read it: the struct already marshals to exactly the JSON Schema
+		// the wire wants, and handling its fields by hand here would be a
+		// second, drifting copy of that type's marshaller.
+		return marshalSchema(v)
+	}
+}
+
+// marshalSchema converts an arbitrary JSON-marshallable schema into the map the
+// chat format wants. A value that will not marshal as a schema object is
+// reported as unusable so the caller can fall back rather than send garbage.
+func marshalSchema(v any) (map[string]any, bool) {
+	if v == nil {
+		return nil, false
+	}
+	if b, ok := v.([]byte); ok {
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			return nil, false
+		}
+		return jsonSchemaToJSON(m)
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, false
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, false
+	}
+	return jsonSchemaToJSON(m)
+}
+
+// normalizeSchemaType lowercases a schema type and drops the placeholder genai
+// uses for "no type". An empty type is left off the wire entirely rather than
+// sent as "" or "type_unspecified", both of which endpoints reject.
+func normalizeSchemaType(t string) string {
+	v := strings.ToLower(strings.TrimSpace(t))
+	if v == "type_unspecified" {
+		return ""
+	}
+	return v
+}
+
+// stringSliceToAny renders any string-slice shape as []any, which is what
+// json.Marshal needs and what the schema type check wants.
+func stringSliceToAny(v any) any {
+	switch s := v.(type) {
+	case []string:
+		out := make([]any, len(s))
+		for i, e := range s {
+			out[i] = e
+		}
+		return out
+	case []any:
+		return s
+	default:
+		return v
+	}
 }
 
 // contentsToChat flattens genai contents into chat messages. Function calls and
@@ -450,10 +592,19 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 		var text strings.Builder
 		var usage *chatUsage
 		var modelVer, finish string
+		// stopped records that the consumer walked away from the stream. A
+		// yield that returns false means "no more", and yielding into it again
+		// is not a no-op: a range-over-func panics when the body returns false
+		// and the iterator keeps going. The deferred close below is exactly such
+		// a later yield, so it has to know the stream was already abandoned.
+		stopped := false
 
 		// The turn is closed with one aggregated non-partial event, which is
 		// what the ADK runner requires to persist the turn and dispatch tools.
 		defer func() {
+			if stopped {
+				return
+			}
 			parts, err := toolCallsToParts(calls.snapshot(), finish)
 			if err != nil {
 				yield(nil, err)
@@ -489,7 +640,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 				continue
 			}
 			if chunk.Error != nil && chunk.Error.Message != "" {
-				yield(nil, &providerError{
+				stopped = !yield(nil, &providerError{
 					err:    fmt.Errorf("%s: %s", m.BaseURL, chunk.Error.Message),
 					reason: failStream,
 				})
@@ -526,6 +677,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 					},
 					Partial: true,
 				}, nil) {
+					stopped = true
 					return
 				}
 			}
