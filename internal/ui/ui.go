@@ -348,6 +348,7 @@ type uiModel struct {
 	cachedWidth   int
 	historyDirty  bool
 	cachedRows    []cachedLine
+	proxy         proxyState
 }
 
 // cachedLine holds the rendered rows of one history line. It is index-aligned
@@ -406,6 +407,27 @@ type setupState struct {
 
 func (s *setupState) reset() {
 	*s = setupState{}
+}
+
+// proxyState drives the /proxy dialog: a short menu of actions, then a text
+// stage for whichever one needs a value. It exists because "set one with:
+// /proxy <url>" asked the user to remember a command syntax on top of the
+// proxy address itself, and to know in advance whether the address worked.
+const (
+	proxyPick = iota
+	proxyURL
+	proxyNo
+)
+
+type proxyState struct {
+	open     bool
+	stage    int
+	selected int
+	buf      string
+}
+
+func (s *proxyState) reset() {
+	*s = proxyState{}
 }
 
 type command struct {
@@ -471,6 +493,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
+				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new, /clear, /quit"})
 			m.historyDirty = true
 			return nil
@@ -482,8 +505,8 @@ func (m *uiModel) commands() []command {
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "proxy", desc: i18n.T("show or set the HTTP proxy"), run: func(m *uiModel) tea.Cmd {
-			return m.showProxy()
+		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
+			return m.openProxy()
 		}},
 		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
 	}
@@ -732,6 +755,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.setupKey(msg)
 			return model, cmd
 		}
+		if m.proxy.open {
+			model, cmd := m.proxyKey(msg)
+			return model, cmd
+		}
 		if m.palette.open {
 			model, cmd := m.paletteKey(msg)
 			return model, cmd
@@ -882,6 +909,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
+					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new, /clear, /quit"})
 				m.historyDirty = true
 				m.followVP()
@@ -903,7 +931,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.followVP()
 				return m, nil
 			case "/proxy":
-				return m, m.applyProxy(text)
+				return m, m.openProxy()
 			case "/new":
 				m.sessionID = newSessionID()
 				m.turnCount = 0
@@ -940,6 +968,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, m.setMode(strings.TrimPrefix(strings.TrimSpace(arg), " "))
+			}
+			// /proxy keeps the typed fast paths (a URL, "off", "no <list>") working
+			// beside the dialog, so a user who knows the syntax is not forced through
+			// a menu. The prefix has to be cut here: handing the whole line to
+			// applyProxy would try to parse "/proxy" as part of the address.
+			if arg, ok := strings.CutPrefix(text, "/proxy"); ok {
+				arg = strings.TrimSpace(arg)
+				if arg == "" {
+					return m, m.openProxy()
+				}
+				return m, m.applyProxy(arg)
 			}
 			if arg, ok := strings.CutPrefix(text, "/cd"); ok {
 				if m.busy {
@@ -1261,7 +1300,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 	}
 	m.suggestFor = text
 
-	if m.palette.open || m.picker.open || m.setup.open {
+	if m.palette.open || m.picker.open || m.setup.open || m.proxy.open {
 		return
 	}
 	if m.busy || !strings.HasPrefix(text, "/") {
@@ -1673,6 +1712,161 @@ func dropEnvKey(lines []string, key string) []string {
 	return out
 }
 
+// openProxy opens the /proxy dialog. The menu is the entry point a user who
+// does not remember the command syntax can still use; the typed forms
+// ("/proxy <url>", "/proxy off", "/proxy no <list>") stay beside it.
+func (m *uiModel) openProxy() tea.Cmd {
+	m.proxy.reset()
+	m.proxy.open = true
+	m.statusText = "/proxy"
+	return nil
+}
+
+// proxyKey walks the /proxy dialog. Escape backs out of any stage without
+// touching the live setting, and a value that does not validate keeps the
+// field on screen with the reason in the status bar — a closed dialog and an
+// error line in the transcript would leave the user retyping from scratch.
+func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.proxy.reset()
+		m.statusText = i18n.T("cancelled")
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch m.proxy.stage {
+	case proxyPick:
+		switch msg.String() {
+		case "up":
+			if m.proxy.selected > 0 {
+				m.proxy.selected--
+			}
+			return m, nil
+		case "down":
+			if m.proxy.selected < proxyActionCount-1 {
+				m.proxy.selected++
+			}
+			return m, nil
+		case "enter":
+			switch m.proxy.selected {
+			case 0:
+				m.proxy.stage = proxyURL
+				m.proxy.buf = ""
+			case 1:
+				m.proxy.stage = proxyNo
+				m.proxy.buf = ""
+			case 2:
+				m.proxy.reset()
+				return m, m.applyProxy("off")
+			default:
+				m.proxy.reset()
+				return m, m.showProxy()
+			}
+			return m, nil
+		}
+
+	case proxyURL:
+		switch msg.String() {
+		case "enter":
+			val := strings.TrimSpace(m.proxy.buf)
+			if val == "" {
+				m.statusText = i18n.T("no proxy address entered")
+				return m, nil
+			}
+			if err := config.ValidateProxy(val); err != nil {
+				m.statusText = err.Error()
+				return m, nil
+			}
+			m.proxy.reset()
+			return m, m.applyProxy(val)
+		case "backspace":
+			if r := []rune(m.proxy.buf); len(r) > 0 {
+				m.proxy.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+
+	case proxyNo:
+		switch msg.String() {
+		case "enter":
+			// An empty field is meaningful here: it clears the bypass list.
+			val := strings.TrimSpace(m.proxy.buf)
+			m.proxy.reset()
+			return m, m.applyProxy("no " + val)
+		case "backspace":
+			if r := []rune(m.proxy.buf); len(r) > 0 {
+				m.proxy.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+	}
+
+	if len(msg.Text) > 0 && m.proxy.stage != proxyPick {
+		m.proxy.buf += msg.Text
+	}
+	return m, nil
+}
+
+// proxyActionCount is the number of rows the /proxy menu offers. It lives in
+// one place because the key handler and the renderer must agree on it.
+const proxyActionCount = 4
+
+func (m *uiModel) proxyBox() string {
+	inner := m.floatingWidth() - panelBorder
+
+	// The current state rides in the title: a user reopening the dialog should
+	// not have to remember whether a proxy is already on, or which one.
+	now := i18n.T("direct connection")
+	if s := config.CurrentProxy(); s.Active {
+		now = s.HTTPS
+		if now == "" {
+			now = s.HTTP
+		}
+	}
+	title := i18n.T("? proxy — now: ") + truncate(now, max(inner-ansi.StringWidth(i18n.T("? proxy — now: ")), 1))
+
+	switch m.proxy.stage {
+	case proxyURL:
+		rows := [][]string{
+			{styleHint.Render(i18n.T("proxy address, e.g. 127.0.0.1:8080 or socks5://host:1080"))},
+			{styleHint.Render(i18n.T("enter — apply, esc — cancel"))},
+			{m.proxy.buf + "█"},
+		}
+		return m.floatingPanel(title, "", rows, 0)
+
+	case proxyNo:
+		rows := [][]string{
+			{styleHint.Render(i18n.T("hosts that skip the proxy, comma-separated — e.g. localhost,10.0.0.0/8"))},
+			{styleHint.Render(i18n.T("an empty field clears the list · enter — apply · esc — cancel"))},
+			{m.proxy.buf + "█"},
+		}
+		return m.floatingPanel(title, "", rows, 0)
+	}
+
+	entries := make([][]string, 0, proxyActionCount)
+	for i, label := range []string{
+		i18n.T("turn the proxy on or change it"),
+		i18n.T("edit the bypass list (NO_PROXY)"),
+		i18n.T("turn the proxy off"),
+		i18n.T("show the current settings and test them"),
+	} {
+		marker, style := "   ", lipgloss.NewStyle()
+		if i == m.proxy.selected {
+			marker, style = " ? ", styleTool
+		}
+		rows := wrapIndent(label, inner, marker, "     ")
+		if i != m.proxy.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, m.proxy.selected)
+}
+
 func (m *uiModel) showProxy() tea.Cmd {
 	s := config.CurrentProxy()
 	add := func(s string) {
@@ -1747,6 +1941,8 @@ func (m *uiModel) pasteTarget() *string {
 		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
+	case m.proxy.open && m.proxy.stage != proxyPick:
+		return &m.proxy.buf
 	case m.picker.open:
 		return &m.picker.query
 	case m.palette.open:
@@ -2775,7 +2971,7 @@ func (m *uiModel) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView(i18n.T("dmcode is starting…"))
 	}
-	if m.picker.open || m.palette.open || m.setup.open || m.lang.open {
+	if m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.proxy.open {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
@@ -2784,6 +2980,8 @@ func (m *uiModel) View() tea.View {
 			box = m.setupBox()
 		case m.lang.open:
 			box = m.langBox()
+		case m.proxy.open:
+			box = m.proxyBox()
 		}
 		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
 		v.AltScreen = true
