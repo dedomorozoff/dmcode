@@ -102,16 +102,64 @@ func resolve(p string) (string, error) {
 	if base == "" {
 		return abs, nil
 	}
+	if err := insideRoot(base, abs); err != nil {
+		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
+	}
+	return abs, nil
+}
+
+// insideRoot reports whether abs sits under base. It is the lexical half of
+// resolve, kept separate so the symlink-aware re-check below can reuse it.
+func insideRoot(base, abs string) error {
 	rel, err := filepath.Rel(base, abs)
 	if err != nil {
 		// Different volumes on Windows, so there is no relative path at all;
 		// that can only mean the two are unrelated trees.
-		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
+		return fmt.Errorf("%s is %w: %s", abs, ErrOutsideRoot, base)
 	}
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
+		return fmt.Errorf("%s is %w: %s", abs, ErrOutsideRoot, base)
 	}
-	return abs, nil
+	return nil
+}
+
+// withinRootAfterLinks re-checks an existing filesystem entry against the
+// boundary after following its symlinks. resolve() is lexical on purpose — it
+// must decide before the file is touched, and a path that does not exist yet
+// has no link to resolve — so the tools that actually open something call this
+// to close the gap the lexical check leaves open: a symlink inside the tree
+// that points out of it.
+func withinRootAfterLinks(abs string) error {
+	base := Root()
+	if base == "" {
+		return nil
+	}
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		// Nothing to follow: a missing path is write_file's normal case, and
+		// the lexical check already covered what exists of it.
+		return nil
+	}
+	if err := insideRoot(base, real); err != nil {
+		return fmt.Errorf("%s is %w: %s", abs, ErrOutsideRoot, base)
+	}
+	return nil
+}
+
+// existingAncestor returns the deepest ancestor of dir, starting with dir
+// itself, that exists on disk. A parent chain can be longer than what resolve
+// saw, and every existing element of it is a place a symlink may hide.
+func existingAncestor(dir string) string {
+	for {
+		if _, err := os.Lstat(dir); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return dir
+		}
+		dir = parent
+	}
 }
 
 // checkPatternRoot validates the directory a glob pattern is rooted at. Only the
@@ -167,6 +215,9 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 	if err != nil {
 		return readFileResult{}, err
 	}
+	if err := withinRootAfterLinks(path); err != nil {
+		return readFileResult{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return readFileResult{}, err
@@ -209,8 +260,19 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 	if err != nil {
 		return writeFileResult{}, err
 	}
-	if dir := filepath.Dir(path); dir != "." && dir != "" {
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		// The check runs on the deepest ancestor that exists, and again on the
+		// directory itself once MkdirAll has created the rest: a middle element
+		// that is a symlink would otherwise move the write outside the root
+		// without resolve ever seeing it.
+		if err := withinRootAfterLinks(existingAncestor(dir)); err != nil {
+			return writeFileResult{}, err
+		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return writeFileResult{}, err
+		}
+		if err := withinRootAfterLinks(dir); err != nil {
 			return writeFileResult{}, err
 		}
 	}
@@ -272,6 +334,9 @@ type editFileResult struct {
 func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 	path, err := resolve(in.Path)
 	if err != nil {
+		return editFileResult{}, err
+	}
+	if err := withinRootAfterLinks(path); err != nil {
 		return editFileResult{}, err
 	}
 	data, err := os.ReadFile(path)
@@ -585,6 +650,12 @@ func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
 			return nil
 		}
 		if fileFilter != nil && !fileFilter.MatchString(d.Name()) {
+			return nil
+		}
+		// WalkDir does not descend into symlinked directories, but it still
+		// reports a symlinked file, and reading it would follow the link to
+		// content outside the workspace. Such an entry is skipped, not matched.
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		data, rerr := os.ReadFile(path)

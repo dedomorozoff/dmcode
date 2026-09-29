@@ -347,6 +347,18 @@ type uiModel struct {
 	cachedHistory string
 	cachedWidth   int
 	historyDirty  bool
+	cachedRows    []cachedLine
+}
+
+// cachedLine holds the rendered rows of one history line. It is index-aligned
+// with m.history: a streamed token rewrites the text of the last agent line,
+// so on the next frame every earlier line still matches its cache entry and is
+// reused as-is, and only the line that changed is re-rendered and re-wrapped.
+type cachedLine struct {
+	kind  lineKind
+	text  string
+	width int
+	rows  []string
 }
 
 type modelPicker struct {
@@ -1375,17 +1387,47 @@ func (m *uiModel) renderHistory() string {
 	if !m.historyDirty && m.cachedWidth == w && m.cachedHistory != "" {
 		return m.cachedHistory
 	}
+	// A replacement in applyAgentText can shrink the slice; the cache must not
+	// keep entries for lines that no longer exist.
+	if len(m.cachedRows) > len(m.history) {
+		m.cachedRows = m.cachedRows[:len(m.history)]
+	}
 	var b strings.Builder
-	for _, l := range m.history {
-		row := m.rowStyle(l.kind)
-		for _, r := range rowRows(l.text, w, row) {
-			// A markdown row arrives already styled by the renderer; wrapping it
-			// again would nest the escapes and break the width accounting.
-			if row.markdown {
-				b.WriteString(r + "\n")
-				continue
+	for i := range m.history {
+		l := &m.history[i]
+		var rows []string
+		hit := false
+		if i < len(m.cachedRows) {
+			c := &m.cachedRows[i]
+			if c.kind == l.kind && c.text == l.text && c.width == w {
+				rows, hit = c.rows, true
 			}
-			b.WriteString(row.style.Render(r) + "\n")
+		}
+		if !hit {
+			row := m.rowStyle(l.kind)
+			for _, r := range rowRows(l.text, w, row) {
+				// A markdown row arrives already styled by the renderer; wrapping it
+				// again would nest the escapes and break the width accounting.
+				if row.markdown {
+					rows = append(rows, r)
+					continue
+				}
+				rows = append(rows, row.style.Render(r))
+			}
+			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rows}
+			if i < len(m.cachedRows) {
+				m.cachedRows[i] = entry
+			} else if i == len(m.cachedRows) {
+				m.cachedRows = append(m.cachedRows, entry)
+			} else {
+				for len(m.cachedRows) < i {
+					m.cachedRows = append(m.cachedRows, cachedLine{})
+				}
+				m.cachedRows = append(m.cachedRows, entry)
+			}
+		}
+		for _, r := range rows {
+			b.WriteString(r + "\n")
 		}
 	}
 	m.cachedHistory = b.String()

@@ -32,9 +32,10 @@ with an error naming both directories. Two consequences to keep in mind:
 - Relative paths are resolved against the **root**, not the process directory.
   They coincide in a normal session, but resolving against the root is what stops
   `/cd` and the boundary from disagreeing.
-- The check is lexical. A symlink *inside* the tree is the known soft spot:
+- The check is lexical. A symlink *inside* the tree used to be the soft spot:
   `write_file` has to be allowed to create files that do not exist yet, so they
-  cannot be resolved first.
+  cannot be resolved first. The tools that open something now re-check the path
+  after following symlinks (see §4).
 
 ---
 
@@ -89,10 +90,7 @@ Always verify compilation and run `go test ./...` after any code modification.
 
 If you are asked to fix or improve `dmcode`, be aware of these known architectural pitfalls:
 
-- **Cancellation:** Turns run on `context.Background()` with no way to interrupt an active tool call or LLM streaming loop. `Esc` sets a flag the turn only checks between events.
-- **Model Switching Context Bug:** Switching models currently allocates a `newSessionID()`, wiping conversation history despite UI stating otherwise. The mode switch and `/cd` deliberately **do not** do this — they reuse the session service, and a regression test covers the tool set but not yet the session id.
-- **Render History Performance:** `renderHistory()` re-renders and re-wraps the entire history on every frame/token. Large sessions cause UI lag, and the markdown renderer made this more expensive. The cache is a single whole-transcript string, so it is invalidated on every streamed token; an incremental per-line cache is the obvious next step.
-- **Workspace boundary is lexical:** a symlink inside the workspace can still reach outside it. See §1.
+- **Workspace boundary is lexical at resolve time:** `tools.resolve` must decide before the file is touched, so a path that does not exist yet cannot be dereferenced. Tools that actually open something close the gap themselves: `read_file`, `edit_file` and `write_file` re-check the path after following symlinks (`withinRootAfterLinks`), `write_file` checks the deepest existing ancestor of the target directory, and `grep` skips entries that are symlinks rather than reading through them. See `internal/tools/tools.go` and `internal/tools/symlink_test.go`.
 
 ### Diagnosing "the TUI shows X but my test says otherwise"
 
@@ -110,6 +108,9 @@ apart in one line.
 
 Already fixed, and worth not regressing:
 
+- **Cancellation:** `startTurn` runs the turn on a `context.WithCancel` it stores in `m.cancelTurn`; `Esc` and `Ctrl+C` cancel the running LLM/tool call instead of killing the process.
+- **Model Switching Context Bug:** `switchModelCmd` reuses the session service and `modelSwitchedMsg` handling preserves `m.sessionID`, so a model switch keeps the conversation. A regression test covers it (`internal/ui/model_switch_test.go`).
+- **Render History Performance:** `renderHistory()` keeps a per-line cache (`m.cachedRows`, `cachedLine` in `internal/ui/ui.go`) that is index-aligned with the history. A streamed token re-renders only the line whose text changed; the cache is compared against a full rebuild in `internal/ui/render_cache_test.go`.
 - Monolithic `package main` — split into `internal/*` (see §1).
 - No path confinement — `tools.SetRoot`/`tools.resolve`.
 - `edit_file` rigidity — a whitespace-tolerant match was added.
