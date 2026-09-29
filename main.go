@@ -13,7 +13,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
+	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
+	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
@@ -24,6 +27,32 @@ import (
 // version is stamped at build time via -ldflags "-X main.version=..." (see the
 // Makefile). Release tags set it; a plain "go build" leaves it as "dev".
 var version = "dev"
+
+// subSend is how a delegation reaches the event loop. The tool is built before
+// the program exists, so the sender is attached afterwards; a turn cannot start
+// before that, so the nil is never seen by a running delegation.
+var (
+	subSendMu sync.RWMutex
+	subSend   func(dmagent.SubEvent)
+)
+
+// bindSubNotifier records the sender the UI offers once its program is up.
+func bindSubNotifier(send func(dmagent.SubEvent)) {
+	subSendMu.Lock()
+	defer subSendMu.Unlock()
+	subSend = send
+}
+
+// subNotifier is what the delegation tool calls. It is nil-safe for the same
+// reason the other notifiers are.
+func subNotifier(ev dmagent.SubEvent) {
+	subSendMu.RLock()
+	send := subSend
+	subSendMu.RUnlock()
+	if send != nil {
+		send(ev)
+	}
+}
 
 func main() {
 	showVersion := flag.Bool("version", false, "print the dmcode version and exit")
@@ -78,11 +107,33 @@ func run(dir string) error {
 		return err
 	}
 
+	// The question tool is built here and in both sets: a decision is not an
+	// edit, so plan mode may ask as well. The broker is handed to the UI, which
+	// registers the side that shows the overlay.
+	broker := ask.NewBroker(config.AskTimeout())
+	askTool, err := broker.MakeTool()
+	if err != nil {
+		return err
+	}
+	agentTools = append(agentTools, askTool)
+	readOnlyTools = append(readOnlyTools, askTool)
+
+	// The delegation tool is built against the read-only set: a sub-agent that
+	// could write would be a second agent editing the workspace while the user
+	// watches one turn. It goes in both sets because delegating research is
+	// exactly what plan mode needs.
+	subTool, err := dmagent.SubAgentTool(pool, readOnlyTools, subNotifier)
+	if err != nil {
+		return err
+	}
+	agentTools = append(agentTools, subTool)
+	readOnlyTools = append(readOnlyTools, subTool)
+
 	toolNames := tools.ToolNames(agentTools)
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, broker, bindSubNotifier)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to

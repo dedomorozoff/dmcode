@@ -18,10 +18,39 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
+
+	"github.com/dedomorozoff/dmcode/internal/todo"
 )
 
 const maxReadBytes = 256 * 1024
-const maxWalkFiles = 2000
+
+// Paging bounds for the tools that walk a tree. defaultPageItems is what a
+// caller gets without asking for a size; maxPageItems is the most one call may
+// return however it asks.
+const (
+	defaultPageItems = 200
+	maxPageItems     = 2000
+)
+
+// maxScannedItems bounds how many results a walk will collect before it gives
+// up counting. It exists to bound memory, not to keep responses small — a
+// caller paging through a result set never allocates more than one page, but
+// the scan behind it does have to remember every hit it counted.
+//
+// At a hundred thousand hits this is a pattern that matched nearly every line
+// of the repository, which is a request no agent makes on purpose. Past the
+// ceiling `total` reports what the scan saw, which is why the tool
+// descriptions call the ceiling out rather than leaving it implicit.
+const maxScannedItems = 100000
+
+// maxContextLines bounds grep's context_lines. Each match may drag 2n+1 lines
+// into the response, so an unbounded n turns one page into the whole file.
+const maxContextLines = 20
+
+// maxGrepRenderedLines bounds the rendered output of one grep page. Matches are
+// capped by the page size, but context is not, so this is the guard that keeps
+// a generous context setting from producing an unbounded answer.
+const maxGrepRenderedLines = 4000
 
 // root is the directory the session is scoped to. It is empty until SetRoot
 // runs, which is the "no boundary configured" case every tool tolerates: the
@@ -199,10 +228,17 @@ func checkPatternRoot(pattern string) error {
 	return err
 }
 
+// The argument structs below mark optional fields with `omitempty` because
+// jsonschema-go infers a struct's schema from its fields: without it every
+// field becomes a *required* one, and the model is told it must pass
+// limit_lines and recursive on every call. That is a contract it cannot honour
+// — it does not know the defaults — so it either invents values or repeats the
+// call. The zero value is the documented default for each of these.
+
 type readFileArgs struct {
 	Path   string `json:"path"`
-	Offset int    `json:"offset_line"`
-	Limit  int    `json:"limit_lines"`
+	Offset int    `json:"offset_line,omitempty"`
+	Limit  int    `json:"limit_lines,omitempty"`
 }
 type readFileResult struct {
 	Content    string `json:"content"`
@@ -325,7 +361,7 @@ type editFileArgs struct {
 	Path       string `json:"path"`
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
 type editFileResult struct {
 	Replacements int `json:"replacements"`
@@ -547,12 +583,68 @@ func isIgnoredDir(name string) bool {
 	}
 }
 
+// page is the shape by which every walk-based tool reports a slice of its
+// result set.
+//
+// It exists because a truncated result with no way to continue is worse than
+// no limit at all: the model is told "... (truncated)", has nothing to ask
+// for with, and the only thing left to try is the same call again — which
+// returns the same truncation, forever. NextOffset is the way out, so it is
+// carried on every result rather than left to the caller to compute.
+type page struct {
+	// Offset is where this page starts in the result set, and the value to
+	// pass back as `offset` to continue.
+	Offset int `json:"offset"`
+	// Returned is how many items this page holds.
+	Returned int `json:"returned"`
+	// Total is how many items exist in the whole set.
+	Total int `json:"total"`
+	// NextOffset is the offset of the following page. It is 0 when the set is
+	// exhausted, so Truncated is the field to branch on.
+	NextOffset int `json:"next_offset"`
+	// Truncated is true when items remain after this page.
+	Truncated bool `json:"truncated"`
+}
+
+// pageWindow resolves an offset/limit pair against a set of n items and
+// describes the window that came out, so a caller cannot report a page it did
+// not take.
+func pageWindow(n, offset, limit int) (start, end int, p page) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > n {
+		offset = n
+	}
+	// A limit of zero or less means "no preference", not "nothing": the model
+	// that did not think about paging should still get a page, not an empty
+	// answer it cannot interpret.
+	if limit <= 0 {
+		limit = defaultPageItems
+	}
+	if limit > maxPageItems {
+		limit = maxPageItems
+	}
+	end = offset + limit
+	if end > n {
+		end = n
+	}
+	p = page{Offset: offset, Returned: end - offset, Total: n, Truncated: end < n}
+	if p.Truncated {
+		p.NextOffset = end
+	}
+	return offset, end, p
+}
+
 type listDirArgs struct {
-	Path      string `json:"path"`
-	Recursive bool   `json:"recursive"`
+	Path      string `json:"path,omitempty"`
+	Recursive bool   `json:"recursive,omitempty"`
+	Offset    int    `json:"offset,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
 }
 type listDirResult struct {
 	Entries string `json:"entries"`
+	page
 }
 
 func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
@@ -560,7 +652,11 @@ func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
 	if err != nil {
 		return listDirResult{}, err
 	}
-	var b strings.Builder
+	// Both branches collect the whole set and then take a window out of it.
+	// Counting first is what makes `total` and `next_offset` trustworthy; the
+	// alternative — stop at the cap and say "truncated" — is what left the
+	// agent with nothing to ask for.
+	var items []string
 	if !in.Recursive {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -577,45 +673,66 @@ func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
 				continue
 			}
 			if e.IsDir() {
-				b.WriteString(e.Name() + "/\n")
+				items = append(items, e.Name()+"/")
 			} else {
-				b.WriteString(e.Name() + "\n")
+				items = append(items, e.Name())
 			}
 		}
-		return listDirResult{Entries: b.String()}, nil
-	}
-	count := 0
-	err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+	} else {
+		err = filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if isIgnoredDir(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if len(items) >= maxScannedItems {
+				return filepath.SkipAll
+			}
+			items = append(items, filepath.ToSlash(path))
+			return nil
+		})
 		if err != nil {
-			return nil
+			return listDirResult{}, err
 		}
-		if d.IsDir() {
-			if isIgnoredDir(d.Name()) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		count++
-		if count > maxWalkFiles {
-			b.WriteString("... (truncated)\n")
-			return filepath.SkipAll
-		}
-		b.WriteString(filepath.ToSlash(path) + "\n")
-		return nil
-	})
-	if err != nil {
-		return listDirResult{}, err
+		// Only the recursive walk is unordered, and a paginated set nobody can
+		// page predictably is a set that will be paged wrongly.
+		sort.Strings(items)
 	}
-	return listDirResult{Entries: b.String()}, nil
+
+	start, end, p := pageWindow(len(items), in.Offset, in.Limit)
+	return listDirResult{
+		Entries: strings.Join(items[start:end], "\n"),
+		page:    p,
+	}, nil
 }
 
 type grepArgs struct {
 	Pattern string `json:"pattern"`
-	Path    string `json:"path"`
-	Glob    string `json:"glob"`
+	Path    string `json:"path,omitempty"`
+	Glob    string `json:"glob,omitempty"`
+	// ContextLines asks for that many lines either side of each match. It is
+	// what makes grep an answer rather than a list of line numbers: reading
+	// what surrounds a hit is the whole point, and doing it one read_file per
+	// hit is a round trip per line.
+	ContextLines int `json:"context_lines,omitempty"`
+	Offset       int `json:"offset,omitempty"`
+	Limit        int `json:"limit,omitempty"`
 }
 type grepResult struct {
 	Matches string `json:"matches"`
+	page
+}
+
+// grepHit is a match found by the scan, kept as a position rather than as text:
+// the scan has to count every hit to report an honest total, but only the page
+// that comes back should ever be turned into a string.
+type grepHit struct {
+	path string // slash-separated, absolute
+	line int    // 1-based
 }
 
 func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
@@ -633,13 +750,11 @@ func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
 			return grepResult{}, fmt.Errorf("invalid glob: %w", err)
 		}
 	}
-	var b strings.Builder
-	count := 0
-	skip := false
+
+	context := min(max(in.ContextLines, 0), maxContextLines)
+
+	var hits []grepHit
 	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if skip {
-			return filepath.SkipAll
-		}
 		if err != nil {
 			return nil
 		}
@@ -667,11 +782,8 @@ func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
 		}
 		for i, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
 			if re.MatchString(line) {
-				count++
-				b.WriteString(fmt.Sprintf("%s:%d: %s\n", filepath.ToSlash(path), i+1, truncate(line, 200)))
-				if count >= 200 {
-					b.WriteString("... (more matches truncated)\n")
-					skip = true
+				hits = append(hits, grepHit{path: filepath.ToSlash(path), line: i + 1})
+				if len(hits) >= maxScannedItems {
 					return filepath.SkipAll
 				}
 			}
@@ -681,7 +793,78 @@ func grep(ctx agent.Context, in grepArgs) (grepResult, error) {
 	if err != nil {
 		return grepResult{}, err
 	}
-	return grepResult{Matches: b.String()}, nil
+	// The walk visits files in directory order, so two pages would not line up
+	// on the same hits. Sorting is what makes offset mean "the same thing" on
+	// every call.
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].path != hits[j].path {
+			return hits[i].path < hits[j].path
+		}
+		return hits[i].line < hits[j].line
+	})
+
+	start, end, p := pageWindow(len(hits), in.Offset, in.Limit)
+	matches := renderGrepPage(hits[start:end], context)
+	return grepResult{Matches: matches, page: p}, nil
+}
+
+// renderGrepPage writes the page's matches, each with its context window.
+//
+// Two details make the output readable rather than merely complete: a context
+// line already shown for a neighbouring match is not repeated, so overlapping
+// windows cost nothing; and context lines are marked with "-" where a match is
+// marked with ":", which is what GNU grep does and what a reader can pattern
+// on to tell what matched from what was merely nearby.
+func renderGrepPage(hits []grepHit, context int) string {
+	if len(hits) == 0 {
+		return ""
+	}
+	// Only the files this page actually touches are read, and each is read
+	// once however many of its lines the page covers.
+	loaded := map[string][]string{}
+	readFileLines := func(path string) []string {
+		if lines, ok := loaded[path]; ok {
+			return lines
+		}
+		var lines []string
+		if data, err := os.ReadFile(filepath.FromSlash(path)); err == nil {
+			lines = strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+		}
+		loaded[path] = lines
+		return lines
+	}
+
+	var b strings.Builder
+	// printed is the last 1-based line already emitted per file, so a window
+	// that overlaps the previous one starts where it left off.
+	printed := map[string]int{}
+	rendered := 0
+	for _, h := range hits {
+		lines := readFileLines(h.path)
+		if len(lines) == 0 {
+			continue
+		}
+		lo := max(h.line-1-context, 0)
+		hi := min(h.line+context, len(lines))
+		for i := lo; i < hi; i++ {
+			n := i + 1
+			if n <= printed[h.path] {
+				continue
+			}
+			if rendered >= maxGrepRenderedLines {
+				b.WriteString("... (output truncated: rerun with a smaller limit)\n")
+				return b.String()
+			}
+			printed[h.path] = n
+			rendered++
+			sep := "-"
+			if n == h.line {
+				sep = ":"
+			}
+			fmt.Fprintf(&b, "%s%s%d%s %s\n", h.path, sep, n, sep, truncate(lines[i], 200))
+		}
+	}
+	return b.String()
 }
 
 func globToRegex(g string) string {
@@ -740,28 +923,41 @@ func globToRegex(g string) string {
 
 type globArgs struct {
 	Pattern string `json:"pattern"`
+	Offset  int    `json:"offset,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
 }
 type globResult struct {
 	Files string `json:"files"`
+	page
 }
 
 func glob(ctx agent.Context, in globArgs) (globResult, error) {
 	pattern := in.Pattern
 	// The pattern's leading directory is a real path argument and must clear the
 	// workspace boundary, but the *result* stays relative: the agent reads these
-	// back to pass to read_file, and "."-relative output keeps that round trip
+	// back to pass to read_file, and "-relative" output keeps that round trip
 	// working whichever directory the session was started in.
 	if err := checkPatternRoot(pattern); err != nil {
 		return globResult{}, err
 	}
+	// Everything else in the package resolves against the workspace root, and
+	// glob used to be the exception: it walked the process directory. The two
+	// coincide only because /cd moves both, which is a coincidence to rely on
+	// rather than a property to depend on — and it is why this tool alone could
+	// not be tested without changing directory underneath it.
+	root, err := resolve("")
+	if err != nil {
+		return globResult{}, err
+	}
+	var matches []string
 	// If pattern contains ** or path separators, perform recursive walk matching
 	if strings.Contains(pattern, "**") || strings.Contains(pattern, "/") || strings.Contains(pattern, "\\") {
 		rePattern, err := regexp.Compile(globToRegex(filepath.ToSlash(pattern)))
 		if err != nil {
 			return globResult{}, fmt.Errorf("invalid glob pattern: %w", err)
 		}
-		var matches []string
-		err = filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		prefix := filepath.ToSlash(root) + "/"
+		err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -772,31 +968,33 @@ func glob(ctx agent.Context, in globArgs) (globResult, error) {
 				return nil
 			}
 			slashPath := filepath.ToSlash(path)
-			trimmed := strings.TrimPrefix(slashPath, "./")
-			if rePattern.MatchString(slashPath) || rePattern.MatchString(trimmed) {
-				matches = append(matches, slashPath)
+			relative := strings.TrimPrefix(slashPath, prefix)
+			// Matched against both spellings so "src/*.go" and "./src/*.go"
+			// behave the way the caller wrote them.
+			if rePattern.MatchString(relative) || rePattern.MatchString("./"+relative) {
+				if len(matches) >= maxScannedItems {
+					return filepath.SkipAll
+				}
+				matches = append(matches, relative)
 			}
 			return nil
 		})
 		if err != nil {
 			return globResult{}, err
 		}
-		sort.Strings(matches)
-		if len(matches) > maxWalkFiles {
-			matches = append(matches[:maxWalkFiles], "... (truncated)")
+	} else {
+		found, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pattern)))
+		if err != nil {
+			return globResult{}, err
 		}
-		return globResult{Files: strings.Join(matches, "\n")}, nil
-	}
-
-	matches, err := filepath.Glob(in.Pattern)
-	if err != nil {
-		return globResult{}, err
+		prefix := filepath.ToSlash(root) + "/"
+		for _, p := range found {
+			matches = append(matches, strings.TrimPrefix(filepath.ToSlash(p), prefix))
+		}
 	}
 	sort.Strings(matches)
-	if len(matches) > maxWalkFiles {
-		matches = append(matches[:maxWalkFiles], "... (truncated)")
-	}
-	return globResult{Files: strings.Join(matches, "\n")}, nil
+	start, end, p := pageWindow(len(matches), in.Offset, in.Limit)
+	return globResult{Files: strings.Join(matches[start:end], "\n"), page: p}, nil
 }
 
 func detectShell() (string, []string) {
@@ -834,8 +1032,8 @@ func detectShell() (string, []string) {
 
 type runCommandArgs struct {
 	Command  string `json:"command"`
-	WorkDir  string `json:"work_dir"`
-	TimeoutS int    `json:"timeout_seconds"`
+	WorkDir  string `json:"work_dir,omitempty"`
+	TimeoutS int    `json:"timeout_seconds,omitempty"`
 }
 type runCommandResult struct {
 	Output string `json:"output"`
@@ -885,6 +1083,17 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	return result, nil
 }
 
+// pagingNote is the part of the contract every walk-based tool shares, kept in
+// one place because it has to be said the same way in each description.
+//
+// The sentence that matters is the last one. A result that reports truncation
+// while offering no offset to continue from is the shape that produces a stuck
+// agent: there is nothing to do but call again, and calling again returns the
+// same truncation.
+const pagingNote = "Results are paginated: pass offset to continue where next_offset points, " +
+	"and limit to choose a page size (default 200, max 2000). " +
+	"When truncated is true, read the next page instead of repeating the same call."
+
 func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
@@ -909,21 +1118,21 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	listDirTool, err := functiontool.New(functiontool.Config{
 		Name:        "list_dir",
-		Description: "Lists directory entries, skipping hidden files. Set recursive=true to walk the tree.",
+		Description: pagingNote + "Lists one directory, subdirectories first. Directories are written with a trailing '/'. Dotfiles are listed; the .git, .idea, .vscode, node_modules and vendor directories are skipped. Set recursive=true to walk the whole tree and return file paths instead.",
 	}, listDir)
 	if err != nil {
 		return nil, err
 	}
 	grepTool, err := functiontool.New(functiontool.Config{
 		Name:        "grep",
-		Description: "Regex search across files under path (default cwd). Optional filename glob filter like '*.go'. Returns path:line: match.",
+		Description: pagingNote + "Regex search across files under path (default cwd). Optional filename glob filter like '*.go'. Set context_lines to also get the lines around each match, which is usually what you want instead of a bare line number. Returns path:line: match, with path-line- for context lines.",
 	}, grep)
 	if err != nil {
 		return nil, err
 	}
 	globTool2, err := functiontool.New(functiontool.Config{
 		Name:        "glob",
-		Description: "Lists files matching a shell glob pattern like 'src/*.go' or '*.md'.",
+		Description: pagingNote + "Lists files matching a shell glob pattern like 'src/*.go' or '*.md'. Supports ** for a recursive match.",
 	}, glob)
 	if err != nil {
 		return nil, err
@@ -935,18 +1144,36 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []tool.Tool{readFileTool, writeFileTool, editFileTool, listDirTool, grepTool, globTool2, runCommandTool}, nil
+	// The plan tools live in their own package but belong to the same set: the
+	// agent publishes a plan through them and the user reads it with /todo, so
+	// one without the other would show a user a plan the agent cannot keep.
+	todoTools, err := todo.Default.MakeTools()
+	if err != nil {
+		return nil, err
+	}
+	out := []tool.Tool{
+		readFileTool, writeFileTool, editFileTool, listDirTool,
+		grepTool, globTool2, runCommandTool,
+	}
+	return append(out, todoTools...), nil
 }
 
 // readOnlyNames are the tools a planning turn may use. run_command is absent on
 // purpose: a shell can write a file through >, Out-File, tee or touch, so
 // "read-only" cannot be enforced from the prompt alone and the tool is withheld
 // instead of trusted.
+//
+// The plan tools are here for the same reason they are in the full set: a plan
+// is a document, not an edit. Withholding them from plan mode would leave the
+// mode whose entire output is a plan unable to publish one.
 var readOnlyNames = map[string]bool{
-	"read_file": true,
-	"list_dir":  true,
-	"grep":      true,
-	"glob":      true,
+	"read_file":  true,
+	"list_dir":   true,
+	"grep":       true,
+	"glob":       true,
+	"todo_write": true,
+	"todo_set":   true,
+	"todo_read":  true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the
