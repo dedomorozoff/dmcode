@@ -477,7 +477,7 @@ func (m *uiModel) commands() []command {
 			m.mouseEnabled = !m.mouseEnabled
 			return nil
 		}},
-		{name: "new", desc: i18n.T("start a new session (the old one is kept)"), run: func(m *uiModel) tea.Cmd {
+		{name: "new", desc: i18n.T("start a new session, the old one is kept (ctrl+n)"), run: func(m *uiModel) tea.Cmd {
 			m.newSession("")
 			return nil
 		}},
@@ -495,9 +495,8 @@ func (m *uiModel) commands() []command {
 			m.rewind()
 			return nil
 		}},
-		{name: "clear", desc: i18n.T("clear the screen"), run: func(m *uiModel) tea.Cmd {
-			m.history = nil
-			m.historyDirty = true
+		{name: "clear", desc: i18n.T("clear the screen (ctrl+l)"), run: func(m *uiModel) tea.Cmd {
+			m.clearScreen()
 			return nil
 		}},
 		{name: "history", desc: i18n.T("recent prompts (up/down to recall)"), run: func(m *uiModel) tea.Cmd {
@@ -509,7 +508,7 @@ func (m *uiModel) commands() []command {
 		}},
 		{name: "help", desc: i18n.T("show the hotkeys"), run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
-				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
@@ -859,6 +858,21 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+z":
 			m.rewind()
 			return m, nil
+		case "ctrl+l":
+			// The terminal's own clear-screen, bound to the same thing: an
+			// empty prompt asking to be emptied is not a special case of
+			// /clear, it is the same request.
+			m.clearScreen()
+			return m, nil
+		case "ctrl+n":
+			// Refused mid-turn for the same reason /new is: the runner is
+			// mid-conversation on this session id, and pointing it at a new
+			// one underneath would strand the turn.
+			if m.busy {
+				return m, nil
+			}
+			m.newSession("")
+			return m, nil
 		case "pgup":
 			m.scrollBy(-10)
 			return m, nil
@@ -935,7 +949,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
@@ -950,9 +964,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.copyLastResponse()
 				return m, nil
 			case "/clear":
-				m.history = nil
-				m.historyDirty = true
-				m.followVP()
+				m.clearScreen()
 				return m, nil
 			case "/history":
 				m.showRecentPrompts()

@@ -21,11 +21,11 @@ var catalog = map[Lang]map[string]string{
 		"quit":                               "выход",
 
 		// Help and status line.
-		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply":                      "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ",
-		"esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll": "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл",
-		"mouse — select and copy text right in the terminal":                            "мышь — выделение и копирование текста прямо в терминале",
-		"ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop":     "ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена",
-		"describe the task… (/help for commands, esc to cancel)":                        "опиши задачу… (/help — команды, esc — отмена)",
+		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session": "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ · ctrl+l — очистить · ctrl+n — новая сессия",
+		"esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll":                    "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл",
+		"mouse — select and copy text right in the terminal":                                               "мышь — выделение и копирование текста прямо в терминале",
+		"ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop":                        "ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена",
+		"describe the task… (/help for commands, esc to cancel)":                                           "опиши задачу… (/help — команды, esc — отмена)",
 
 		// Session and turn state.
 		"— session reset —":                   "— сессия сброшена —",
@@ -196,7 +196,8 @@ var catalog = map[Lang]map[string]string{
 		"the message is back in the input — edit it and send again":    "сообщение вернулось в поле ввода — отредактируйте и отправьте снова",
 
 		// Sessions.
-		"start a new session (the old one is kept)":             "начать новую сессию (старая сохраняется)",
+		"start a new session, the old one is kept (ctrl+n)":     "начать новую сессию, старая сохраняется (ctrl+n)",
+		"clear the screen (ctrl+l)":                             "очистить экран (ctrl+l)",
 		"switch between saved sessions":                         "переключение между сохранёнными сессиями",
 		"open a session by id (/resume <id>)":                   "открыть сессию по id (/resume <id>)",
 		"usage: /resume <id> — /sessions lists the ids":         "usage: /resume <id> — список id в /sessions",

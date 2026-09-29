@@ -195,8 +195,11 @@ func (s *Service) Get(ctx context.Context, req *session.GetRequest) (*session.Ge
 	if err != nil {
 		return nil, err
 	}
-	events := filterEvents(st.events, req.NumRecentEvents, req.After)
-	return &session.GetResponse{Session: s.view(st, events)}, nil
+	var win *window
+	if req.NumRecentEvents > 0 || !req.After.IsZero() {
+		win = &window{numRecent: req.NumRecentEvents, after: req.After}
+	}
+	return &session.GetResponse{Session: s.view(st, win)}, nil
 }
 
 // List returns every session of this app and user, oldest first.
@@ -646,25 +649,40 @@ func (s *Service) load(appName, userID, sessionID string) (*stored, error) {
 	return st, nil
 }
 
-// view wraps a stored session as the read-only session.Session the ADK
-// interfaces expect.
+// view wraps a stored session as the session.Session the ADK interfaces
+// expect.
 //
-// Events come back as a copy of the slice and state as a copy of the map, for
-// the same reason the in-memory service does it: the runner mutates what it is
-// given, and a mutation that never reaches AppendEvent would leave the store
-// and the turn disagreeing about what was said.
-func (s *Service) view(st *stored, events []*session.Event) session.Session {
-	if events == nil {
-		events = st.events
-	}
+// The view is *live*: it points back at the store rather than carrying a
+// snapshot of the events. That is not an optimisation, it is the difference
+// between a working turn and an infinite one. The runner holds one session
+// object for the whole invocation, appends every event to it through
+// AppendEvent, and then reads the conversation back out of that same object to
+// build the next model request. A view frozen at Create time therefore shows
+// the model an empty conversation: it never sees the user's prompt, never sees
+// the result of the tool it just called, and repeats one identical tool call
+// until the turn is cut off.
+//
+// What this does not give up is the reason the package exists. The store still
+// owns the events, so RewindToLastUserMessage can cut them and a session switch
+// can point the runner at a different id; neither is expressible through the
+// read-only Session interface.
+func (s *Service) view(st *stored, win *window) session.Session {
 	return &viewSession{
+		svc:     s,
+		key:     key(st.appName, st.userID, st.id),
 		id:      st.id,
 		appName: st.appName,
 		userID:  st.userID,
-		updated: st.updated,
-		events:  slices.Clone(events),
-		state:   maps.Clone(st.state),
+		win:     win,
 	}
+}
+
+// window is the optional narrowing a Get may ask for. It is applied when the
+// events are read rather than baked in when the view is made, so a session that
+// is still growing reads correctly through a narrowed view too.
+type window struct {
+	numRecent int
+	after     time.Time
 }
 
 // filterEvents applies the two optional filters a Get may carry. Neither can be
@@ -756,22 +774,63 @@ func applyMeta(st *stored, m Meta) {
 	}
 }
 
-// viewSession is the read-only session.Session handed to the runner.
+// viewSession is the session.Session handed to the runner. It reads through to
+// the store on every call rather than holding what the session looked like when
+// it was made; see Service.view for why that is load-bearing.
+//
+// The identity fields are copied at construction so that answering them needs
+// no lock. AppendEvent asks for them while it already holds the write lock, and
+// sync.RWMutex is not reentrant — a view that took a read lock to report its own
+// id would deadlock the turn.
 type viewSession struct {
+	svc     *Service
+	key     string
 	id      string
 	appName string
 	userID  string
-	updated time.Time
-	events  []*session.Event
-	state   map[string]any
+	win     *window
 }
 
-func (v *viewSession) ID() string                { return v.id }
-func (v *viewSession) AppName() string           { return v.appName }
-func (v *viewSession) UserID() string            { return v.userID }
-func (v *viewSession) LastUpdateTime() time.Time { return v.updated }
-func (v *viewSession) Events() session.Events    { return eventList(v.events) }
-func (v *viewSession) State() session.State      { return viewState{state: v.state} }
+func (v *viewSession) ID() string      { return v.id }
+func (v *viewSession) AppName() string { return v.appName }
+func (v *viewSession) UserID() string  { return v.userID }
+
+func (v *viewSession) LastUpdateTime() time.Time {
+	v.svc.mu.RLock()
+	defer v.svc.mu.RUnlock()
+	if st := v.svc.sessions[v.key]; st != nil {
+		return st.updated
+	}
+	return time.Time{}
+}
+
+func (v *viewSession) Events() session.Events {
+	v.svc.mu.RLock()
+	defer v.svc.mu.RUnlock()
+	st := v.svc.sessions[v.key]
+	if st == nil {
+		return eventList(nil)
+	}
+	evs := st.events
+	if v.win != nil {
+		evs = filterEvents(evs, v.win.numRecent, v.win.after)
+	}
+	// Cloned so a caller holding the result is unaffected by the next append,
+	// which is what the ADK's own service guarantees by handing out a copy.
+	return eventList(slices.Clone(evs))
+}
+
+func (v *viewSession) State() session.State {
+	v.svc.mu.RLock()
+	defer v.svc.mu.RUnlock()
+	st := v.svc.sessions[v.key]
+	if st == nil {
+		return viewState{state: map[string]any{}}
+	}
+	// A copy, so a write that skips AppendEvent cannot exist in one turn's
+	// prompt and in no session.
+	return viewState{state: maps.Clone(st.state)}
+}
 
 type eventList []*session.Event
 

@@ -113,6 +113,22 @@ func (m *uiModel) dropLastPrompt() {
 	}
 }
 
+// clearScreen empties the transcript.
+//
+// It is one method because three things now do the same thing: /clear, the
+// palette entry and ctrl+l. They used to be written out separately, and the
+// palette's copy had already drifted — it forgot followVP, so clearing from
+// ctrl+p left the viewport scrolled past the bottom of an empty transcript.
+//
+// The session is deliberately untouched. "Clear the screen" is about what is
+// on it; wiping the conversation behind it is /new's job, and conflating the
+// two is how a user loses a transcript they meant to keep.
+func (m *uiModel) clearScreen() {
+	m.history = nil
+	m.historyDirty = true
+	m.followVP()
+}
+
 // newSession starts a fresh conversation and leaves the old one on disk.
 //
 // The previous session is not discarded: /sessions is what makes it reachable
