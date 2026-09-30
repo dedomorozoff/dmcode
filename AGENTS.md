@@ -240,3 +240,17 @@ Already fixed, and worth not regressing:
 - **A change tally outliving its session** — `newSession` calls
   `dmtools.ResetChanges()`, so a fresh session does not report edits the previous
   one made.
+- **A turn lost to the output limit** — a tool call the model could not finish
+  (`finish_reason=length` mid-JSON) ended the turn with `unexpected end of JSON
+  input`, which reads as a bug in dmcode. `internal/llm/truncate.go` types that
+  failure apart from a merely malformed one (`truncatedCallError`) and re-asks the
+  same endpoint once: the same conversation, a note saying the call was too big,
+  and — only where the endpoint reported its usage — a budget of twice what the
+  call had already used. Two rules keep it honest, and both are the ones the
+  failover pool already follows: nothing is re-asked once anything has been
+  yielded (the transcript cannot take back the first answer), and a request that
+  carries a budget of its own is left alone, which keeps the 64-token tool probe
+  in `verify.go` a single request. A second truncation is reported as the first
+  one, never as whatever the failed re-ask said. The cost is a second generation
+  on a local model, and it can still fail — a model that insists on one huge call
+  gets the truncation error, which is the honest answer.

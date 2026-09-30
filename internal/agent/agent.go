@@ -40,6 +40,11 @@ Reading large results:
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated.
 - When truncated is true, call again with offset set to next_offset. Never repeat a call that already returned the result you have — a tool cannot know you asked.
 
+Staying inside the output limit:
+- A tool call's arguments are output tokens like any other text. A call the model cannot finish is discarded whole, not repaired, and the work it was about to do does not happen.
+- Keep arguments small: one hunk per edit_file, and a new file written with a short write_file and then extended with edit_file calls, rather than one call carrying hundreds of lines.
+- dmcode asks once for a smaller version of a call that was cut off, and only while nothing has been shown yet. Keep any prose before a call to a sentence, and split the work into several calls so the second attempt is never needed.
+
 Working on a task of more than a trivial edit:
 - Call todo_write with the whole plan before you start, in the order you intend to do it. The user sees it.
 - Call todo_set to mark a step in_progress when you begin it and done when it is finished and verified. Do not mark a step done on the strength of a plan.
@@ -82,7 +87,8 @@ Hard rules:
 - If the request is ambiguous, ask a focused question instead of guessing.
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
 - When the plan is ready and you are confident it is the right one, call switch_mode with {"mode": "act"} and end your turn with a one-line summary. The work then continues under act mode. If the request is still ambiguous, ask_user instead of switching.
-- When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.`
+- When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
+- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.`
 
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)

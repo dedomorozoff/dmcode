@@ -319,8 +319,10 @@ func singleErrorSequence(err error) iter.Seq2[*model.LLMResponse, error] {
 // a malformed call surfaces as a turn error instead of an empty function call.
 // When the model ran out of output tokens the arguments are not malformed but
 // cut short, and the error has to say that: "unexpected end of JSON input"
-// alone sends the user hunting for a bug in dmcode that is not there.
-func toolCallsToParts(calls []chatToolCall, finish string) ([]*genai.Part, error) {
+// alone sends the user hunting for a bug in dmcode that is not there. That case
+// also carries a type, because it is the one malformed-looking failure the
+// client may ask about again.
+func toolCallsToParts(calls []chatToolCall, finish string, spent int) ([]*genai.Part, error) {
 	var parts []*genai.Part
 	for _, tc := range calls {
 		if tc.Function.Name == "" {
@@ -333,7 +335,7 @@ func toolCallsToParts(calls []chatToolCall, finish string) ([]*genai.Part, error
 		var args map[string]any
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
 			if finish == "length" {
-				return nil, fmt.Errorf("dmcode: вызов %s дошёл не целиком — модель упёрлась в лимит вывода (finish_reason=length): %w", tc.Function.Name, err)
+				return nil, &truncatedCallError{tool: tc.Function.Name, spent: spent, err: err}
 			}
 			return nil, fmt.Errorf("dmcode: не удалось разобрать аргументы вызова %s: %w", tc.Function.Name, err)
 		}
@@ -605,7 +607,7 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 			if stopped {
 				return
 			}
-			parts, err := toolCallsToParts(calls.snapshot(), finish)
+			parts, err := toolCallsToParts(calls.snapshot(), finish, completionTokens(usage))
 			if err != nil {
 				yield(nil, err)
 				return
@@ -699,10 +701,11 @@ func (m *chatModel) GenerateContent(ctx context.Context, req *model.LLMRequest, 
 	if err != nil {
 		return singleErrorSequence(err)
 	}
+	var call chatCall = m.generate
 	if stream {
-		return m.generateStream(ctx, body)
+		call = m.generateStream
 	}
-	return m.generate(ctx, body)
+	return withReAsk(ctx, body, call)
 }
 
 func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*model.LLMResponse, error] {
@@ -731,7 +734,7 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 			return
 		}
 		ch := parsed.Choices[0]
-		chunks, err := toolCallsToParts(ch.Message.ToolCalls, ch.FinishReason)
+		chunks, err := toolCallsToParts(ch.Message.ToolCalls, ch.FinishReason, completionTokens(parsed.Usage))
 		if err != nil {
 			yield(nil, err)
 			return
