@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -20,10 +21,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
+	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/llm"
+	"github.com/dedomorozoff/dmcode/internal/memsession"
+	"github.com/dedomorozoff/dmcode/internal/todo"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -228,6 +232,10 @@ type toolResMsg struct {
 }
 type turnDoneMsg struct{ err error }
 
+// retryMsg reports an endpoint about to be tried again, so the wait shows up
+// as itself rather than as a spinner that looks hung.
+type retryMsg struct{ ev llm.RetryEvent }
+
 type modelsListMsg struct {
 	Models []string
 	err    error
@@ -351,6 +359,34 @@ type uiModel struct {
 	mouseEnabled  bool
 	statusText    string
 
+	// sessions is the conversation store behind m.svc, kept as its own field
+	// because it can do what session.Service cannot: rewind a turn and list
+	// what earlier runs left behind. m.svc stays the interface the runner
+	// needs; this is the same object seen from the side that can change it.
+	sessions *memsession.Service
+	// sessionsList is the /sessions overlay. It lives on the model rather than
+	// being rebuilt per frame so the highlight and the filter survive redraws.
+	sessionsList sessionsState
+	// ask is the choice overlay, open while the agent waits for an answer.
+	// Answers to it go back over a channel, so the field also carries the
+	// pending reply.
+	ask askState
+	// askTimeout is how long a question waits before the recommended option is
+	// chosen for the user. Zero is off, which is the default.
+	askTimeout time.Duration
+	// pendingMode is a mode switch the agent asked for, applied between turns.
+	pendingMode pendingMode
+	// recoveredSessions counts the conversations found on disk at startup, so
+	// the welcome can say that /sessions has something in it instead of
+	// leaving the user to wonder whether their history survived.
+	recoveredSessions int
+	// promptMarks records, for every prompt sent, where its line sits in the
+	// transcript. ctrl+z cuts the transcript at the last mark and the session
+	// at the matching event, and the two have to agree — a transcript that kept
+	// a turn the model forgot would show the user a conversation that, from the
+	// model's side, never happened.
+	promptMarks []promptMark
+
 	// ctx outlives Init so a mode switch can rebuild the agent on the same
 	// context the session started on, instead of handing the pool a fresh
 	// background that nothing can cancel.
@@ -361,6 +397,19 @@ type uiModel struct {
 	cachedHistory string
 	cachedWidth   int
 	historyDirty  bool
+	cachedRows    []cachedLine
+	proxy         proxyState
+}
+
+// cachedLine holds the rendered rows of one history line. It is index-aligned
+// with m.history: a streamed token rewrites the text of the last agent line,
+// so on the next frame every earlier line still matches its cache entry and is
+// reused as-is, and only the line that changed is re-rendered and re-wrapped.
+type cachedLine struct {
+	kind  lineKind
+	text  string
+	width int
+	rows  []string
 }
 
 type modelPicker struct {
@@ -368,6 +417,16 @@ type modelPicker struct {
 	query    string
 	selected int
 	Models   []string
+}
+
+// promptMark ties a sent prompt to the transcript line it produced, so a rewind
+// can cut both the visible history and the model's memory at the same place.
+type promptMark struct {
+	text string
+	// idx is the length m.history had before the prompt's own line was
+	// appended, so the rewind truncates to exactly that and keeps everything
+	// above it — including the "session reset" notices /new leaves behind.
+	idx int
 }
 
 type paletteState struct {
@@ -430,6 +489,27 @@ type ggufEntry struct {
 	dir   bool
 }
 
+// proxyState drives the /proxy dialog: a short menu of actions, then a text
+// stage for whichever one needs a value. It exists because "set one with:
+// /proxy <url>" asked the user to remember a command syntax on top of the
+// proxy address itself, and to know in advance whether the address worked.
+const (
+	proxyPick = iota
+	proxyURL
+	proxyNo
+)
+
+type proxyState struct {
+	open     bool
+	stage    int
+	selected int
+	buf      string
+}
+
+func (s *proxyState) reset() {
+	*s = proxyState{}
+}
+
 type command struct {
 	name string
 	desc string
@@ -464,21 +544,26 @@ func (m *uiModel) commands() []command {
 			m.mouseEnabled = !m.mouseEnabled
 			return nil
 		}},
-		{name: "new", desc: i18n.T("start a new session"), run: func(m *uiModel) tea.Cmd {
-			m.sessionID = newSessionID()
-			m.turnCount = 0
-			m.toolCallCount = 0
-			// The change tally belongs to the session that produced it. Carrying
-			// the numbers into a fresh session would report edits the new one
-			// never made, against files it has never opened.
-			dmtools.ResetChanges()
-			m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
-			m.historyDirty = true
+		{name: "new", desc: i18n.T("start a new session, the old one is kept (ctrl+n)"), run: func(m *uiModel) tea.Cmd {
+			m.newSession("")
 			return nil
 		}},
-		{name: "clear", desc: i18n.T("clear the screen"), run: func(m *uiModel) tea.Cmd {
-			m.history = nil
-			m.historyDirty = true
+		{name: "sessions", desc: i18n.T("switch between saved sessions"), run: func(m *uiModel) tea.Cmd {
+			return m.openSessions()
+		}},
+		{name: "resume", desc: i18n.T("open a session by id (/resume <id>)"), run: func(m *uiModel) tea.Cmd {
+			// The palette runs a command with no argument, and this one is
+			// meaningless without an id — so it says how to use itself rather
+			// than opening a prompt the palette would immediately lose.
+			m.statusText = i18n.T("usage: /resume <id> — /sessions lists the ids")
+			return nil
+		}},
+		{name: "rewind", desc: i18n.T("undo the last message (ctrl+z)"), run: func(m *uiModel) tea.Cmd {
+			m.rewind()
+			return nil
+		}},
+		{name: "clear", desc: i18n.T("clear the screen (ctrl+l)"), run: func(m *uiModel) tea.Cmd {
+			m.clearScreen()
 			return nil
 		}},
 		{name: "history", desc: i18n.T("recent prompts (up/down to recall)"), run: func(m *uiModel) tea.Cmd {
@@ -490,11 +575,16 @@ func (m *uiModel) commands() []command {
 		}},
 		{name: "help", desc: i18n.T("show the hotkeys"), run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
-				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new, /clear, /quit"})
+				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
 			m.historyDirty = true
+			return nil
+		}},
+		{name: "todo", desc: i18n.T("show the current plan"), run: func(m *uiModel) tea.Cmd {
+			m.showPlan()
 			return nil
 		}},
 		{name: "tools", desc: i18n.T("list the available tools"), run: func(m *uiModel) tea.Cmd {
@@ -504,8 +594,8 @@ func (m *uiModel) commands() []command {
 			m.historyDirty = true
 			return nil
 		}},
-		{name: "proxy", desc: i18n.T("show or set the HTTP proxy"), run: func(m *uiModel) tea.Cmd {
-			return m.showProxy()
+		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
+			return m.openProxy()
 		}},
 		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
 	}
@@ -754,6 +844,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.setupKey(msg)
 			return model, cmd
 		}
+		if m.proxy.open {
+			model, cmd := m.proxyKey(msg)
+			return model, cmd
+		}
 		if m.palette.open {
 			model, cmd := m.paletteKey(msg)
 			return model, cmd
@@ -764,6 +858,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.lang.open {
 			model, cmd := m.langKey(msg)
+			return model, cmd
+		}
+		if m.sessionsList.open {
+			model, cmd := m.sessionsKey(msg)
+			return model, cmd
+		}
+		if m.ask.open {
+			model, cmd := m.askKey(msg)
 			return model, cmd
 		}
 		switch msg.String() {
@@ -824,6 +926,24 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+y":
 			m.copyLastResponse()
+			return m, nil
+		case "ctrl+z":
+			m.rewind()
+			return m, nil
+		case "ctrl+l":
+			// The terminal's own clear-screen, bound to the same thing: an
+			// empty prompt asking to be emptied is not a special case of
+			// /clear, it is the same request.
+			m.clearScreen()
+			return m, nil
+		case "ctrl+n":
+			// Refused mid-turn for the same reason /new is: the runner is
+			// mid-conversation on this session id, and pointing it at a new
+			// one underneath would strand the turn.
+			if m.busy {
+				return m, nil
+			}
+			m.newSession("")
 			return m, nil
 		case "pgup":
 			m.scrollBy(-10)
@@ -901,10 +1021,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply")},
+					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new, /clear, /quit"})
+				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -916,28 +1037,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.copyLastResponse()
 				return m, nil
 			case "/clear":
-				m.history = nil
-				m.historyDirty = true
-				m.followVP()
+				m.clearScreen()
 				return m, nil
 			case "/history":
 				m.showRecentPrompts()
 				m.followVP()
 				return m, nil
 			case "/proxy":
-				return m, m.applyProxy(text)
-			case "/new":
-				m.sessionID = newSessionID()
-				m.turnCount = 0
-				m.toolCallCount = 0
-				// The change tally belongs to the session that produced it. Carrying
-				// the numbers into a fresh session would report edits the new one
-				// never made, against files it has never opened.
-				dmtools.ResetChanges()
-				m.history = append(m.history, line{kindSys, i18n.T("— session reset —")})
-				m.historyDirty = true
-				m.followVP()
-				return m, nil
+				return m, m.openProxy()
 			case "/sidebar":
 				m.showSidebar = !m.showSidebar
 				m.layout()
@@ -957,11 +1064,76 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+			// The commands below take an argument or are matched by prefix, so
+			// they are tested outside the switch: a case here would have to
+			// enumerate every spelling, and "/new" would swallow "/newer" as
+			// itself.
+			//
+			// The old session is kept rather than wiped: /sessions brings it
+			// back, so a /new pressed by mistake costs one keypress, not a
+			// conversation.
+			if arg, ok := strings.CutPrefix(text, "/new"); ok {
+				if m.busy {
+					return m, nil
+				}
+				m.newSession(strings.TrimSpace(arg))
+				return m, nil
+			}
+			if arg, ok := strings.CutPrefix(text, "/todo"); ok {
+				// "todo clear" empties the list; anything after the word is a
+				// subcommand this build does not have, and saying so beats
+				// silently printing the plan.
+				if strings.TrimSpace(arg) == "clear" {
+					todo.Default.Clear()
+					m.statusText = i18n.T("the plan is empty")
+					m.history = append(m.history, line{kindSys, i18n.T("the plan is empty")})
+					m.historyDirty = true
+					m.followVP()
+					return m, nil
+				}
+				if rest := strings.TrimSpace(arg); rest != "" {
+					m.statusText = i18n.T("usage: /todo, /todo clear")
+					return m, nil
+				}
+				m.showPlan()
+				return m, nil
+			}
+			if _, ok := strings.CutPrefix(text, "/rewind"); ok {
+				if m.busy {
+					return m, nil
+				}
+				m.rewind()
+				return m, nil
+			}
+			if arg, ok := strings.CutPrefix(text, "/resume"); ok {
+				if m.busy {
+					return m, nil
+				}
+				m.switchSession(strings.TrimSpace(arg))
+				return m, nil
+			}
+			if _, ok := strings.CutPrefix(text, "/sessions"); ok {
+				if m.busy {
+					return m, nil
+				}
+				return m, m.openSessions()
+			}
 			if arg, ok := strings.CutPrefix(text, "/mode"); ok {
 				if m.busy {
 					return m, nil
 				}
 				return m, m.setMode(strings.TrimPrefix(strings.TrimSpace(arg), " "))
+			}
+			// /proxy keeps the typed fast paths (a URL, "off", "no <list>") working
+			// beside the dialog, so a user who knows the syntax is not forced through
+			// a menu. The prefix has to be cut here: handing the whole line to
+			// applyProxy would try to parse "/proxy" as part of the address.
+			if arg, ok := strings.CutPrefix(text, "/proxy"); ok {
+				arg = strings.TrimSpace(arg)
+				if arg == "" {
+					return m, m.openProxy()
+				}
+				return m, m.applyProxy(arg)
 			}
 			if arg, ok := strings.CutPrefix(text, "/cd"); ok {
 				if m.busy {
@@ -1001,6 +1173,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.switchModelCmd(id)
 			}
+			// The mark goes in before the prompt's own line, so a rewind cuts the
+			// transcript exactly above it and the prompt line goes with it.
+			m.promptMarks = append(m.promptMarks, promptMark{text: text, idx: len(m.history)})
 			m.history = append(m.history, line{kindUser, text})
 			m.historyDirty = true
 			m.busy = true
@@ -1057,6 +1232,25 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.historyDirty = true
+	case askRequestMsg:
+		return m, m.openAsk(msg)
+	case askTickMsg:
+		return m, m.handleAskTick()
+	case subAgentMsg:
+		m.handleSubAgent(msg.ev)
+	case retryMsg:
+		// The wait is announced rather than swallowed: a silent pause after an
+		// error reads as a hang, and a user who cannot tell a retry from a
+		// freeze stops trusting the spinner.
+		m.statusText = fmt.Sprintf(i18n.T("retrying in %s — %s"),
+			formatWait(msg.ev.Wait), msg.ev.Reason)
+		m.history = append(m.history, line{kindSys, fmt.Sprintf(
+			"↻ %s %d/%d %s %s",
+			i18n.T("attempt"),
+			msg.ev.Attempt, msg.ev.Max,
+			i18n.T("in"), formatWait(msg.ev.Wait),
+		)})
+		m.historyDirty = true
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
@@ -1070,6 +1264,15 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.statusText = i18n.T("ready")
+		}
+		// A session file that could not be written is reported here, at the end
+		// of the turn that hit it, rather than from inside the write.
+		m.reportStoreProblem()
+		// A mode switch the agent asked for lands here and nowhere else: this is
+		// the one point where the runner is not mid-turn, so the agent can be
+		// rebuilt around a different instrument set without stranding a call.
+		if cmd := m.applyPendingMode(); cmd != nil {
+			return m, cmd
 		}
 		m.history = append(m.history, line{kindSys, ""})
 		m.historyDirty = true
@@ -1286,7 +1489,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 	}
 	m.suggestFor = text
 
-	if m.palette.open || m.picker.open || m.setup.open {
+	if m.palette.open || m.picker.open || m.setup.open || m.proxy.open {
 		return
 	}
 	if m.busy || !strings.HasPrefix(text, "/") {
@@ -1412,17 +1615,47 @@ func (m *uiModel) renderHistory() string {
 	if !m.historyDirty && m.cachedWidth == w && m.cachedHistory != "" {
 		return m.cachedHistory
 	}
+	// A replacement in applyAgentText can shrink the slice; the cache must not
+	// keep entries for lines that no longer exist.
+	if len(m.cachedRows) > len(m.history) {
+		m.cachedRows = m.cachedRows[:len(m.history)]
+	}
 	var b strings.Builder
-	for _, l := range m.history {
-		row := m.rowStyle(l.kind)
-		for _, r := range rowRows(l.text, w, row) {
-			// A markdown row arrives already styled by the renderer; wrapping it
-			// again would nest the escapes and break the width accounting.
-			if row.markdown {
-				b.WriteString(r + "\n")
-				continue
+	for i := range m.history {
+		l := &m.history[i]
+		var rows []string
+		hit := false
+		if i < len(m.cachedRows) {
+			c := &m.cachedRows[i]
+			if c.kind == l.kind && c.text == l.text && c.width == w {
+				rows, hit = c.rows, true
 			}
-			b.WriteString(row.style.Render(r) + "\n")
+		}
+		if !hit {
+			row := m.rowStyle(l.kind)
+			for _, r := range rowRows(l.text, w, row) {
+				// A markdown row arrives already styled by the renderer; wrapping it
+				// again would nest the escapes and break the width accounting.
+				if row.markdown {
+					rows = append(rows, r)
+					continue
+				}
+				rows = append(rows, row.style.Render(r))
+			}
+			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rows}
+			if i < len(m.cachedRows) {
+				m.cachedRows[i] = entry
+			} else if i == len(m.cachedRows) {
+				m.cachedRows = append(m.cachedRows, entry)
+			} else {
+				for len(m.cachedRows) < i {
+					m.cachedRows = append(m.cachedRows, cachedLine{})
+				}
+				m.cachedRows = append(m.cachedRows, entry)
+			}
+		}
+		for _, r := range rows {
+			b.WriteString(r + "\n")
 		}
 	}
 	m.cachedHistory = b.String()
@@ -1668,6 +1901,161 @@ func dropEnvKey(lines []string, key string) []string {
 	return out
 }
 
+// openProxy opens the /proxy dialog. The menu is the entry point a user who
+// does not remember the command syntax can still use; the typed forms
+// ("/proxy <url>", "/proxy off", "/proxy no <list>") stay beside it.
+func (m *uiModel) openProxy() tea.Cmd {
+	m.proxy.reset()
+	m.proxy.open = true
+	m.statusText = "/proxy"
+	return nil
+}
+
+// proxyKey walks the /proxy dialog. Escape backs out of any stage without
+// touching the live setting, and a value that does not validate keeps the
+// field on screen with the reason in the status bar — a closed dialog and an
+// error line in the transcript would leave the user retyping from scratch.
+func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.proxy.reset()
+		m.statusText = i18n.T("cancelled")
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	}
+
+	switch m.proxy.stage {
+	case proxyPick:
+		switch msg.String() {
+		case "up":
+			if m.proxy.selected > 0 {
+				m.proxy.selected--
+			}
+			return m, nil
+		case "down":
+			if m.proxy.selected < proxyActionCount-1 {
+				m.proxy.selected++
+			}
+			return m, nil
+		case "enter":
+			switch m.proxy.selected {
+			case 0:
+				m.proxy.stage = proxyURL
+				m.proxy.buf = ""
+			case 1:
+				m.proxy.stage = proxyNo
+				m.proxy.buf = ""
+			case 2:
+				m.proxy.reset()
+				return m, m.applyProxy("off")
+			default:
+				m.proxy.reset()
+				return m, m.showProxy()
+			}
+			return m, nil
+		}
+
+	case proxyURL:
+		switch msg.String() {
+		case "enter":
+			val := strings.TrimSpace(m.proxy.buf)
+			if val == "" {
+				m.statusText = i18n.T("no proxy address entered")
+				return m, nil
+			}
+			if err := config.ValidateProxy(val); err != nil {
+				m.statusText = err.Error()
+				return m, nil
+			}
+			m.proxy.reset()
+			return m, m.applyProxy(val)
+		case "backspace":
+			if r := []rune(m.proxy.buf); len(r) > 0 {
+				m.proxy.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+
+	case proxyNo:
+		switch msg.String() {
+		case "enter":
+			// An empty field is meaningful here: it clears the bypass list.
+			val := strings.TrimSpace(m.proxy.buf)
+			m.proxy.reset()
+			return m, m.applyProxy("no " + val)
+		case "backspace":
+			if r := []rune(m.proxy.buf); len(r) > 0 {
+				m.proxy.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
+	}
+
+	if len(msg.Text) > 0 && m.proxy.stage != proxyPick {
+		m.proxy.buf += msg.Text
+	}
+	return m, nil
+}
+
+// proxyActionCount is the number of rows the /proxy menu offers. It lives in
+// one place because the key handler and the renderer must agree on it.
+const proxyActionCount = 4
+
+func (m *uiModel) proxyBox() string {
+	inner := m.floatingWidth() - panelBorder
+
+	// The current state rides in the title: a user reopening the dialog should
+	// not have to remember whether a proxy is already on, or which one.
+	now := i18n.T("direct connection")
+	if s := config.CurrentProxy(); s.Active {
+		now = s.HTTPS
+		if now == "" {
+			now = s.HTTP
+		}
+	}
+	title := i18n.T("? proxy — now: ") + truncate(now, max(inner-ansi.StringWidth(i18n.T("? proxy — now: ")), 1))
+
+	switch m.proxy.stage {
+	case proxyURL:
+		rows := [][]string{
+			{styleHint.Render(i18n.T("proxy address, e.g. 127.0.0.1:8080 or socks5://host:1080"))},
+			{styleHint.Render(i18n.T("enter — apply, esc — cancel"))},
+			{m.proxy.buf + "█"},
+		}
+		return m.floatingPanel(title, "", rows, 0)
+
+	case proxyNo:
+		rows := [][]string{
+			{styleHint.Render(i18n.T("hosts that skip the proxy, comma-separated — e.g. localhost,10.0.0.0/8"))},
+			{styleHint.Render(i18n.T("an empty field clears the list · enter — apply · esc — cancel"))},
+			{m.proxy.buf + "█"},
+		}
+		return m.floatingPanel(title, "", rows, 0)
+	}
+
+	entries := make([][]string, 0, proxyActionCount)
+	for i, label := range []string{
+		i18n.T("turn the proxy on or change it"),
+		i18n.T("edit the bypass list (NO_PROXY)"),
+		i18n.T("turn the proxy off"),
+		i18n.T("show the current settings and test them"),
+	} {
+		marker, style := "   ", lipgloss.NewStyle()
+		if i == m.proxy.selected {
+			marker, style = " ? ", styleTool
+		}
+		rows := wrapIndent(label, inner, marker, "     ")
+		if i != m.proxy.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, m.proxy.selected)
+}
+
 func (m *uiModel) showProxy() tea.Cmd {
 	s := config.CurrentProxy()
 	add := func(s string) {
@@ -1746,10 +2134,14 @@ func (m *uiModel) pasteTarget() *string {
 		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
+	case m.proxy.open && m.proxy.stage != proxyPick:
+		return &m.proxy.buf
 	case m.picker.open:
 		return &m.picker.query
 	case m.palette.open:
 		return &m.palette.query
+	case m.sessionsList.open:
+		return &m.sessionsList.query
 	}
 	return nil
 }
@@ -2310,7 +2702,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	svc, ts := m.svc, m.activeTools()
 	return func() tea.Msg {
 		ctx := context.Background()
-		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.mode.agentMode())
+		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode())
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -2337,6 +2729,32 @@ func (m *uiModel) switchNotifier() func(llm.SwitchEvent) {
 			return
 		}
 		prog.Send(failoverMsg{from: ev.From, to: ev.To, reason: ev.Reason})
+	}
+}
+
+// formatWait renders a pause in the coarsest unit that still says something
+// useful: "800ms", "3s", "1m 20s". A backoff shown as "1.734s" reads as noise.
+func formatWait(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	return fmt.Sprintf("%dm %ds", int(d.Minutes()), int(d.Seconds())%60)
+}
+
+// retryNotifier tells the event loop that an endpoint is about to be asked
+// again. It is nil-safe for the same reason switchNotifier is: the program is
+// wired in after the agent is built, and nothing can retry before the first
+// turn runs.
+func (m *uiModel) retryNotifier() func(llm.RetryEvent) {
+	prog := m.prog
+	return func(ev llm.RetryEvent) {
+		if prog == nil {
+			return
+		}
+		prog.Send(retryMsg{ev})
 	}
 }
 
@@ -2486,10 +2904,16 @@ func (m *uiModel) sidebarView(height int) string {
 	}
 	b.WriteString("\n")
 
+	// The plan sits between the tools and the hotkeys: it is state the turn is
+	// producing, where the tool list is fixed and the hotkeys never change.
+	m.planSidebar(row, value)
+	b.WriteString("\n")
+
 	row(styleSidebarLabel, i18n.T("HOTKEYS"))
 	row(styleHint, i18n.T(" ctrl+p  commands"))
 	row(styleHint, i18n.T(" ctrl+b  hide panel"))
 	row(styleHint, i18n.T(" ctrl+y  copy reply"))
+	row(styleHint, i18n.T(" ctrl+z  undo last message"))
 	row(styleHint, i18n.T(" tab     plan/act"))
 	row(styleHint, i18n.T(" esc     stop turn"))
 	row(styleHint, i18n.T(" pgup/dn scroll"))
@@ -3012,7 +3436,7 @@ func (m *uiModel) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView(i18n.T("dmcode is starting…"))
 	}
-	if m.picker.open || m.palette.open || m.setup.open || m.lang.open {
+	if m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.proxy.open || m.sessionsList.open || m.ask.open {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
@@ -3021,6 +3445,12 @@ func (m *uiModel) View() tea.View {
 			box = m.setupBox()
 		case m.lang.open:
 			box = m.langBox()
+		case m.proxy.open:
+			box = m.proxyBox()
+		case m.sessionsList.open:
+			box = m.sessionsBox()
+		case m.ask.open:
+			box = m.askBox()
 		}
 		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
 		v.AltScreen = true
@@ -3063,7 +3493,44 @@ func (m *uiModel) View() tea.View {
 	return v
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string) error {
+// AskPrompt wires the broker to the event loop, so a question raised by the
+// agent reaches the overlay and the answer travels back.
+//
+// The reply channel is buffered: the tool's goroutine may have been released
+// already — by a cancelled turn, or by the timer on the broker's side — and a
+// send that waited for a reader that had gone would block the event loop rather
+// than the turn it belonged to.
+func (m *uiModel) AskPrompt() func(ask.Request) <-chan ask.Answer {
+	prog := m.prog
+	return func(req ask.Request) <-chan ask.Answer {
+		if prog == nil {
+			return nil
+		}
+		reply := make(chan ask.Answer, 1)
+		wait := m.askWait(req)
+		prog.Send(askRequestMsg{req: req, reply: reply, wait: wait})
+		return reply
+	}
+}
+
+// askWait is how long this question gets: the request's own timeout if it named
+// one, otherwise the session's setting.
+func (m *uiModel) askWait(req ask.Request) time.Duration {
+	if req.TimeoutSeconds > 0 {
+		return time.Duration(req.TimeoutSeconds) * time.Second
+	}
+	return m.askTimeout
+}
+
+// bindSub hands RunTUI a way to attach a sender to the delegation tool, which is
+// built in main before the program exists. RunTUI calls it with a function that
+// reaches the event loop; main stores it inside the tool's notifier.
+//
+// This is a binder rather than a sender for one reason: main has no *tea.Program
+// and cannot get one, so it cannot send anything itself. A plain
+// func(SubEvent) parameter could only be called by main, which would be the
+// wrong direction.
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent))) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -3073,9 +3540,16 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames)
 	m.pool = pool
 	m.ctx = ctx
+	m.askTimeout = config.AskTimeout()
 
 	prog := tea.NewProgram(m)
 	m.prog = prog
+	if broker != nil {
+		broker.SetPromptFunc(m.AskPrompt())
+	}
+	if bindSub != nil {
+		bindSub(func(ev dmagent.SubEvent) { prog.Send(subAgentMsg{ev}) })
+	}
 
 	r, err := m.newRunner(pool, agentTools, modeAct)
 	if err != nil {
@@ -3093,12 +3567,35 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 // it is what preserves the conversation, so flipping to plan and back does not
 // cost the user the context they had built up.
 func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMode) (*runner.Runner, error) {
-	a, err := dmagent.BuildPooledAgent(m.ctx, pool, ts, m.switchNotifier(), mode.agentMode())
+	// The mode switch is added here, for plan mode only, rather than in the
+	// tool set main builds: it needs this model's hook and it needs to know the
+	// current mode, and neither exists where those sets are assembled. In act
+	// mode it is simply absent, so the agent cannot ask for the mode it is
+	// already in — which is also what stops plan↔act oscillation.
+	if mode == modePlan {
+		switchTool, err := dmagent.SwitchModeTool(dmagent.ModePlan, m.setModeRequest)
+		if err != nil {
+			return nil, err
+		}
+		ts = append(slices.Clone(ts), switchTool)
+	}
+	a, err := dmagent.BuildPooledAgent(m.ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), mode.agentMode())
 	if err != nil {
 		return nil, err
 	}
 	if m.svc == nil {
-		m.svc = session.InMemoryService()
+		m.sessions = memsession.NewPersistent(config.SessionsDir())
+		m.sessions.SetIdentity("dmcode", "user")
+		// Registering what earlier runs left behind is what makes /sessions
+		// able to offer them: only the header of each file is read, so this
+		// costs a short read per saved conversation, not its events.
+		if n := m.sessions.Discover(m.ctx, "dmcode", "user"); n > 0 {
+			m.recoveredSessions = n
+		}
+		if id, err := m.sessions.Ensure(m.ctx, "dmcode", "user", m.sessionID); err == nil {
+			m.sessionID = id
+		}
+		m.svc = m.sessions
 	}
 	return runner.New(runner.Config{
 		AppName:           "dmcode",

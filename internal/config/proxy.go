@@ -61,19 +61,13 @@ func CurrentProxy() ProxySettings {
 	return s
 }
 
-// SetProxy points the process at proxy, or clears the setting when proxy is
-// empty, "off" or "none".
-//
-// A value with no scheme is assumed to be http, since that is what a bare
-// "host:port" almost always means and refusing it would be pedantry. The URL is
-// parsed before anything is set: a typo must not leave the program half
-// configured, pointing at a proxy that does not exist.
-func SetProxy(proxy string) error {
+// ValidateProxy checks that proxy would be accepted as a proxy address without
+// changing anything. It is what the /proxy dialog runs while the field is still
+// on screen, so a typo is rejected before the wizard closes — the same rules
+// SetProxy applies, kept in one place so the two can never disagree.
+func ValidateProxy(proxy string) error {
 	p := strings.TrimSpace(proxy)
 	if p == "" || strings.EqualFold(p, "off") || strings.EqualFold(p, "none") {
-		for _, k := range []string{EnvHTTPProxy, EnvHTTPSProxy, "http_proxy", "https_proxy"} {
-			os.Unsetenv(k)
-		}
 		return nil
 	}
 	if !strings.Contains(p, "://") {
@@ -86,6 +80,31 @@ func SetProxy(proxy string) error {
 	if u.Host == "" {
 		return fmt.Errorf("%s has no host", proxy)
 	}
+	return nil
+}
+
+// SetProxy points the process at proxy, or clears the setting when proxy is
+// empty, "off" or "none".
+//
+// A value with no scheme is assumed to be http, since that is what a bare
+// "host:port" almost always means and refusing it would be pedantry. The URL is
+// parsed before anything is set: a typo must not leave the program half
+// configured, pointing at a proxy that does not exist.
+func SetProxy(proxy string) error {
+	if err := ValidateProxy(proxy); err != nil {
+		return err
+	}
+	p := strings.TrimSpace(proxy)
+	if p == "" || strings.EqualFold(p, "off") || strings.EqualFold(p, "none") {
+		for _, k := range []string{EnvHTTPProxy, EnvHTTPSProxy, "http_proxy", "https_proxy"} {
+			os.Unsetenv(k)
+		}
+		return nil
+	}
+	if !strings.Contains(p, "://") {
+		p = "http://" + p
+	}
+	u, _ := url.Parse(p)
 	for _, k := range []string{EnvHTTPProxy, EnvHTTPSProxy, "http_proxy", "https_proxy"} {
 		if err := os.Setenv(k, u.String()); err != nil {
 			return err

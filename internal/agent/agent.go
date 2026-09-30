@@ -34,7 +34,22 @@ Safety & Coding Guidelines:
 - Match existing project code conventions, indentations, and naming styles.
 - Be careful with path separators and line endings on Windows/Unix.
 - Keep edits minimal and focused on the user's explicit request. Do not introduce unnecessary refactoring or style drift.
-- Never delete or modify files outside the workspace unless explicitly instructed.`
+- Never delete or modify files outside the workspace unless explicitly instructed.
+
+Reading large results:
+- list_dir, grep and glob return one page at a time along with total, next_offset and truncated.
+- When truncated is true, call again with offset set to next_offset. Never repeat a call that already returned the result you have — a tool cannot know you asked.
+
+Working on a task of more than a trivial edit:
+- Call todo_write with the whole plan before you start, in the order you intend to do it. The user sees it.
+- Call todo_set to mark a step in_progress when you begin it and done when it is finished and verified. Do not mark a step done on the strength of a plan.
+- Call todo_write again whenever the plan changes; a step left out of the list is one you no longer intend to take.
+- Keep steps to one line each. A plan is read at a glance, and a paragraph per step is not a plan.
+
+Asking the user:
+- When a decision changes what you would do — a library to adopt, an approach to take, a file to rewrite — call ask_user with two to five concrete options and mark the one you recommend.
+- Do not ask about anything you can answer by reading the code, the config or the tests. A question the repository already answers is a wasted interruption.
+- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.`
 
 // Mode selects which instructions the agent runs under. The tool set is chosen
 // alongside it by the caller, so the two always agree about what the agent may
@@ -65,6 +80,8 @@ Hard rules:
 - You have no write tools. Do not attempt edits, and do not ask the user to run commands for you.
 - Do not claim a change was made. Describe what should change, not what you did.
 - If the request is ambiguous, ask a focused question instead of guessing.
+- list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
+- When the plan is ready and you are confident it is the right one, call switch_mode with {"mode": "act"} and end your turn with a one-line summary. The work then continues under act mode. If the request is still ambiguous, ask_user instead of switching.
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.`
 
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool) (agent.Agent, error) {
@@ -100,8 +117,12 @@ func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode) (agent.Agent, error)
 
 // BuildPooledAgent builds the agent over a failover pool, so a 429 or a dropped
 // connection on the configured endpoint does not end the turn.
-func BuildPooledAgent(ctx context.Context, pool []config.Provider, ts []tool.Tool, onSwitch func(llm.SwitchEvent), mode Mode) (agent.Agent, error) {
-	m, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, onSwitch)
+//
+// onRetry may be nil. It is reported separately from onSwitch because the two
+// answer different questions: a switch says the answer is coming from somewhere
+// else, a retry says the same endpoint is being asked again after a pause.
+func BuildPooledAgent(ctx context.Context, pool []config.Provider, ts []tool.Tool, onSwitch func(llm.SwitchEvent), onRetry func(llm.RetryEvent), mode Mode) (agent.Agent, error) {
+	m, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, onSwitch, onRetry)
 	if err != nil {
 		return nil, err
 	}
