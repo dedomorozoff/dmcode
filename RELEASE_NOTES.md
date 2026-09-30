@@ -1,15 +1,17 @@
 # dmCode v0.1.5
 
 A conversation you can take back: undo the last message, keep several sessions and
-switch between them, and let the agent plan, ask and delegate.
+switch between them, and let the agent plan, ask and delegate. Plus a model on
+your own disk, an agent that stops repeating itself, and a turn that survives
+the model running out of room.
 
 > ### ⚠️ Unverified — work in progress
 >
 > **Everything in this section compiles and passes unit tests, but none of it has
 > been verified end to end.** There are no live checks against a real endpoint,
 > and no TUI session has been driven through a rewind, a session switch, a
-> question overlay, a plan or a delegation. Treat this as a branch under
-> construction: test it, expect rough edges, and please report what breaks.
+> question overlay, a plan or a delegation. Test it, expect rough edges, and
+> please report what breaks.
 >
 > What that leaves unproven: that a rewind cuts the model's memory and not just
 > the screen; that a session read back after a restart is what a live turn would
@@ -20,9 +22,8 @@ switch between them, and let the agent plan, ask and delegate.
 > Known gaps, stated plainly: a rewind does not rewrite
 > `~/.dmcode/history.jsonl`, so an undone prompt is still offered by `/history`
 > until the next start. Cancellation reaches the context but not the process, so
-> a running `run_command` finishes on its own schedule. The workspace boundary is
-> lexical, and a symlink inside the directory can still reach outside it. Session
-> file permissions cannot be asserted on Windows, so that test skips there.
+> a running `run_command` finishes on its own schedule. Session file permissions
+> cannot be asserted on Windows, so that test skips there.
 
 ## Install
 
@@ -48,7 +49,7 @@ Or with Go 1.26+:
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-## What's new since v0.1.3
+## What's new since v0.1.4
 
 ### `ctrl+z` undoes a message
 
@@ -133,6 +134,106 @@ Plan mode also keeps the non-write tools it now needs: `todo_*`, `ask_user`,
 `sub_agent` and `switch_mode`. A mode whose entire output is a plan should not be
 unable to publish one.
 
+### A model on your own disk
+
+Point dmcode at a `.gguf` file and it starts [llama.cpp](https://github.com/ggml-org/llama.cpp)'s
+`llama-server` itself, on a free loopback port, waits for the model to load and
+talks to it over the ordinary OpenAI-compatible wire. No API key, no manual
+server, no second terminal.
+
+The file is picked in `/setup` - typed, or browsed on disk - or named in
+`DMCODE_GGUF`. Everything the server needs goes in `DMCODE_LLAMA_ARGS`
+(`--ctx-size 16384`, `--n-gpu-layers 99`, and so on; it is llama-server's own
+command line, split on spaces). The binary is looked for in the project's
+`llama/` folder, then `DMCODE_LLAMA_SERVER`, then `PATH`, and it is shut down
+again when dmcode exits. A model that fails to load never blocks startup:
+detection falls through to the usual providers.
+
+A local model is also the one most likely to run out of room mid-sentence, so
+this release is a good place to read the next item.
+
+### A turn the model ran out of room for
+
+A tool call the model could not finish used to end the whole turn with
+`unexpected end of JSON input`, which reads as a bug in dmcode rather than as a
+limit: the output cap had cut the call's arguments off part way through, the
+call was discarded, and the work it was about to do simply did not happen.
+
+Now the endpoint is asked the same question **once more**, with a note that the
+call was too big and that nothing was applied, and - where the endpoint reports
+its token usage - a budget of twice what the call had already used. A few rules
+keep that from being a surprise:
+
+- the re-ask only happens while nothing has been shown yet, so an answer is
+  never printed twice;
+- a request that carries a budget of its own is left alone, which keeps the
+  tool-support probe a single fast request;
+- if the second attempt is cut off too, you get the original truncation, not
+  whatever the failed re-ask had to say.
+
+The agent is also told to keep arguments small in the first place: one hunk per
+`edit_file`, a new file written short and then extended, and no essay before a
+call. A model that insists on one huge call still gets the error - that is the
+honest answer, and the message now names the token count it hit.
+
+### The agent stops repeating itself
+
+Three separate faults let a single word send the model into an endless
+`list_dir` - the same call, byte for byte, until the runner cut the turn off.
+Any one of them alone would have been survivable.
+
+- The session store handed the runner a snapshot taken at `Create`, while the
+  runner reads the conversation back out of the object `AppendEvent` mutates.
+  Every request therefore carried an empty conversation: the model never saw
+  your prompt, never saw the result of the tool it had just called, and had no
+  way to know it had already asked.
+- Tool arguments were never put on the wire. `functiontool` fills in
+  `ParametersJsonSchema` and leaves `Parameters` nil, and the converter read
+  the nil one, so all eleven tools were advertised as `{"type":"object"}` - as
+  taking no arguments at all.
+- The optional arguments of `read_file`, `edit_file`, `list_dir`, `grep` and
+  `run_command` were all marked required by the schema generator, so the model
+  was asked to pass `limit_lines` and `recursive` on every call - a contract it
+  cannot honour, because it does not know the defaults.
+
+With the loop gone, the reason it could spin is gone too. `list_dir`, `grep`
+and `glob` used to report truncation as a bare `... (truncated)` with no way to
+ask for the rest, so the only move left was to repeat the call and get the same
+truncation. All three now return one page at a time with `offset`, `returned`,
+`total`, `next_offset` and `truncated`; `grep` grows `context_lines`, which is
+what makes it an answer rather than a list of line numbers.
+
+### Only the line that changed is redrawn
+
+Streaming used to rebuild and re-wrap the whole transcript on every token. The
+render cache is now per-line, index-aligned with the history, so a token
+re-renders only the line whose text changed - and a test compares the cache
+against a full rebuild, so it cannot quietly stop matching.
+
+### Symlinks no longer walk out of the project
+
+The workspace boundary was a lexical check on the path as written, which left a
+soft spot: a symlink *inside* the tree could reach files outside it. `write_file`
+has to be allowed to create files that do not exist yet, so nothing can be
+resolved before it is touched - the tools that actually open something re-check
+the path after dereferencing links, `write_file` checks the deepest existing
+ancestor of the target directory, and `grep` skips symlinked entries instead of
+reading through them.
+
+### `/proxy` is a dialog
+
+Setting a proxy used to drop the argument before using it, so `/proxy <url>`
+tried to parse the word `/proxy` as part of the address and `/proxy off` fell
+through to the agent as a chat message. It is now a dialog in the style of
+`/setup`: the current state is in the title, the menu covers turning it on,
+editing the bypass list, turning it off and testing the connection, and an
+invalid address keeps the field on screen with the reason in the status bar.
+The typed fast paths still work beside it.
+
+`ctrl+l` clears the screen and `ctrl+n` starts a session, both through one
+method - the palette's copy of that behaviour had already drifted, and three
+implementations of one action is three chances to drift again.
+
 ### Configuration
 
 | Variable | What it does |
@@ -141,6 +242,10 @@ unable to publish one.
 | `DMCODE_LLM_RETRIES` | attempts per endpoint before failing over (default 3) |
 | `DMCODE_LLM_RETRY_MS` | first backoff pause, doubling after that (default 500) |
 | `DMCODE_ASK_TIMEOUT` | seconds before a question picks its own answer (default 0 — off) |
+| `DMCODE_GGUF` | a `.gguf` model to run through a self-started `llama-server` |
+| `DMCODE_LLAMA_ARGS` | that server's own flags, e.g. `--ctx-size 16384` (default none) |
+| `DMCODE_LLAMA_SERVER` | where `llama-server` is, if not in `llama/` or on `PATH` |
+| `DMCODE_GGUF_STARTUP` | seconds to wait for a model to load (default 180) |
 
 # dmCode v0.1.4
 
