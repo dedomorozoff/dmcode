@@ -175,14 +175,85 @@ func TestSetupVarsNeverEmpty(t *testing.T) {
 		}
 	}
 	// Options with no preset endpoint (the custom one, Unsloth) collect their
-	// URL and model at run time, so they must not try to persist a guess.
+	// URL and model at run time, so they must not try to persist a guess. The
+	// GGUF option is the same until its path is typed in.
 	for _, o := range SetupOptions() {
-		if o.BaseURL != "" {
+		if o.BaseURL != "" || o.GGUF {
 			continue
 		}
 		if got := SetupVars(o, "k"); len(got) != 2 {
 			t.Errorf("%q wrote %v before the endpoint was even known", o.Label, got)
 		}
+	}
+}
+
+// The GGUF option is keyless, so it must never write a key, and it persists
+// the file path only once the wizard actually collected one.
+func TestSetupVarsForGGUF(t *testing.T) {
+	var gguf *SetupOption
+	for i := range SetupOptions() {
+		if SetupOptions()[i].GGUF {
+			gguf = &SetupOptions()[i]
+		}
+	}
+	if gguf == nil {
+		t.Fatal("no GGUF option in SetupOptions")
+	}
+	if got := SetupVars(*gguf, ""); len(got) != 1 || got["DMCODE_API"] != APIChat {
+		t.Errorf("a GGUF option with no path yet wrote %v, want only the wire", got)
+	}
+	withPath := *gguf
+	withPath.GGUFPath = `C:\models\qwen2.5-coder-7b-q4_k_m.gguf`
+	vars := SetupVars(withPath, "")
+	if vars["DMCODE_GGUF"] != withPath.GGUFPath {
+		t.Errorf("SetupVars lost the .gguf path: %v", vars)
+	}
+	for k := range vars {
+		if strings.Contains(k, "KEY") || strings.Contains(k, "TOKEN") {
+			t.Errorf("the GGUF option wrote key variable %s", k)
+		}
+	}
+}
+
+// The stdin wizard must walk a GGUF pick through the path prompt and persist
+// both the file and the optional server binary, still without any key.
+func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
+	inTempDir(t)
+	idx := 0
+	for i, o := range SetupOptions() {
+		if o.GGUF {
+			idx = i + 1
+		}
+	}
+	in := fmt.Sprintf("%d\nmodels\\qwen.gguf\n\n", idx)
+	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
+		t.Fatalf("the GGUF wizard rejected a complete answer: %v", err)
+	}
+	data, _ := os.ReadFile(".env")
+	text := string(data)
+	for _, want := range []string{
+		"DMCODE_GGUF=models\\qwen.gguf",
+		"DMCODE_API=chat",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "DMCODE_LLAMA_SERVER") {
+		t.Errorf("an empty binary answer wrote a variable:\n%s", text)
+	}
+	if strings.Contains(text, "API_KEY") {
+		t.Errorf("a key was written for the GGUF option:\n%s", text)
+	}
+
+	// A named binary has to be recorded too.
+	in = fmt.Sprintf("%d\nmodels\\qwen.gguf\nC:\\llama\\llama-server.exe\n", idx)
+	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
+		t.Fatalf("the GGUF wizard rejected a named binary: %v", err)
+	}
+	data, _ = os.ReadFile(".env")
+	if !strings.Contains(string(data), "DMCODE_LLAMA_SERVER=C:\\llama\\llama-server.exe") {
+		t.Errorf("the binary was not persisted:\n%s", data)
 	}
 }
 

@@ -12,3 +12,9 @@ dist/
 # IDE settings.
 .idea/
 .kilo/
+
+# llama.cpp binaries kept in the project (llama-server is picked up from ./llama).
+llama/
+
+# Local model weights are gigabytes and never belong in history.
+model/*.gguf

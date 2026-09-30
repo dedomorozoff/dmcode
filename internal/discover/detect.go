@@ -62,6 +62,19 @@ func keyedPresets() []keyedPreset {
 // rather than the first hit, so a host that dies mid-session has somewhere to
 // go without a fresh probe.
 func DetectProviders() ([]config.Provider, error) {
+	// A .gguf file named by DMCODE_GGUF is the most explicit configuration
+	// there is — the user pointed at a specific file — so it outranks even a
+	// configured endpoint. A failed launch is reported but not fatal: the
+	// ordinary detection below still finds something to run on.
+	if os.Getenv("DMCODE_GGUF") != "" {
+		fmt.Fprintln(os.Stderr, "dmcode: "+i18n.T("starting llama-server for the GGUF model…"))
+		if p, err := LaunchGGUF(); err == nil {
+			return []config.Provider{p}, nil
+		} else {
+			fmt.Fprintln(os.Stderr, "dmcode: gguf: "+err.Error())
+		}
+	}
+
 	BaseURL := os.Getenv("OPENAI_BASE_URL")
 	APIKey := os.Getenv("OPENAI_API_KEY")
 	modelName := os.Getenv("DMCODE_MODEL")

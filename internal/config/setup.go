@@ -22,6 +22,12 @@ type SetupOption struct {
 	// reasoning is written as DMCODE_REASONING_EFFORT when the endpoint needs a
 	// capped reasoning channel (see provider.reasoning).
 	Reasoning string
+	// GGUF marks the option that runs a local .gguf file through llama.cpp's
+	// llama-server. There is no endpoint until the file is loaded, so the path
+	// is collected by the wizard (both of them) into GGUFPath, and dmcode
+	// starts the server itself.
+	GGUF     bool
+	GGUFPath string
 }
 
 // setupOptions is the single list of providers offered by both the interactive
@@ -35,6 +41,7 @@ func SetupOptions() []SetupOption {
 		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low"},
 		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true},
 		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
+		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true},
 		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
 		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "nemotron-3-ultra-free", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
@@ -49,10 +56,20 @@ func SetupOptions() []SetupOption {
 	}
 }
 
-// setupVars is the .env content a chosen option produces. It is shared by the
+// SetupVars is the .env content a chosen option produces. It is shared by the
 // stdin wizard and /setup so the two cannot write different things.
+//
+// The GGUF option persists only what is already known: the path arrives from
+// the wizard's prompt and lands in the map through opt.GGUFPath. Everything
+// else — the port, the model id — is decided when the server actually starts.
 func SetupVars(opt SetupOption, key string) map[string]string {
 	vars := map[string]string{"DMCODE_API": opt.API}
+	if opt.GGUF {
+		if opt.GGUFPath != "" {
+			vars["DMCODE_GGUF"] = opt.GGUFPath
+		}
+		return vars
+	}
 	if opt.BaseURL != "" {
 		vars["OPENAI_BASE_URL"] = opt.BaseURL
 		vars["DMCODE_MODEL"] = opt.Model
@@ -111,8 +128,28 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 		}
 	}
 
-	// Custom endpoint: ask for the extra fields it needs.
-	if opt.BaseURL == "" {
+	// A GGUF file needs a path, not a key: llama-server runs it locally and
+	// needs no credentials. The binary question has an enter-only default so a
+	// user with llama-server on PATH can skip it.
+	// extras carries what the prompts below collect that SetupVars cannot know.
+	extras := map[string]string{}
+	if opt.GGUF {
+		fmt.Fprint(w, i18n.T("path to the .gguf file: "))
+		pathLine, err := reader.ReadString('\n')
+		if err != nil && strings.TrimSpace(pathLine) == "" {
+			return fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
+		}
+		opt.GGUFPath = strings.TrimSpace(pathLine)
+		if opt.GGUFPath == "" {
+			return fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
+		}
+		fmt.Fprint(w, i18n.T("llama-server binary (enter = llama-server on PATH): "))
+		binLine, _ := reader.ReadString('\n')
+		bin := strings.TrimSpace(binLine)
+		if bin != "" {
+			extras["DMCODE_LLAMA_SERVER"] = bin
+		}
+	} else if opt.BaseURL == "" {
 		fmt.Fprint(w, i18n.T("base URL (e.g. http://localhost:1234/v1): "))
 		urlLine, _ := reader.ReadString('\n')
 		opt.BaseURL = strings.TrimSpace(urlLine)
@@ -128,6 +165,9 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	}
 
 	vars := SetupVars(opt, key)
+	for k, v := range extras {
+		vars[k] = v
+	}
 	// Merge rather than truncate: picking a free provider must not delete a real
 	// key the user already had for a paid one.
 	existing, err := ReadDotEnv()

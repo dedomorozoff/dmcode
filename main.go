@@ -66,6 +66,8 @@ func run(dir string) error {
 	if err != nil {
 		return err
 	}
+	// A GGUF session runs its own llama-server; it must not outlive the TUI.
+	defer discover.StopGGUF()
 
 	agentTools, err := tools.MakeTools()
 	if err != nil {

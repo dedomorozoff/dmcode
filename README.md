@@ -69,6 +69,27 @@ DMCODE_MODEL=qwen/qwen3-32b
 Worth knowing: `DMCODE_API=chat` forces the `/chat/completions` wire, and
 `DMCODE_REASONING_EFFORT=low` caps the reasoning channel.
 
+### Running a GGUF model
+
+dmCode can start llama.cpp's `llama-server` itself, on any `.gguf` file you
+already have. Pick **Local GGUF** in `/setup` and either type the path or press
+`ctrl+o` to browse the disk for the file, or put it in `.env` by hand:
+
+```bash
+DMCODE_GGUF=C:\models\qwen2.5-coder-7b-q4_k_m.gguf
+DMCODE_LLAMA_SERVER=llama-server            # or the full path to the binary
+DMCODE_LLAMA_ARGS=--ctx-size 16384 -ngl 99  # llama-server flags, passed as-is
+```
+
+The binary is looked up in this order: `DMCODE_LLAMA_SERVER`, then
+`./llama/llama-server(.exe)` — unpack a llama.cpp release into the project's
+`llama/` folder and it is found with no configuration — then `PATH`.
+
+The server is started on a free loopback port, dmCode waits for the model to
+load (up to `DMCODE_GGUF_STARTUP` seconds, 180 by default) and then talks to it
+over the ordinary OpenAI-compatible wire; the server's own output goes to
+`~/.dmcode/llama-server.log`, and the process is taken down when dmCode exits.
+
 ## Interface language
 
 English by default. Run `/lang` to switch to Russian; the choice is saved to

@@ -79,7 +79,19 @@ var catalog = map[Lang]map[string]string{
 		"? provider key":                                   "? ключ провайдера",
 		"? custom endpoint":                                "? свой endpoint",
 		"? model":                                          "? модель",
-		"? provider  (* — current, enter — select, esc — cancel)": "? провайдер  (* — текущий, enter — выбрать, esc — отмена)",
+		"? gguf file":                                      "? gguf файл",
+		"? gguf file — enter opens, esc back":              "? gguf файл — enter открыть, esc назад",
+		"path to the .gguf file — ctrl+o or enter on empty browses the disk":                 "путь к .gguf файлу — ctrl+o или enter на пустом поле откроет выбор файла",
+		"could not read the directory: ":                                                     "не удалось прочитать каталог: ",
+		"llama.cpp GGUF":                                                                     "llama.cpp GGUF",
+		"starting the GGUF model — llama-server is loading it…":                              "запускаю GGUF модель — llama-server её загружает…",
+		"starting llama-server on ":                                                          "запускаю llama-server на ",
+		"this can take a while — the model loads before the first reply":                     "это может занять время — модель загрузится до первого ответа",
+		"llama-server did not start: ":                                                       "llama-server не запустился: ",
+		".env keeps DMCODE_GGUF — fix DMCODE_LLAMA_SERVER or the path, then restart dmcode.": ".env хранит DMCODE_GGUF — исправь DMCODE_LLAMA_SERVER или путь и перезапусти dmcode.",
+		"GGUF model is up: ":                                                                 "GGUF модель поднялась: ",
+		"starting llama-server for the GGUF model…":                                          "запускаю llama-server для GGUF модели…",
+		"? provider  (* — current, enter — select, esc — cancel)":                            "? провайдер  (* — текущий, enter — выбрать, esc — отмена)",
 
 		// Clipboard.
 		"nothing to copy":                              "нет ответа для копирования",
@@ -164,6 +176,7 @@ var catalog = map[Lang]map[string]string{
 		"NVIDIA NIM — free credits, many coding models":                              "NVIDIA NIM — бесплатные кредиты, много кодовых моделей",
 		"SambaNova — free key, fast OpenAI-compatible":                               "SambaNova — бесплатный ключ, быстрый OpenAI-совместимый",
 		"Hugging Face — free credits, OpenAI-compatible router":                      "Hugging Face — бесплатные кредиты, OpenAI-совместимый роутер",
+		"Local GGUF — llama.cpp runs a .gguf file (llama-server)":                    "Локально — GGUF: llama.cpp запускает .gguf файл (llama-server)",
 		"Your own OpenAI-compatible endpoint":                                        "Свой OpenAI-совместимый endpoint",
 
 		// Setup wizard (stdin).
@@ -173,7 +186,10 @@ var catalog = map[Lang]map[string]string{
 		"Get a key here: ": "Возьми ключ тут: ",
 		"key: ":            "ключ: ",
 		"base URL (e.g. http://localhost:1234/v1): ": "base URL (напр. http://localhost:1234/v1): ",
-		"model: ": "модель: ",
+		"model: ":                  "модель: ",
+		"path to the .gguf file: ": "путь к .gguf файлу: ",
+		"llama-server binary (enter = llama-server on PATH): ": "бинарник llama-server (enter = llama-server из PATH): ",
+		"no path to the .gguf file entered":                    "путь к .gguf файлу не введён",
 		"run Ollama locally (ollama serve) or LM Studio — dmcode picks it up on its own; or run /setup inside the app and choose a provider": "подними локально Ollama (ollama serve) или LM Studio — dmcode подхватит её сам; либо выполни /setup в приложении и выбери провайдера",
 
 		// Errors and provider labels.

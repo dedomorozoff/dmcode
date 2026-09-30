@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -20,6 +21,7 @@ import (
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/llm"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
@@ -256,6 +258,18 @@ type setupCheckMsg struct {
 	forced bool
 }
 
+// launchGGUF is the launcher behind the GGUF setup option. It is a variable so
+// the tests can stand in for a model load, which no test wants to wait out.
+var launchGGUF = discover.LaunchGGUF
+
+// ggufReadyMsg reports the outcome of starting llama-server on the .gguf file
+// the user named in /setup. The load happens off the event loop because it can
+// take minutes; the message is how the loop learns it is done.
+type ggufReadyMsg struct {
+	prov config.Provider
+	err  error
+}
+
 // failoverMsg announces that a turn moved to another endpoint. It is a message
 // rather than a direct history append because the switch happens on the turn
 // goroutine, and only Update may touch the transcript.
@@ -375,6 +389,7 @@ const (
 	setupKey
 	setupURL
 	setupModel
+	setupGGUF
 )
 
 // setupState drives /setup inside the TUI. The wizard used to exist only as a
@@ -390,10 +405,29 @@ type setupState struct {
 	// It is only set after a failed check, so a bad key is still one retry away
 	// from being saved on the first attempt.
 	force bool
+	// gguf is the file browser behind the GGUF path prompt. reset() wipes it
+	// along with the wizard, so a cancelled /setup never leaves the dialog up.
+	gguf ggufPickState
 }
 
 func (s *setupState) reset() {
 	*s = setupState{}
+}
+
+// ggufPickState browses the disk for a .gguf file while /setup sits at the
+// path prompt. Directories are entered with enter; a .gguf file is picked the
+// same way. It lives inside setupState so a wizard reset closes it too.
+type ggufPickState struct {
+	open     bool
+	dir      string
+	entries  []ggufEntry
+	selected int
+}
+
+type ggufEntry struct {
+	label string // what the row shows; directories carry a trailing separator
+	path  string // absolute path used for navigation and for the final pick
+	dir   bool
 }
 
 type command struct {
@@ -1003,6 +1037,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case setupCheckMsg:
 		cmd := m.handleSetupCheck(msg)
+		return m, cmd
+	case ggufReadyMsg:
+		cmd := m.handleGGUFReady(msg)
 		return m, cmd
 	case modelSwitchedMsg:
 		if msg.err != nil {
@@ -1703,6 +1740,10 @@ func (m *uiModel) pasteTarget() *string {
 	// checked first so it cannot be shadowed by a stale overlay flag.
 	case m.lang.open:
 		return nil
+	// The GGUF browser has no text field either; a paste aimed at it must not
+	// silently land in the path prompt underneath.
+	case m.setup.open && m.setup.gguf.open:
+		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
 	case m.picker.open:
@@ -1747,6 +1788,11 @@ func oneLine(s string) string {
 
 func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	opts := config.SetupOptions()
+	// The file browser owns the keyboard first: its esc must close only the
+	// dialog and hand the user back to the path prompt, not tear down /setup.
+	if m.setup.gguf.open {
+		return m.ggufPickKey(msg)
+	}
 	switch msg.String() {
 	case "esc":
 		m.setup.reset()
@@ -1772,6 +1818,9 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.setup.opt = opts[m.setup.selected]
 			switch {
+			case m.setup.opt.GGUF:
+				m.setup.stage = setupGGUF
+				m.setup.buf = ""
 			case !m.setup.opt.Keyless:
 				m.setup.stage = setupKey
 				m.setup.buf = ""
@@ -1832,10 +1881,135 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case setupGGUF:
+		switch msg.String() {
+		case "ctrl+o":
+			m.openGGUFPick()
+			return m, nil
+		case "enter":
+			if strings.TrimSpace(m.setup.buf) == "" {
+				// An empty path is the common case: the disk is where the models
+				// live, so open the browser instead of demanding a typed path.
+				m.openGGUFPick()
+				return m, nil
+			}
+			m.setup.opt.GGUFPath = strings.TrimSpace(m.setup.buf)
+			return m, m.applySetup()
+		case "backspace":
+			if r := []rune(m.setup.buf); len(r) > 0 {
+				m.setup.buf = string(r[:len(r)-1])
+			}
+			return m, nil
+		}
 	}
 
 	if len(msg.Text) > 0 && m.setup.stage != setupPick {
 		m.setup.buf += msg.Text
+	}
+	return m, nil
+}
+
+// openGGUFPick brings up the file browser at a sensible starting point: the
+// typed path when it points at something real, the process directory otherwise.
+func (m *uiModel) openGGUFPick() {
+	start, err := os.Getwd()
+	if err != nil || start == "" {
+		start = "."
+	}
+	if b := strings.TrimSpace(m.setup.buf); b != "" {
+		if st, serr := os.Stat(b); serr == nil {
+			if st.IsDir() {
+				start = b
+			} else {
+				start = filepath.Dir(b)
+			}
+		}
+	}
+	m.setup.gguf = ggufPickState{open: true}
+	m.loadGGUFDir(start)
+}
+
+// loadGGUFDir reads dir into the browser. A failed read keeps the old listing
+// on screen and reports the reason, so a permission problem does not blank out
+// the dialog the user is mid-navigation in.
+func (m *uiModel) loadGGUFDir(dir string) {
+	entries, err := readGGUFDir(dir)
+	if err != nil {
+		m.statusText = i18n.T("could not read the directory: ") + err.Error()
+		return
+	}
+	m.setup.gguf.dir = dir
+	m.setup.gguf.entries = entries
+	m.setup.gguf.selected = 0
+}
+
+// readGGUFDir lists what the browser shows: the parent first, then
+// subdirectories, then the .gguf files of this directory. Everything else —
+// dotfiles, stray weights, READMEs — is noise for this one purpose.
+func readGGUFDir(dir string) ([]ggufEntry, error) {
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	sep := string(filepath.Separator)
+	var dirs, files []ggufEntry
+	for _, e := range dirEntries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		if e.IsDir() {
+			dirs = append(dirs, ggufEntry{label: name + sep, path: path, dir: true})
+			continue
+		}
+		if strings.EqualFold(filepath.Ext(name), ".gguf") {
+			files = append(files, ggufEntry{label: name, path: path})
+		}
+	}
+	slices.SortFunc(dirs, func(a, b ggufEntry) int { return strings.Compare(a.label, b.label) })
+	slices.SortFunc(files, func(a, b ggufEntry) int { return strings.Compare(a.label, b.label) })
+	var out []ggufEntry
+	if parent := filepath.Dir(dir); parent != dir {
+		out = append(out, ggufEntry{label: ".." + sep, path: parent, dir: true})
+	}
+	return append(append(out, dirs...), files...), nil
+}
+
+// ggufPickKey drives the file browser. enter descends into a directory or
+// picks a .gguf file — the pick flows straight into applySetup, the same path
+// a hand-typed path takes. esc backs out to the path prompt with the typed
+// text intact.
+func (m *uiModel) ggufPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	p := &m.setup.gguf
+	switch msg.String() {
+	case "esc":
+		p.open = false
+		return m, nil
+	case "up":
+		if p.selected > 0 {
+			p.selected--
+		}
+		return m, nil
+	case "down":
+		if p.selected < len(p.entries)-1 {
+			p.selected++
+		}
+		return m, nil
+	case "enter":
+		if p.selected >= len(p.entries) {
+			return m, nil
+		}
+		e := p.entries[p.selected]
+		if e.dir {
+			m.loadGGUFDir(e.path)
+			return m, nil
+		}
+		p.open = false
+		m.setup.opt.GGUFPath = e.path
+		m.setup.buf = e.path
+		return m, m.applySetup()
 	}
 	return m, nil
 }
@@ -1852,6 +2026,13 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *uiModel) applySetup() tea.Cmd {
 	opt := m.setup.opt
 	vars := config.SetupVars(opt, strings.TrimSpace(m.setup.buf))
+
+	// A GGUF file is saved straight away and the server starts in the
+	// background: loading a model takes minutes, and the event loop must not
+	// wait on it. The provider arrives later, with ggufReadyMsg.
+	if opt.GGUF {
+		return m.startGGUFSetup(vars)
+	}
 
 	// Keyless endpoints were just chosen from a list known to work, and a
 	// custom endpoint may not implement /models at all, so only a provider with
@@ -1900,17 +2081,14 @@ func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 	return nil
 }
 
-// commitSetup writes the validated provider to .env and rebuilds the agent.
-func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) tea.Cmd {
+// persistSetup writes the provider to .env and exports it for this process.
+// The status it returns is already translated; err is the underlying cause.
+func (m *uiModel) persistSetup(vars map[string]string) (string, error) {
 	// Merge into any existing .env rather than replacing it, so a key the user
 	// set for another provider is not silently dropped.
 	lines, err := config.ReadDotEnv()
 	if err != nil {
-		m.statusText = i18n.T("error reading .env")
-		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
-		m.setup.reset()
-		m.historyDirty = true
-		return nil
+		return i18n.T("error reading .env"), err
 	}
 	merged, _ := config.MergeDotEnv(lines, vars)
 
@@ -1919,14 +2097,96 @@ func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) te
 		sb.WriteString(l + "\n")
 	}
 	if werr := os.WriteFile(".env", []byte(sb.String()), 0o600); werr != nil {
-		m.statusText = i18n.T("could not write .env")
-		m.history = append(m.history, line{kindErr, "setup: " + werr.Error()})
-		m.setup.reset()
-		m.historyDirty = true
-		return nil
+		return i18n.T("could not write .env"), werr
 	}
 	for _, k := range config.SortedKeys(vars) {
 		os.Setenv(k, vars[k])
+	}
+	return "", nil
+}
+
+// rebuildRunnerFor points the session at p: a new agent on the same session
+// service, then the background tool-calling check the new provider deserves.
+func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
+	ctx := context.Background()
+	a, berr := dmagent.BuildAgent(ctx, p, m.tools)
+	if berr != nil {
+		m.history = append(m.history, line{kindErr, "setup: " + berr.Error()})
+		m.historyDirty = true
+		return nil
+	}
+	r, rerr := runner.New(runner.Config{
+		AppName:           "dmcode",
+		Agent:             a,
+		SessionService:    m.svc,
+		AutoCreateSession: true,
+	})
+	if rerr != nil {
+		m.history = append(m.history, line{kindErr, "setup: " + rerr.Error()})
+		m.historyDirty = true
+		return nil
+	}
+	m.runner = r
+	return m.toolCheckCmd()
+}
+
+// startGGUFSetup saves the GGUF configuration and kicks off llama-server in
+// the background. The provider is not known until the model has loaded, so
+// nothing is committed to m.prov here — ggufReadyMsg finishes the job.
+func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
+	status, err := m.persistSetup(vars)
+	if err != nil {
+		m.statusText = status
+		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
+		m.setup.reset()
+		m.historyDirty = true
+		m.followVP()
+		return nil
+	}
+	m.setup.reset()
+	m.statusText = i18n.T("starting the GGUF model — llama-server is loading it…")
+	m.history = append(m.history,
+		line{kindSys, i18n.T("starting llama-server on ") + vars["DMCODE_GGUF"]},
+		line{kindSys, i18n.T("this can take a while — the model loads before the first reply")})
+	m.historyDirty = true
+	m.followVP()
+	return func() tea.Msg {
+		p, lerr := launchGGUF()
+		return ggufReadyMsg{prov: p, err: lerr}
+	}
+}
+
+// handleGGUFReady completes the GGUF setup: on success the provider goes live
+// without a restart; on failure the saved configuration stays in .env so the
+// user can fix the path or the binary and restart.
+func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
+	if msg.err != nil {
+		m.history = append(m.history,
+			line{kindErr, i18n.T("llama-server did not start: ") + msg.err.Error()},
+			line{kindSys, i18n.T(".env keeps DMCODE_GGUF — fix DMCODE_LLAMA_SERVER or the path, then restart dmcode.")})
+		m.historyDirty = true
+		m.statusText = i18n.T("failed")
+		m.followVP()
+		return nil
+	}
+	m.prov = msg.prov
+	m.statusText = i18n.T("provider: ") + msg.prov.Label
+	m.history = append(m.history,
+		line{kindSys, i18n.T("GGUF model is up: ") + msg.prov.Model + " — " + msg.prov.BaseURL})
+	m.historyDirty = true
+	m.followVP()
+	return m.rebuildRunnerFor(msg.prov)
+}
+
+// commitSetup writes the validated provider to .env and rebuilds the agent.
+func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) tea.Cmd {
+	status, err := m.persistSetup(vars)
+	if err != nil {
+		m.statusText = status
+		m.history = append(m.history, line{kindErr, "setup: " + err.Error()})
+		m.setup.reset()
+		m.historyDirty = true
+		return nil
 	}
 
 	p := config.Provider{
@@ -1945,29 +2205,14 @@ func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) te
 	m.history = append(m.history, line{kindSys, i18n.T("provider saved to .env: ") + p.Label})
 	m.historyDirty = true
 
-	ctx := context.Background()
-	a, berr := dmagent.BuildAgent(ctx, p, m.tools)
-	if berr != nil {
-		m.history = append(m.history, line{kindErr, "setup: " + berr.Error()})
-		return nil
-	}
-	r, rerr := runner.New(runner.Config{
-		AppName:           "dmcode",
-		Agent:             a,
-		SessionService:    m.svc,
-		AutoCreateSession: true,
-	})
-	if rerr != nil {
-		m.history = append(m.history, line{kindErr, "setup: " + rerr.Error()})
-		return nil
-	}
-	m.runner = r
-	// A new provider needs its own tool-calling verdict.
-	return m.toolCheckCmd()
+	return m.rebuildRunnerFor(p)
 }
 
 // setupLabel names a wizard option for the sidebar, where the provider is shown.
 func setupLabel(opt config.SetupOption) string {
+	if opt.GGUF {
+		return i18n.T("llama.cpp GGUF")
+	}
 	if opt.BaseURL == "" {
 		return i18n.T("Custom endpoint")
 	}
@@ -2576,8 +2821,6 @@ func (m *uiModel) modelPickerBox() string {
 	return m.floatingPanel(i18n.T("⌘ models"), m.picker.query, entries, m.picker.selected)
 }
 
-// setupBox renders the /setup wizard: the provider list, then a key prompt, or
-// the base-URL and model prompts for a custom endpoint.
 // maskedKey hides a secret while still showing that something was typed. The
 // width is capped so a pasted key cannot widen the overlay past the terminal.
 func maskedKey(s string, width int) string {
@@ -2591,8 +2834,39 @@ func maskedKey(s string, width int) string {
 	return strings.Repeat("•", n)
 }
 
+// ggufPickBox renders the file browser: the current directory in the header,
+// then the parent, the subdirectories and the .gguf files of that directory.
+func (m *uiModel) ggufPickBox() string {
+	inner := m.floatingWidth() - panelBorder
+	var entries [][]string
+	for i, e := range m.setup.gguf.entries {
+		marker, style := "   ", lipgloss.NewStyle()
+		if i == m.setup.gguf.selected {
+			marker = " ▸ "
+		} else if e.dir {
+			style = styleHint
+		}
+		rows := wrapIndent(e.label, inner, marker, "     ")
+		if i != m.setup.gguf.selected {
+			for j := range rows {
+				rows[j] = style.Render(rows[j])
+			}
+		}
+		entries = append(entries, rows)
+	}
+	return m.floatingPanel(i18n.T("? gguf file — enter opens, esc back"), m.setup.gguf.dir, entries, m.setup.gguf.selected)
+}
+
+// setupBox renders the /setup wizard: the provider list, then a key prompt, or
+// the base-URL and model prompts for a custom endpoint.
 func (m *uiModel) setupBox() string {
 	inner := m.floatingWidth() - panelBorder
+
+	// The file browser paints over whatever prompt opened it, in the same
+	// chrome as every other overlay; esc hands the prompt back.
+	if m.setup.gguf.open {
+		return m.ggufPickBox()
+	}
 
 	switch m.setup.stage {
 	case setupKey:
@@ -2612,6 +2886,11 @@ func (m *uiModel) setupBox() string {
 		rows := [][]string{{styleHint.Render(i18n.T("model id on this endpoint"))},
 			{m.setup.buf + "█"}}
 		return m.floatingPanel(i18n.T("? model"), "", rows, 0)
+
+	case setupGGUF:
+		rows := [][]string{{styleHint.Render(i18n.T("path to the .gguf file — ctrl+o or enter on empty browses the disk"))},
+			{m.setup.buf + "█"}}
+		return m.floatingPanel(i18n.T("? gguf file"), "", rows, 0)
 	}
 
 	opts := config.SetupOptions()

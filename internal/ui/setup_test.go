@@ -178,7 +178,10 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			}
 
 			// Keyless options apply at once; keyed ones ask for a secret first.
-			if want.Keyless {
+			// A GGUF pick is keyless too, but it first asks for the file to run.
+			if want.GGUF {
+				d = d.enter().type_("models\\qwen.gguf").enter()
+			} else if want.Keyless {
 				d = d.enter()
 			} else {
 				d = d.enter().type_("sk-test-123").enter()
@@ -214,6 +217,9 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			}
 			if !want.Keyless && want.EnvKey != "" && !strings.Contains(text, want.EnvKey+"=sk-test-123") {
 				t.Errorf("%q: .env is missing %s:\n%s", want.Label, want.EnvKey, text)
+			}
+			if want.GGUF && !strings.Contains(text, "DMCODE_GGUF=models\\qwen.gguf") {
+				t.Errorf("%q: .env is missing the .gguf path:\n%s", want.Label, text)
 			}
 			// The running session has to move too, not just the file on disk.
 			if want.BaseURL != "" && m.prov.BaseURL != want.BaseURL {
