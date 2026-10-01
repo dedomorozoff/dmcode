@@ -184,11 +184,24 @@ func (s *Store) sortedCopy() []Item {
 }
 
 // todoWriteArgs is the whole plan in one call.
+//
+// The step type is a named struct rather than an anonymous one for the same
+// reason ask_user's options are plain strings: a nested object in a generated
+// tool schema comes out with additionalProperties:false and, with no
+// `jsonschema` tag on its fields, no description of what they mean. A model
+// guessing at that shape is rejected before todoWrite runs, and the plan is
+// never published. The status field is omitempty so that it is *not* required —
+// a step with no status is a pending step, which is what normalise already
+// assumed, and requiring the word "pending" only gives a model a way to get the
+// whole plan rejected over one step it was in a hurry about.
 type todoWriteArgs struct {
-	Items []struct {
-		Content string `json:"content"`
-		Status  string `json:"status"`
-	} `json:"items"`
+	Items []todoStep `json:"items" jsonschema:"Every step of the plan, in the order you intend to do them. Send the whole list each time."`
+}
+
+// todoStep is one line of the plan.
+type todoStep struct {
+	Content string `json:"content" jsonschema:"What this step does, in one short line."`
+	Status  string `json:"status,omitempty" jsonschema:"One of: pending, in_progress, done. Leave it out for a step you have not started."`
 }
 
 type todoWriteResult struct {
@@ -215,8 +228,8 @@ func (s *Store) todoWrite(ctx agent.Context, in todoWriteArgs) (todoWriteResult,
 }
 
 type todoSetArgs struct {
-	ID     int    `json:"id"`
-	Status string `json:"status"`
+	ID     int    `json:"id" jsonschema:"The number of the step, as shown in the plan."`
+	Status string `json:"status" jsonschema:"One of: pending, in_progress, done."`
 }
 
 type todoSetResult struct {
@@ -256,15 +269,16 @@ func (s *Store) MakeTools() ([]tool.Tool, error) {
 	write, err := functiontool.New(functiontool.Config{
 		Name: "todo_write",
 		Description: "Replaces the task plan with the given steps. Pass the whole list every time, in order, " +
-			"each step as {content, status} where status is pending, in_progress or done. Use it to publish a " +
-			"plan and to revise one; a step left out of the list is a step you no longer intend to take.",
+			"each step an object with content and, optionally, status (pending, in_progress or done — leave it " +
+			"out for a step you have not started). Use it to publish a plan and to revise one; a step left out " +
+			"of the list is a step you no longer intend to take.",
 	}, s.todoWrite)
 	if err != nil {
 		return nil, err
 	}
 	set, err := functiontool.New(functiontool.Config{
 		Name:        "todo_set",
-		Description: "Marks one step of the plan as pending, in_progress or done, by its id from todo_write.",
+		Description: "Marks one step of the plan as pending, in_progress or done, by its number from todo_write.",
 	}, s.todoSetStatus)
 	if err != nil {
 		return nil, err

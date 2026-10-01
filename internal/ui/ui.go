@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -362,8 +363,30 @@ type uiModel struct {
 	// readOnlyTools is the plan-mode instrument set, kept alongside the full
 	// one so a Tab press can swap them without rebuilding anything.
 	readOnlyTools []tool.Tool
-	mouseEnabled  bool
-	statusText    string
+	// yoloTools is the yolo-mode instrument set: the full one minus ask_user, so
+	// the mode's promise — the agent will not stop to ask — is a property of what
+	// it can reach rather than a line in the instruction it is asked to believe.
+	yoloTools []tool.Tool
+	// selection is a mouse drag over the frame. The anchor is where the button
+	// went down and focus is where it is now; the two are stored in that order
+	// rather than normalised, because a drag that goes up and to the left still
+	// selects the text between them and has to copy in reading order, not in the
+	// order the mouse happened to travel.
+	selAnchorX, selAnchorY int
+	selFocusX, selFocusY   int
+	// selDown is the button being held. selMoved is whether it has travelled far
+	// enough to mean something: without it every plain click would copy one
+	// character, and the clipboard would be useless for the rest of the session.
+	selDown  bool
+	selMoved bool
+	// frame is the last frame handed to the renderer. It is kept because the
+	// selection is extracted from what is actually on screen, not from the
+	// history: the same text is wrapped, padded and styled differently by the
+	// time it is a row, and copying the unwrapped source would give the user
+	// something that is not what they highlighted.
+	frame        string
+	mouseEnabled bool
+	statusText   string
 
 	// sessions is the conversation store behind m.svc, kept as its own field
 	// because it can do what session.Service cannot: rewind a turn and list
@@ -398,6 +421,10 @@ type uiModel struct {
 	// background that nothing can cancel.
 	ctx  context.Context
 	mode agentMode
+	// beforeYolo is the mode to come back to when yolo is switched off, so
+	// shift+tab does not silently undo a deliberate plan-mode choice. It is only
+	// ever read while the mode is yolo.
+	beforeYolo agentMode
 
 	// History render cache for streaming performance
 	cachedHistory string
@@ -635,7 +662,14 @@ func newSessionID() string {
 	return fmt.Sprintf("sess-%d", rand.Int63())
 }
 
-func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, readOnly []tool.Tool, toolNames []string) *uiModel {
+// InitialModel builds the session model.
+//
+// yolo is variadic so a caller that has no yolo instrument set — every test but
+// the one that exercises yolo, and any headless build — keeps the old call
+// working. A session with none of it simply cannot enter the mode, and
+// toggleYolo says so rather than showing a badge that promises a behaviour it
+// cannot deliver.
+func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tools []tool.Tool, readOnly []tool.Tool, toolNames []string, yolo ...[]tool.Tool) *uiModel {
 	ti := textinput.New()
 	ti.Prompt = "› "
 	ti.Placeholder = i18n.T("describe the task… (/help for commands, esc to cancel)")
@@ -669,6 +703,12 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		workDir:       wd,
 		workDirShort:  filepath.Base(wd),
 		historyDirty:  true,
+		// Act by default, and the mode shift+tab returns to when yolo is left.
+		// Starting in yolo would be a session the user never asked for.
+		beforeYolo: modeAct,
+	}
+	if len(yolo) > 0 {
+		m.yoloTools = yolo[0]
 	}
 	m.printWelcome()
 	m.promptHistory = loadPromptHistory()
@@ -839,6 +879,51 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pasteInto(string(msg.Content))
 			return m, nil
 		}
+	case tea.MouseClickMsg:
+		if !m.mouseEnabled {
+			break
+		}
+		// Only the left button drags a selection. Right and middle are left to the
+		// terminal so a user who wants the terminal's own paste menu keeps it.
+		if tea.Mouse(msg).Button == tea.MouseLeft {
+			m.selAnchorX, m.selAnchorY = msg.X, msg.Y
+			m.selFocusX, m.selFocusY = msg.X, msg.Y
+			m.selDown, m.selMoved = true, false
+		}
+		return m, nil
+	case tea.MouseMotionMsg:
+		if !m.mouseEnabled || !m.selDown {
+			break
+		}
+		m.selFocusX, m.selFocusY = msg.X, msg.Y
+		if msg.X != m.selAnchorX || msg.Y != m.selAnchorY {
+			m.selMoved = true
+		}
+		return m, nil
+	case tea.MouseReleaseMsg:
+		if !m.mouseEnabled || !m.selDown {
+			break
+		}
+		m.selDown = false
+		if !m.selMoved {
+			// A click, not a drag: clear the highlight and leave the clipboard be.
+			m.selMoved = false
+			return m, nil
+		}
+		m.selFocusX, m.selFocusY = msg.X, msg.Y
+		text := m.selectedText()
+		m.selMoved = false
+		if strings.TrimSpace(text) == "" {
+			return m, nil
+		}
+		if err := clipboard.WriteAll(text); err != nil {
+			m.statusText = i18n.T("clipboard error: ") + err.Error()
+			return m, nil
+		}
+		// The character count, because a selection can be a single word or three
+		// screens of build output and "copied" alone does not say which happened.
+		m.statusText = fmt.Sprintf(i18n.T("selection copied (%d characters)"), len([]rune(text)))
+		return m, nil
 	case tea.MouseWheelMsg:
 		// The wheel is routed through the viewport's own handler, which already
 		// knows the shift-modifier horizontal case. What it cannot know is that
@@ -988,6 +1073,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// what was in the input. The command list is now picked with the arrows
 			// and enter, which leaves tab meaning one thing everywhere: the mode.
 			return m, m.toggleMode()
+		case "shift+tab":
+			// The only way into yolo, and the only way out. It is not on the
+			// plan/act pair because it is not another way to work through a
+			// request — it is a different contract about interruptions, and a
+			// contract the user has to be able to see and reverse at a keystroke.
+			return m, m.toggleYolo()
 		case "up", "down":
 			if m.busy {
 				return m, nil
@@ -2890,6 +2981,155 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 	}
 }
 
+// mouseCell is one point of a selection, in terminal cells.
+type mouseCell struct{ x, y int }
+
+// selectionCells returns the selection in reading order, whatever direction the
+// drag went.
+//
+// Normalising here rather than at capture time is what makes a backwards drag
+// copy the text the user highlighted instead of the text between the last point
+// and the first in the order the mouse visited it.
+func (m *uiModel) selectionCells() (from, to mouseCell, ok bool) {
+	if !m.selMoved {
+		return from, to, false
+	}
+	a, b := mouseCell{m.selAnchorX, m.selAnchorY}, mouseCell{m.selFocusX, m.selFocusY}
+	if a.y > b.y || (a.y == b.y && a.x > b.x) {
+		a, b = b, a
+	}
+	return a, b, true
+}
+
+// selectedText is what the current selection amounts to: the plain text under it,
+// with the styling taken out and the trailing padding of each row trimmed.
+//
+// The frame is the source rather than the history because that is what the user
+// pointed at. Reading m.history instead would hand back unwrapped lines — a row
+// the user saw as three wrapped lines would arrive as one long one — and would
+// include the gutter markers the render owns.
+func (m *uiModel) selectedText() string {
+	from, to, ok := m.selectionCells()
+	if !ok {
+		return ""
+	}
+	rows := strings.Split(m.frame, "\n")
+	var out []string
+	for y := from.y; y <= to.y && y < len(rows); y++ {
+		if y < 0 {
+			continue
+		}
+		row := rows[y]
+		width := ansi.StringWidth(row)
+		start, end := 0, width
+		if y == from.y {
+			start = from.x
+		}
+		if y == to.y {
+			end = to.x
+		}
+		// A row narrower than the pointer — the user dragged past the end of a
+		// short line — contributes nothing rather than an error.
+		if start > width {
+			continue
+		}
+		if end > width {
+			end = width
+		}
+		if end <= start {
+			continue
+		}
+		out = append(out, strings.TrimRight(ansi.Strip(ansi.Cut(row, start, end)), " \t"))
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+// selReverseOn and selReverseOff are the SGR pair for reverse video. They are
+// applied per escape sequence rather than wrapped around the selected slice,
+// because a styled transcript row carries SGR resets of its own and a wrapper
+// applied once at the front would be cancelled by the first colour change — the
+// selection would visibly stop halfway along a line.
+const (
+	selReverseOn  = "\x1b[7m"
+	selReverseOff = "\x1b[27m"
+)
+
+// highlightCells draws the cells [from,to) of a styled row in reverse video.
+//
+// It walks the string rather than slicing it, because the bytes of a styled row
+// are not its cells: a column is not a byte offset, and the escape sequences
+// between them belong to the renderer, not to the text.
+func highlightCells(row string, from, to int) string {
+	if from >= to {
+		return row
+	}
+	var (
+		b      strings.Builder
+		col    int
+		inSel  bool
+		opened bool
+	)
+	flush := func() {
+		if opened {
+			b.WriteString(selReverseOff)
+			opened = false
+		}
+	}
+	for i := 0; i < len(row); {
+		// An escape sequence: copy it whole, then re-arm the highlight if we are
+		// inside the selection, since a full reset inside the row turns it off.
+		if row[i] == 0x1b {
+			j := i + 1
+			if j < len(row) && row[j] == '[' {
+				j++
+				for j < len(row) && !isANSIFinal(row[j]) {
+					j++
+				}
+				if j < len(row) {
+					j++
+				}
+			} else if j < len(row) {
+				j++
+			}
+			seq := row[i:j]
+			b.WriteString(seq)
+			if j <= len(row) && row[j-1] == 'm' && inSel {
+				b.WriteString(selReverseOn)
+				opened = true
+			}
+			i = j
+			continue
+		}
+		// A rune: decode it whole and measure it, so a double-width character
+		// advances two columns and the selection ends where the eye says it does
+		// rather than one cell early.
+		r, size := utf8.DecodeRuneInString(row[i:])
+		if size == 0 {
+			break
+		}
+		w := ansi.StringWidth(string(r))
+		next := col + w
+		inside := next > from && col < to
+		if inside && !inSel {
+			b.WriteString(selReverseOn)
+			opened = true
+			inSel = true
+		} else if !inside && inSel {
+			flush()
+			inSel = false
+		}
+		b.WriteString(row[i : i+size])
+		col = next
+		i += size
+	}
+	flush()
+	return b.String()
+}
+
+// isANSIFinal reports whether b ends an escape sequence.
+func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
+
+// renderToolResponse renders a tool result for the transcript.
 func renderToolResponse(fr *genai.FunctionResponse) string {
 	b, err := json.Marshal(fr.Response)
 	if err != nil {
@@ -3041,6 +3281,7 @@ func (m *uiModel) sidebarView(height int) string {
 			row(styleHint, i18n.T(" ctrl+y  copy reply"))
 			row(styleHint, i18n.T(" ctrl+z  undo last message"))
 			row(styleHint, i18n.T(" tab     plan/act"))
+			row(styleHint, i18n.T("shift+tab yolo"))
 			row(styleHint, i18n.T(" esc     stop turn"))
 			row(styleHint, i18n.T(" pgup/dn scroll"))
 		}
@@ -3630,18 +3871,54 @@ func (m *uiModel) View() tea.View {
 	if rows := m.suggestHeight(); rows > 0 {
 		frame = overlaySuggest(frame, m, rows)
 	}
+	// The highlight is painted before the frame is cached, and the cache is what
+	// the release handler reads: so what is copied is the text as drawn, styling
+	// and all, not the same text before it was laid out.
+	frame = m.paintSelection(frame)
+	m.frame = frame
 	v := tea.NewView(frame)
 	v.AltScreen = true
-	// Cell motion is what makes the terminal report the wheel at all; without it
-	// no MouseWheelMsg is ever produced and scrolling cannot work. The cost is
-	// that drag-select no longer works in the terminal itself, which is why
-	// /mouse can turn this back off for anyone who needs to copy by hand.
+	// All-motion reporting is what a selection needs: a drag only produces
+	// MouseMotionMsg when the terminal is told to report motion, so cell motion
+	// — which was enough for the wheel — never reaches the handler that does the
+	// selecting. The wheel still scrolls; /mouse turns all of it off for anyone
+	// who wants the terminal's own drag-select and paste menu back.
 	if m.mouseEnabled {
-		v.MouseMode = tea.MouseModeCellMotion
+		v.MouseMode = tea.MouseModeAllMotion
 	} else {
 		v.MouseMode = tea.MouseModeNone
 	}
 	return v
+}
+
+// paintSelection draws the current selection in reverse video.
+//
+// It goes over the whole frame rather than only the transcript, because what the
+// user can usefully select is everything they can see: a reply, an error, their
+// own prompt, the status bar. Anchoring it to the chat panel would silently make
+// the error line at the bottom unselectable, which is the one thing anybody
+// highlighting an error actually wants.
+func (m *uiModel) paintSelection(frame string) string {
+	from, to, ok := m.selectionCells()
+	if !ok {
+		return frame
+	}
+	rows := strings.Split(frame, "\n")
+	last := min(to.y, len(rows)-1)
+	for y := max(from.y, 0); y <= last; y++ {
+		start, end := 0, ansi.StringWidth(rows[y])
+		if y == from.y {
+			start = from.x
+		}
+		if y == to.y {
+			end = to.x
+		}
+		if end <= start {
+			continue
+		}
+		rows[y] = highlightCells(rows[y], start, end)
+	}
+	return strings.Join(rows, "\n")
 }
 
 // AskPrompt wires the broker to the event loop, so a question raised by the
@@ -3681,14 +3958,14 @@ func (m *uiModel) askWait(req ask.Request) time.Duration {
 // and cannot get one, so it cannot send anything itself. A plain
 // func(SubEvent) parameter could only be called by main, which would be the
 // wrong direction.
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent))) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
 	// The notifier needs the program, which needs the model, which needs the
 	// agent: the program is wired in afterwards, and a failover cannot happen
 	// before the first turn anyway.
-	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames)
+	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames, yoloTools)
 	m.pool = pool
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets

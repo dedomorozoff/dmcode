@@ -23,10 +23,14 @@ import (
 	dmmcp "github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
+	"google.golang.org/adk/v2/tool"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=..." (see the
 // Makefile). Release tags set it; a plain "go build" leaves it as "dev".
+//
+// dev is the honest default: it says the binary was not stamped by a release,
+// which is what a build someone made to try a change should say about itself.
 var version = "dev"
 
 // subSend is how a delegation reaches the event loop. The tool is built before
@@ -141,6 +145,20 @@ func run(dir string) error {
 	// server's tools are resolved lazily per turn rather than frozen in here.
 	// The listing is eager only to put names in the sidebar and to be able to
 	// tell the user which server did not come up.
+	// Yolo is act's reach with the question tool taken away, so a long job is
+	// never punctuated by a question. It is built here rather than filtered in
+	// the UI because main is the only place that still knows which tool in the
+	// set is the question tool — the same reason the delegation tool is built
+	// here. It is a separate slice rather than a view onto agentTools so that a
+	// later append to one cannot quietly hand the question back to yolo.
+	yoloTools := make([]tool.Tool, 0, len(agentTools))
+	for _, t := range agentTools {
+		if t.Name() == ask.Name {
+			continue
+		}
+		yoloTools = append(yoloTools, t)
+	}
+
 	mcpServers, mcpNotes := dmmcp.Load(mustGetwd())
 	mcpToolsets := dmmcp.Toolsets(mcpServers)
 	var mcpNames []string
@@ -155,7 +173,7 @@ func run(dir string) error {
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier, yoloTools)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to

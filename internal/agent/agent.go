@@ -66,6 +66,12 @@ const (
 	ModeAct Mode = iota
 	// ModePlan is the read-only mode: investigate and propose, change nothing.
 	ModePlan
+	// ModeYolo is act mode with the question tool taken away: the agent works to
+	// the end of the task without stopping to ask. It is the only mode that
+	// differs from act in what it may *do* — its tools are act's — and the only
+	// one that differs in what it is *asked* to do, which is why the difference
+	// is carried by the instruction as well as by the tool set.
+	ModeYolo
 )
 
 // planInstruction replaces the act workflow in plan mode. It asks for a plan
@@ -90,6 +96,31 @@ Hard rules:
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
 - Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.`
 
+// yoloInstruction replaces the act workflow in yolo mode.
+//
+// It is act's instruction with the asking removed, and that is the whole of it:
+// the mode exists so a long mechanical job is not punctuated by a question
+// nobody is there to answer, not so the agent can work faster or reach further.
+// The tool set is act's unchanged — the same instruments inside the same
+// boundary — so nothing here has to justify itself to the user.
+const yoloInstruction = `You are dmcode in YOLO mode. You work autonomously, from the first request to a finished result, without stopping to ask.
+
+You have the same tools as act mode. What is different is that you do not ask: you have no question tool, and you do not present plans for approval. Decide, act, verify, and report.
+
+Workflow:
+1. Carry the task through to the end in one turn. Never stop partway to ask whether you should continue — continuing is what you are here to do.
+2. Where a decision comes up that you would normally put to the user, take the option you would have recommended and keep going.
+3. VERIFY: run the relevant build and tests (go test ./..., npm test, pytest, cargo test) and read the output. A change you have not run is not a finished change.
+4. RECOVER: if a command or build fails, read the output, find the cause, fix it, and run it again. Never report success over a failure you have seen.
+5. REPORT: when the task is done, summarise what changed and what you ran to check it. That summary is the only thing the user sees of this turn, so it has to stand for all of it.
+
+Hard rules:
+- Never assume a file's contents: read it first, every time.
+- Keep changes minimal and matched to what was asked. Do not refactor, reformat or clean up anything you were not asked to touch.
+- Never delete or modify files outside the workspace.
+- list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
+- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.`
+
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)
 	if err != nil {
@@ -106,14 +137,18 @@ func BuildAgentWithModel(m model.LLM, ts []tool.Tool, toolsets ...tool.Toolset) 
 // BuildAgentMode wraps a client in the coding agent under the given mode. The
 // instructions are the only thing that differs: the caller has already chosen
 // the tool set, so an agent in plan mode is told to plan *and* has no way to
-// write.
+// write, and an agent in yolo mode is told to work to the end *and* has no way
+// to ask.
 //
 // toolsets are the MCP servers: their tools are resolved lazily per turn, so
 // they pass through here rather than being flattened into ts.
 func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode, toolsets ...tool.Toolset) (agent.Agent, error) {
 	inst := instruction
-	if mode == ModePlan {
+	switch mode {
+	case ModePlan:
 		inst = planInstruction
+	case ModeYolo:
+		inst = yoloInstruction
 	}
 	return llmagent.New(llmagent.Config{
 		Name:        "dmcode",

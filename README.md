@@ -167,16 +167,20 @@ Replies are laid out as markdown, not re-wrapped as plain prose:
 Prose without markup passes through unchanged. Tool output and your own prompts
 are never treated as markdown, so a JSON payload containing `**` survives intact.
 
-## Plan and act modes
+## Plan, act and yolo modes
 
-`tab` switches between them. Typing `/` opens a command dialog just above the
-input; `↑` `↓` move through it, `enter` runs the highlighted command, `esc`
-closes it and keeps what you typed. The dialog is drawn over the transcript, so
-nothing in the layout shifts and the sidebar stays readable.
+`tab` switches between act and plan. `shift+tab` turns yolo mode on and off —
+that key is the only way in, deliberately (see below). Typing `/` opens a command
+dialog just above the input; `↑` `↓` move through it, `enter` runs the
+highlighted command, `esc` closes it and keeps what you typed. The dialog is
+drawn over the transcript, so nothing in the layout shifts and the sidebar stays
+readable.
 
 - **ACT** — the full tool set; the agent reads and writes.
 - **PLAN** — no write tools. The agent investigates and returns a plan without
   changing anything.
+- **YOLO** — act's reach, with `ask_user` taken away. The agent works to the end
+  of the task in one turn and never stops to ask.
 
 Plan mode is enforced by withholding the write tools, not by asking the model in
 the prompt. `run_command` is withheld too, because a shell can write a file
@@ -193,6 +197,27 @@ runner cannot be rebuilt underneath a running one — and the conversation carri
 over. It cannot go the other way: returning to plan mode is `Tab`, and that one
 is yours.
 
+### Why yolo is a key and not a command
+
+Yolo mode is the only mode whose cost is paid *while it runs* rather than when it
+is entered. Nothing about the request changes when you turn it on; what changes
+is that the agent will not come back and ask, so a turn that needed a decision
+now has to make it alone. Two things follow from that.
+
+It is bound to `shift+tab` and to nothing else — no `/mode yolo`, and the agent
+cannot ask for it either. A mode whose whole point is to remove interruptions
+should not be reachable by accident, and should not be something a plan-mode
+model can hand you on its own initiative. `/mode yolo` says which key it is
+rather than reporting a bad spelling, because the likeliest way to meet this mode
+is to have heard of it and guessed the command.
+
+Leaving yolo returns to whichever of act and plan you were in, so the key does
+not quietly undo a plan-mode choice you made on purpose.
+
+The badge is the point. Yolo is the one badge drawn in the warning colour, and it
+stays on screen for the whole turn, because the user has to be able to see that
+the agent is not going to ask before they stop watching.
+
 ## Keys
 
 | | |
@@ -202,10 +227,35 @@ is yours.
 | `ctrl+y` | copy the reply |
 | `ctrl+z` | undo the last message (rewind) |
 | `tab` | plan / act mode |
+| `shift+tab` | yolo mode on / off (act and plan keep their tools) |
 | `esc` | close the command list, or stop the current turn |
 | `↑` `↓` | prompt history, or the command list while `/` is typed |
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
+| drag | select anything on screen; the selection is copied on release |
+
+## Selecting with the mouse
+
+Drag with the left button over anything on screen — a reply, an error, your own
+prompt, the status bar — and the selection is copied to the clipboard the moment
+you let go. The status bar says how many characters went in, because a selection
+can be one word or three screens of build output and "copied" alone does not say
+which happened.
+
+The text that lands on the clipboard is taken from the rendered frame rather than
+from the transcript, so it is what you actually pointed at: the wrapping is the
+wrapping on screen, and the escape sequences the renderer used are stripped. A
+selection works backwards as well as forwards, and a drag that runs past the end
+of a row takes what is there.
+
+A plain click copies nothing. Without that rule every click in the transcript
+would overwrite the clipboard with a single character and the feature would be
+worse than useless.
+
+`/mouse` turns the whole thing off and hands the terminal back, which is what you
+want if you prefer the terminal's own drag-select and paste menu — dmcode cannot
+do both at once, because reporting mouse motion is what stops the terminal from
+doing it itself.
 
 The status bar carries the mode and the state, and nothing else — the model is in
 the header and the sidebar, and the keys are in `/help`.
@@ -275,6 +325,51 @@ In plan mode the agent can call `switch_mode` to move the session to act mode on
 its own, once it has a plan it is confident in. The switch happens at the end of
 that turn. It cannot go back to plan mode itself — that is `Tab`, and it is
 yours.
+
+### What the first three tools got wrong, and how it was found
+
+`todo_*`, `ask_user` and `sub_agent` were shipped unverified: they compiled,
+their unit tests passed, and in use they did nothing at all. The transcript showed
+a tool call and a validation message, and nothing else.
+
+The cause was not the tools' logic — it was their **argument schema**. A tool's
+schema is generated from its Go type, and three things about that are unforgiving:
+
+- a field with no `jsonschema` tag reaches the model as a bare `{"type":"string"}`,
+  which says nothing about what belongs there;
+- a field is **required** unless its `json` tag carries `omitempty`, so a
+  perfectly reasonable call gets rejected over a field that had an obvious
+  default;
+- any struct becomes an object with `additionalProperties:false`, so a nested
+  object is a shape the model has to guess — and a wrong guess is a hard error it
+  cannot learn from.
+
+Concretely: `ask_user` declared its options as a list of `{label, note,
+recommended}` objects. Models sent `["first", "second"]` and were told the items
+had to be objects; they then sent `[{"Label": "first", "value": "1"}]` and were
+told `value` was an unexpected property. Both calls were refused before the tool
+body ran. `todo_write` had a step's `status` marked required, so a model that
+listed its steps with just what each one does had the entire plan rejected over
+the one field an unstarted step has no reason to state.
+
+Note where the rejection came from: the **endpoint**, validating the schema
+dmcode put on the wire — not dmcode. The ADK's own argument conversion accepts
+both of those shapes. That is why the fix was to the declared schema rather than
+to a more forgiving unmarshaller, and why a lenient parser would have changed
+nothing.
+
+What changed: `ask_user` takes its options as **plain strings** and names its
+preference with a separate `recommended` label; `todo_write` treats a step's
+status as optional and defaults it to pending; every argument of all three now
+carries a description the model can read. Regression tests assert the *shape* of
+the generated schema, and one drives the exact payload a model was observed to
+send through a real turn, because asserting on the schema alone would not have
+caught this — the schema was not the thing rejecting the call.
+
+`sub_agent`'s arguments were bare strings and never at risk, but they had no
+descriptions, so it was hardened the same way. Its nested turn — a second agent
+with its own session, run from inside a tool call — is exercised by unit tests
+and is the one piece of the three still worth watching against a live endpoint.
 
 ## Troubleshooting
 

@@ -2,28 +2,36 @@
 
 `dmcode` is an autonomous, terminal-based AI coding assistant inspired by Charmbracelet's `crush`, built with **Go**, **google/adk-go** (`google.golang.org/adk/v2`), and **Bubble Tea** (`charm.land/bubbletea/v2`).
 
-> ### ⚠️ Unverified — the session store, retries and the new tools
+> ### ✅ Verified — `ask_user`, `todo_*`; ⚠️ still unverified — the rest
 >
-> The features added most recently — `internal/memsession` (rewind and persistent
-> sessions), the retry policy in `internal/llm`, and the `todo_*`, `ask_user`,
-> `sub_agent` and `switch_mode` tools — **compile and pass unit tests but are not
-> verified end to end**. There are no live checks against a real endpoint, and no
-> TUI session has been driven through a rewind, a session switch, a question
-> overlay, a plan or a delegation. If you are asked to fix something here, expect
-> the bug to be in the integration, not in the logic the unit tests cover.
+> The `todo_*` and `ask_user` tools **were broken end to end and are now fixed**.
+> They compiled, their unit tests passed, and in use they did nothing at all: the
+> transcript showed a tool call and a schema-validation message, and no result.
+> The cause was their **generated argument schema**, not their logic — see §4,
+> "A tool's argument schema is generated from its Go type". `ask_user` took its
+> options as a nested, closed, undocumented object, so every shape a model
+> naturally sent was rejected; `todo_write` marked a step's `status` required, so
+> a plan written without it was rejected whole. Both are fixed, and the fix is
+> covered by tests that drive the exact payloads a model was observed to send
+> through a real `runner.Run` turn.
 >
-> Untested, and worth testing first:
+> Still unverified, and worth testing first:
+> - `sub_agent`'s nested turn — a second agent with its own session, run from
+>   inside a tool call. Unit-tested in isolation; not driven against a live
+>   endpoint end to end, and not yet checked for its report fitting the parent's
+>   context window without truncation problems.
 > - that `RewindToLastUserMessage` really cuts the model's memory and not only
 >   the transcript — nothing asserts this against a real runner;
 > - that a session file read back after a restart is what a live turn would have
 >   produced — the tests check the store in isolation, not the round trip through
 >   `runner.Run`;
-> - that the ask overlay's timer and channel behave against a **live** turn; the
->   tests drive `askKey` directly, with no ADK goroutine on the other end;
+> - that the ask overlay's timer and channel behave against a **live** TUI turn —
+>   the broker side is now driven end to end, but the overlay's own key handling
+>   is tested with no ADK goroutine on the other end;
 > - that `switch_mode`'s `EndInvocation` plus deferred `rebuildRunner` does not
 >   strand the runner — the UI test covers the pending-mode bookkeeping only;
-> - that a sub-agent's report survives the trip back into the parent's context
->   without blowing the context window.
+> - yolo mode has unit tests for the binding, the tool set and the badge, but no
+>   TUI session has been driven through a real yolo turn.
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
@@ -57,6 +65,34 @@
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
   - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
 
+### Mouse selection
+
+`MouseModeAllMotion`, not `CellMotion`. Cell motion is enough for the wheel, but
+a drag only arrives as `MouseMotionMsg`, and cell-motion reporting never sends
+one — so selection and scrolling cannot both be had under `CellMotion`. The cost
+is that the terminal's own drag-select is gone while the mouse is on, which is
+what `/mouse` is for; that trade is stated in the comment on the `MouseMode`
+line in `View`, because it is otherwise invisible.
+
+Three decisions in here are the ones to keep:
+
+- **The clipboard is fed from `m.frame`, not from `m.history`.** `frame` is the
+  last frame handed to the renderer, cached in `View` *after* `paintSelection`.
+  Copying the history instead would hand back unwrapped lines and the render's
+  gutter markers — not what the user pointed at.
+- **`selectionCells` normalises the two corners.** A backwards drag must copy in
+  reading order; storing them as anchor/focus and sorting at read time is what
+  makes that true.
+- **`highlightCells` re-arms reverse video after every SGR**, rather than
+  wrapping the selected slice in it once. A styled row carries its own resets and
+  a wrapper applied at the front is cancelled by the first colour change, so the
+  selection would visibly stop halfway along a line.
+
+Columns are cells, not bytes and not runes: the loop decodes each rune and asks
+`ansi.StringWidth` for its width, because a CJK character is two cells wide and
+counting runes cuts the first one in half. `TestSelectionCountsWideRunesAsTwoCells`
+is the one that would catch a regression there.
+
 ### Mode switches
 
 `uiModel.pendingMode` is a mode the **agent** asked for, and it is applied only
@@ -71,6 +107,30 @@ than `main.go` — it needs the model's hook and the current mode. In act mode t
 model cannot ask for a mode it is already in, and cannot ask to go back to plan
 mode at all; that is `Tab`, and it belongs to the user. This is what prevents
 plan↔act oscillation.
+
+### Yolo mode
+
+`shift+tab`, and nothing else. Yolo is act's reach with `ask_user` withdrawn
+(`main.go` builds `yoloTools`; `activeTools` picks it), so "the agent will not
+stop to ask" is a property of what it can reach rather than a line in the
+instruction it is asked to believe. Three rules hold it in place, each with a
+test in `internal/ui/mode_test.go`:
+
+- **`Tab` does not reach it.** `agentMode.toggled` is the plan/act pair only.
+  If `Tab` could, the mode with the least warning attached would be one keypress
+  from the mode the user chose, on the key they already trust for something else.
+- **No command reaches it.** `/mode yolo` names the key instead of reporting a
+  bad spelling, and `setModeRequest` refuses a yolo request from the agent, as
+  does `applyPendingMode` for anything already queued. A mode whose cost is paid
+  while it runs has to be something the user pressed for.
+- **Leaving it returns to the mode it came from** (`uiModel.beforeYolo`), so the
+  key does not silently undo a deliberate plan-mode choice.
+
+`agentMode` and `agent.Mode` are converted by written-out `agentMode()` /
+`agentModeFrom` functions, never by a numeric cast. The two enums used to line up
+by accident; a cast would keep that true silently and build the wrong agent the
+day either side is reordered. A yolo session that finds no `yoloTools` says so
+rather than showing a badge it cannot honour.
 
 ### Questions and delegation
 
@@ -181,6 +241,25 @@ Always verify compilation and run `go test ./...` after any code modification.
 
 If you are asked to fix or improve `dmcode`, be aware of these known architectural pitfalls:
 
+- **A tool's argument schema is generated from its Go type, and it is unforgiving.**
+  `functiontool` derives the declaration with `jsonschema.For[T]`, which means:
+  a field with no `jsonschema:"…"` tag reaches the model as a bare
+  `{"type":"string"}` and tells it nothing; a field is **required** unless its
+  `json` tag carries `omitempty`/`omitzero`; and any struct becomes an object with
+  `additionalProperties:false`. A nested object is therefore a shape the model has
+  to guess, and a wrong guess is a hard rejection the model cannot act on. This is
+  not hypothetical: `ask_user` declared its options as `[]Option{Label, Note,
+  Recommended}`, and models sent `["a","b"]` and then
+  `[{"Label": "a", "value": "1"}]`. Both were refused — the first because items
+  had to be objects, the second for the unknown property `value` — so the tool did
+  nothing at all, and the transcript showed only a validation message.
+  **Prefer flat arguments, `omitempty` on anything with a sensible default, and a
+  `jsonschema` tag on every field.** See `internal/ask/ask_test.go`
+  (`TestOptionsArePlainStrings`, `TestEveryArgumentIsDescribed`) and
+  `internal/todo/todo_test.go` (`TestTodoWriteStepNeedsOnlyItsText`), which fail if
+  the shape regresses. Note that the rejection came from the *endpoint* validating
+  the schema dmcode put on the wire, not from the ADK's own argument conversion,
+  which is lenient — so a lenient Go unmarshaller would not have helped.
 - **Workspace boundary is lexical at resolve time:** `tools.resolve` must decide before the file is touched, so a path that does not exist yet cannot be dereferenced. Tools that actually open something close the gap themselves: `read_file`, `edit_file` and `write_file` re-check the path after following symlinks (`withinRootAfterLinks`), `write_file` checks the deepest existing ancestor of the target directory, and `grep` skips entries that are symlinks rather than reading through them. See `internal/tools/tools.go` and `internal/tools/symlink_test.go`.
 - **Cancellation reaches the context, not the process:** `startTurn` runs the turn
   on a cancellable context and `Esc`/`Ctrl+C` cancel it, but a tool that ignores

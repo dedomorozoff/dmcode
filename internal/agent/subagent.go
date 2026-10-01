@@ -60,16 +60,21 @@ type subResult struct {
 }
 
 // subArgs is the tool's input.
+//
+// The `jsonschema` tags are not decoration. A tool's argument schema is
+// generated from its Go type, and a field with no tag reaches the model as a
+// bare `{"type": "string"}` — it has no idea whether to pass a question or an
+// answer, and a wrong guess is rejected before subRunner.run ever runs.
 type subArgs struct {
 	// Task is what the sub-agent must find out. One job: a question with three
 	// unrelated halves produces a report that answers none of them well.
-	Task string `json:"task"`
+	Task string `json:"task" jsonschema:"One research question for the sub-agent to answer. Give it a single job; several unrelated questions in one task produce a report that answers none of them."`
 	// Context is what the parent already knows, so the sub-agent does not
 	// rediscover it.
-	Context string `json:"context,omitempty"`
+	Context string `json:"context,omitempty" jsonschema:"What you have already found out, so the sub-agent does not repeat it."`
 	// Report says what shape of answer is wanted: findings, a list of call
 	// sites, a summary of behaviour.
-	Report string `json:"report,omitempty"`
+	Report string `json:"report,omitempty" jsonschema:"What you want back: findings with file:line references, a list of call sites, a summary of behaviour."`
 }
 
 // Bounds on one delegation. Both exist because a sub-agent with no ceiling is a
