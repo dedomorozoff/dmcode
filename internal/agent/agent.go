@@ -90,24 +90,27 @@ Hard rules:
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
 - Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.`
 
-func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool) (agent.Agent, error) {
+func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	return BuildAgentWithModel(m, ts)
+	return BuildAgentWithModel(m, ts, toolsets...)
 }
 
 // buildAgentWithModel wraps a client — plain or pooled — in the coding agent.
-func BuildAgentWithModel(m model.LLM, ts []tool.Tool) (agent.Agent, error) {
-	return BuildAgentMode(m, ts, ModeAct)
+func BuildAgentWithModel(m model.LLM, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
+	return BuildAgentMode(m, ts, ModeAct, toolsets...)
 }
 
 // BuildAgentMode wraps a client in the coding agent under the given mode. The
 // instructions are the only thing that differs: the caller has already chosen
 // the tool set, so an agent in plan mode is told to plan *and* has no way to
 // write.
-func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode) (agent.Agent, error) {
+//
+// toolsets are the MCP servers: their tools are resolved lazily per turn, so
+// they pass through here rather than being flattened into ts.
+func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode, toolsets ...tool.Toolset) (agent.Agent, error) {
 	inst := instruction
 	if mode == ModePlan {
 		inst = planInstruction
@@ -118,6 +121,7 @@ func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode) (agent.Agent, error)
 		Description: "Autonomous coding agent that reads, writes, and builds code.",
 		Instruction: inst,
 		Tools:       ts,
+		Toolsets:    toolsets,
 	})
 }
 
@@ -127,10 +131,10 @@ func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode) (agent.Agent, error)
 // onRetry may be nil. It is reported separately from onSwitch because the two
 // answer different questions: a switch says the answer is coming from somewhere
 // else, a retry says the same endpoint is being asked again after a pause.
-func BuildPooledAgent(ctx context.Context, pool []config.Provider, ts []tool.Tool, onSwitch func(llm.SwitchEvent), onRetry func(llm.RetryEvent), mode Mode) (agent.Agent, error) {
+func BuildPooledAgent(ctx context.Context, pool []config.Provider, ts []tool.Tool, onSwitch func(llm.SwitchEvent), onRetry func(llm.RetryEvent), mode Mode, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, onSwitch, onRetry)
 	if err != nil {
 		return nil, err
 	}
-	return BuildAgentMode(m, ts, mode)
+	return BuildAgentMode(m, ts, mode, toolsets...)
 }

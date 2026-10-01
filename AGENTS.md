@@ -49,7 +49,8 @@
   - `internal/discover`: which providers the session can run on.
   - `internal/llm`: the OpenAI-compatible wire and the failover pool.
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
-  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`) **and the workspace boundary** they are confined to. `todo_*` is added from `internal/todo`, not here.
+  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
+  - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `List` is the one eager pass: names for the sidebar, notes for the servers that did not come up.
   - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar), `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go` (ctrl+z, session switching), `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the question overlay and the sub-agent notes), `plan_view.go` (the plan block).
   - `internal/memsession`: the session store — the ADK `session.Service` dmcode runs on, plus the JSONL persistence under `~/.dmcode/sessions`.
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
@@ -227,6 +228,21 @@ Already fixed, and worth not regressing:
   and the fixed `ctrl+p │ ctrl+y │ esc` run was the part that dropped off the edge
   on a narrow terminal, leaving it half-printed. The bar is now the mode badge and
   the state badge, and `TestStatusBarShowsTheModeAndNothingElse` pins it there.
+- **The progress note sat in the status bar** — "calling: …" and "running…" are
+  turn state, and the bar is one row the badges need. The note now renders in
+  the transcript flow itself, right under the last message: `syncVP` appends
+  `progressTail` to the viewport content, so it scrolls with the conversation
+  and leaves nothing behind when the turn ends. The bar keeps the badges while
+  a turn runs.
+- **The header and the sidebar said the same things** — model, session, folder,
+  twice on screen whenever the panel was open. `headerVisible` now shows the top
+  bar only when the sidebar is absent (narrow terminal or ctrl+b), and its rows
+  go back to the transcript.
+- **The sidebar lost its bottom sections** — one row per tool spilled past the
+  panel width or ate the whole height, trimming the plan and the hotkeys. The
+  tool list is now one wrapped entry (capped at 12 rows with a "…" marker), and a
+  too-short panel drops the hotkeys — the most replaceable rows — before it trims
+  anything else.
 - **Markdown "working every other time"** — the per-turn text accumulator was never
   reset at the end of an LLM round, so a turn that used a tool had its second
   round's closing response appended on top of the deltas already shown. The

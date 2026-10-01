@@ -1144,6 +1144,10 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	webSearchTool, err := MakeWebSearchTool()
+	if err != nil {
+		return nil, err
+	}
 	// The plan tools live in their own package but belong to the same set: the
 	// agent publishes a plan through them and the user reads it with /todo, so
 	// one without the other would show a user a plan the agent cannot keep.
@@ -1153,7 +1157,7 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	out := []tool.Tool{
 		readFileTool, writeFileTool, editFileTool, listDirTool,
-		grepTool, globTool2, runCommandTool,
+		grepTool, globTool2, runCommandTool, webSearchTool,
 	}
 	return append(out, todoTools...), nil
 }
@@ -1171,6 +1175,7 @@ var readOnlyNames = map[string]bool{
 	"list_dir":   true,
 	"grep":       true,
 	"glob":       true,
+	"web_search": true,
 	"todo_write": true,
 	"todo_set":   true,
 	"todo_read":  true,

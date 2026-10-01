@@ -82,6 +82,11 @@ func SessionsDir() string {
 	return filepath.Join(home, ".dmcode", "sessions")
 }
 
+// Version is the dmcode build version, stamped by main from the -ldflags
+// value and read by the sidebar's brand block. A plain "go build" leaves it
+// at "dev", which is the honest answer for a binary nobody tagged.
+var Version = "dev"
+
 // AskTimeout is how long a question from the agent waits for an answer before
 // the recommended option is chosen for the user. DMCODE_ASK_TIMEOUT sets it in
 // seconds.

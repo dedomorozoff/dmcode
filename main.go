@@ -20,6 +20,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	dmmcp "github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
 )
@@ -87,6 +88,10 @@ func run(dir string) error {
 		fmt.Fprintln(os.Stderr, "dmcode: "+err.Error())
 	}
 	config.LoadDotEnv()
+	// The sidebar's brand block shows the version; it lives in config because
+	// the UI cannot reach into package main, and main is the only place the
+	// linker-stamped value exists.
+	config.Version = version
 	// Before anything renders, so even the setup wizard speaks the saved language.
 	i18n.Init()
 	ctx := context.Background()
@@ -131,11 +136,26 @@ func run(dir string) error {
 	agentTools = append(agentTools, subTool)
 	readOnlyTools = append(readOnlyTools, subTool)
 
+	// MCP servers join both sets the way the delegation tool does: they are
+	// configured explicitly, in the user's or the project's own file, and a
+	// server's tools are resolved lazily per turn rather than frozen in here.
+	// The listing is eager only to put names in the sidebar and to be able to
+	// tell the user which server did not come up.
+	mcpServers, mcpNotes := dmmcp.Load(mustGetwd())
+	mcpToolsets := dmmcp.Toolsets(mcpServers)
+	var mcpNames []string
+	if len(mcpServers) > 0 {
+		names, moreNotes := dmmcp.List(ctx, mcpServers)
+		mcpNames = names
+		mcpNotes = append(mcpNotes, moreNotes...)
+	}
+
 	toolNames := tools.ToolNames(agentTools)
+	toolNames = append(toolNames, mcpNames...)
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, broker, bindSubNotifier)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to

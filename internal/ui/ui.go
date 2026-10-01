@@ -129,7 +129,7 @@ var (
 // is what left the sidebar two rows short of the chat panel and every row of
 // the frame a few columns narrower than the terminal.
 const (
-	sidebarBoxWidth = 24 // outer width of the sidebar box, margins excluded
+	sidebarBoxWidth = 31 // outer width of the sidebar box, margins excluded
 	sidebarGap      = 1  // blank columns between the chat panel and the sidebar
 	minSidebarTerm  = 90 // below this terminal width the sidebar is dropped
 	minChatWidth    = 36 // the chat panel is not squeezed below this
@@ -140,9 +140,11 @@ const (
 	panelBorder  = 2 // the chat panel's top and bottom border
 	minViewRows  = 1 // a framed panel is an empty row between two borders
 
-	// chromeHeight is everything on screen that is not transcript: the header,
-	// the status bar, the input box and the chat panel's own two borders.
-	chromeHeight = headerHeight + statusHeight + inputHeight + panelBorder
+	// chromeHeight is everything on screen that is not transcript: the status
+	// bar, the input box and the chat panel's own two borders. The header is
+	// added on top when it is shown — see chromeHeight(), the one place the
+	// two combine.
+	chromeHeight = statusHeight + inputHeight + panelBorder
 )
 
 // deltaMsg carries one text part of a round to the event loop. It is a spoken
@@ -313,15 +315,19 @@ type uiModel struct {
 	// the member currently answering, so a failover updates both and the next
 	// /model switch keeps the reserves instead of dropping back to a single
 	// endpoint.
-	pool      []config.Provider
-	tools     []tool.Tool
-	prog      *tea.Program
-	toolNames []string
-	palette   paletteState
-	picker    modelPicker
-	setup     setupState
-	lang      langState
-	suggest   []suggestion
+	pool  []config.Provider
+	tools []tool.Tool
+	// mcpToolsets are the external MCP servers, resolved lazily per turn.
+	// They live beside tools because they are not flattened into it: the
+	// MCP connection opens on the first turn that needs it.
+	mcpToolsets []tool.Toolset
+	prog        *tea.Program
+	toolNames   []string
+	palette     paletteState
+	picker      modelPicker
+	setup       setupState
+	lang        langState
+	suggest     []suggestion
 	// suggestSel is the highlighted row of the command list. It is reset on every
 	// keystroke, so a narrowed list always starts at the top.
 	suggestSel int
@@ -609,6 +615,21 @@ const logo = `  ███████╗ ███╗   ███╗ ███�
   ╚═════╝  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝`
 
 var styleLogo = lipgloss.NewStyle().Foreground(lipgloss.Color("13")).Bold(true)
+
+// styleVersion is the version line under the brand: the brand's own color
+// without the weight, so it reads as a caption under the name, not as a
+// second name.
+var styleVersion = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+
+// miniLogo is the startup art redrawn for the sidebar: the full art is 55
+// columns and folds into mush at half size — the outlines fill in and the
+// letters merge — so the panel carries its own small rendition in the same
+// solid-block style. Only ▀▄█ are used: the one-cell width of these three is
+// the one thing every terminal agrees on, and a logo whose width depends on
+// the terminal is not a logo.
+const miniLogo = `█▀█ ▄▄ ▄▄ ▄▄▄ ▄▄▄   █ ▄▄▄
+█ ▐ █ █ █ █   █ █ █▀█ █▄
+█▄█ █ █ █ █▄▄ █▄█ █▄█ █▄▄`
 
 func newSessionID() string {
 	return fmt.Sprintf("sess-%d", rand.Int63())
@@ -1024,8 +1045,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
-				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
+					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -1303,6 +1324,27 @@ func (m *uiModel) sidebarVisible() bool {
 	return m.showSidebar && m.width >= minSidebarTerm && m.width-sidebarBoxWidth-sidebarGap >= minChatWidth
 }
 
+// headerVisible reports whether the top bar is on screen. The sidebar carries
+// the same facts the header does — the model, the session, the folder — so the
+// two are never up at once: with the panel open the header row goes back to the
+// transcript, and with it hidden (a narrow terminal, or ctrl+b) the header is
+// the only place those facts live.
+func (m *uiModel) headerVisible() bool {
+	return !m.sidebarVisible()
+}
+
+// chromeHeight is how many rows the frame spends on everything that is not
+// transcript, header included when it is on screen. It is a method rather than
+// the constant because the header is conditional: hiding it must give its rows
+// to the transcript, not leave a gap.
+func (m *uiModel) chromeHeight() int {
+	h := chromeHeight
+	if m.headerVisible() {
+		h += headerHeight
+	}
+	return h
+}
+
 // chatBoxWidth is the outer width of the chat panel, borders included. It is
 // never allowed to exceed the terminal: overrunning it is what pushed whole
 // rows of the frame past the right edge.
@@ -1337,8 +1379,8 @@ func (m *uiModel) suggestHeight() int {
 		return 0
 	}
 	// The list paints over the chat panel, so the rows available are everything
-	// above the input box, less the header and the status bar it must not cover.
-	room := m.height - inputHeight - headerHeight - statusHeight
+	// above the input box, less the chrome it must not cover.
+	room := m.height - m.chromeHeight()
 	if room < minSuggestRows {
 		// Too little to draw a list over. The commands are still reachable by
 		// typing them, which is the whole reason a picker is a convenience and
@@ -1358,6 +1400,13 @@ const minSuggestRows = 2
 // the reply they are answering, not scroll a pane that swallowed it.
 const suggestMaxRows = 8
 
+// transcriptRows is how many transcript rows the terminal affords. The same
+// arithmetic layout and View both need, kept in one place so the viewport
+// height and the frame drawn around it cannot disagree.
+func (m *uiModel) transcriptRows() int {
+	return max(m.height-m.chromeHeight(), minViewRows)
+}
+
 // layout sizes the viewport so that header + chat panel + status bar + input box
 // add up to exactly the terminal height. The command list is not part of it: it
 // is painted over the panel afterwards, so the frame does not change when it
@@ -1367,7 +1416,7 @@ func (m *uiModel) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	rows := max(m.height-chromeHeight, minViewRows)
+	rows := m.transcriptRows()
 	m.vp.SetWidth(m.contentWidth())
 	m.vp.SetHeight(rows)
 	// The input scrolls horizontally within one row; without an explicit width
@@ -1427,7 +1476,30 @@ func (m *uiModel) appendAgentText(delta string) {
 }
 
 func (m *uiModel) syncVP() {
-	m.vp.SetContent(m.renderHistory())
+	m.vp.SetContent(m.renderHistory() + m.progressTail())
+}
+
+// progressTail is the progress note as part of the transcript: the rows that
+// go right under the last message while a turn runs, and nothing when it does
+// not. Living in the content rather than in a row of the frame is the point —
+// the note scrolls with the conversation it describes and leaves no gap behind
+// when the turn ends.
+func (m *uiModel) progressTail() string {
+	if !m.busy {
+		return ""
+	}
+	// Wrapped rather than cut: a tool with a long name stays readable, and a
+	// note of two rows still scrolls away with everything else. The wrap width
+	// and the indent match renderHistory, so the note lines up with the
+	// transcript it closes.
+	var rows []string
+	for _, r := range wrapIndent(m.progressNote(), m.contentWidth()-chatIndent, "", "") {
+		rows = append(rows, strings.Repeat(" ", chatIndent)+styleHint.Render(r))
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	return strings.Join(rows, "\n")
 }
 
 // scrollBy moves the transcript n rows and keeps the follow-the-tail stick in
@@ -1610,8 +1682,14 @@ func rowRows(text string, width int, row transcriptRow) []string {
 	return rows
 }
 
+// chatIndent is the small left margin every transcript row is drawn with: a
+// line of text sitting flush against the panel's border reads as cramped, and
+// a couple of border columns of air between them is what a page margin is
+// for. The wrap width shrinks by the same amount, so nothing gains a row.
+const chatIndent = 2
+
 func (m *uiModel) renderHistory() string {
-	w := m.contentWidth()
+	w := m.contentWidth() - chatIndent
 	if !m.historyDirty && m.cachedWidth == w && m.cachedHistory != "" {
 		return m.cachedHistory
 	}
@@ -1655,7 +1733,7 @@ func (m *uiModel) renderHistory() string {
 			}
 		}
 		for _, r := range rows {
-			b.WriteString(r + "\n")
+			b.WriteString(strings.Repeat(" ", chatIndent) + r + "\n")
 		}
 	}
 	m.cachedHistory = b.String()
@@ -2501,7 +2579,7 @@ func (m *uiModel) persistSetup(vars map[string]string) (string, error) {
 // service, then the background tool-calling check the new provider deserves.
 func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
 	ctx := context.Background()
-	a, berr := dmagent.BuildAgent(ctx, p, m.tools)
+	a, berr := dmagent.BuildAgent(ctx, p, m.tools, m.mcpToolsets...)
 	if berr != nil {
 		m.history = append(m.history, line{kindErr, "setup: " + berr.Error()})
 		m.historyDirty = true
@@ -2702,7 +2780,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	svc, ts := m.svc, m.activeTools()
 	return func() tea.Msg {
 		ctx := context.Background()
-		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode())
+		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode(), m.mcpToolsets...)
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -2847,95 +2925,161 @@ func (m *uiModel) sidebarView(height int) string {
 		sbPad   = 1 // horizontal padding
 		sbEdge  = 1 // one vertical border per side
 		sbInner = sidebarBoxWidth - 2*sbPad - 2*sbEdge
+		// maxToolRows caps the tool list's share of the panel. MCP can double
+		// the count, and a list that takes the panel over leaves the plan and
+		// the hotkeys below it trimmed away — the cap is what keeps the order
+		// of sections meaning anything on a short terminal.
+		maxToolRows = 12
 	)
 
-	var b strings.Builder
-	row := func(style lipgloss.Style, text string) {
-		b.WriteString(style.Render(text) + "\n")
-	}
-	// value writes an indented entry, wrapping it under its own marker so a
-	// long model or tool name stays readable instead of being cut mid-word. The
-	// text is cut to the room the marker leaves, so the ellipsis lands on the
-	// last row instead of being stranded on a continuation of its own.
-	value := func(style lipgloss.Style, marker, text string) {
+	// flow writes a wrapped multi-row entry: the first row starts with its
+	// marker, and every continuation row lines up under the first name rather
+	// than under the marker's left edge — a list that resumes one column to
+	// the left of where it started reads as broken, which is what the single
+	// space used to do.
+	flow := func(style lipgloss.Style, marker, text string) []string {
 		indent := strings.Repeat(" ", ansi.StringWidth(marker))
-		for _, r := range wrapIndent(truncate(text, sbInner-ansi.StringWidth(marker)), sbInner, marker, indent) {
-			b.WriteString(style.Render(r) + "\n")
+		var out []string
+		for _, r := range wrapIndent(text, sbInner, marker, indent) {
+			out = append(out, style.Render(r))
 		}
+		return out
 	}
 
-	row(styleSidebarLabel, i18n.T("MODEL"))
-	value(styleSidebarValue, " ", m.prov.Model)
-	if m.prov.Label != "" {
-		row(styleHint, truncate("via "+m.prov.Label, sbInner))
-	}
-	b.WriteString("\n")
+	// build renders the whole body. hotkeys is the one collapsible part: the
+	// keys are listed by /help, so they are the first thing to go when the
+	// terminal is too short for everything.
+	build := func(hotkeys bool) string {
+		var b strings.Builder
+		row := func(style lipgloss.Style, text string) {
+			b.WriteString(style.Render(text) + "\n")
+		}
+		// value writes an indented entry, wrapping it under its own marker so a
+		// long model or tool name stays readable instead of being cut mid-word. The
+		// text is cut to the room the marker leaves, so the ellipsis lands on the
+		// last row instead of being stranded on a continuation of its own.
+		value := func(style lipgloss.Style, marker, text string) {
+			indent := strings.Repeat(" ", ansi.StringWidth(marker))
+			for _, r := range wrapIndent(truncate(text, sbInner-ansi.StringWidth(marker)), sbInner, marker, indent) {
+				b.WriteString(style.Render(r) + "\n")
+			}
+		}
 
-	row(styleSidebarLabel, i18n.T("SESSION"))
-	row(styleHint, " "+truncate(m.sessionID, sbInner-1))
-	row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
-	row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
-	// What the agent actually changed. The counts come from the tools, which are
-	// the only place that knows a file's before and after, so this is the real
-	// diff of the session rather than a sum of the write calls that produced it.
-	// It stays hidden until something has changed: a column of zeroes on a fresh
-	// session is noise, and its absence is the information.
-	if cs := dmtools.Changes(); cs.Files > 0 {
-		row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
-		row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
-	}
-	b.WriteString("\n")
-
-	row(styleSidebarLabel, i18n.T("FOLDER"))
-	// The full path, trimmed from the left: a Windows path is far wider than the
-	// panel, and the tail is the part that identifies the project.
-	value(styleSidebarValue, " ", shortenPath(m.workDir, sbInner-1))
-	b.WriteString("\n")
-
-	if m.lastTool != "" {
-		row(styleSidebarLabel, i18n.T("LAST TOOL"))
-		value(styleTool, " ⏺ ", m.lastTool)
+		// The art leads, at half the size it wears at startup: the same
+		// letterforms folded into quadrant glyphs. With the panel open the
+		// header is hidden — the sidebar is where the session facts live — so
+		// the panel is also where the brand belongs.
+		for _, l := range strings.Split(miniLogo, "\n") {
+			row(styleLogo, l)
+		}
+		// The build version right under the name, in the brand's color without
+		// the weight: a caption, not a second name. "dev" is shown as it is —
+		// "vdev" would be a version of nothing. It is pushed to the panel's
+		// right edge, under the tail of the art rather than its head, and cut
+		// when a version string outruns the panel.
+		v := config.Version
+		if v != "dev" {
+			v = "v" + v
+		}
+		v = truncate(v, sbInner)
+		row(styleVersion, strings.Repeat(" ", sbInner-ansi.StringWidth(v))+v)
 		b.WriteString("\n")
-	}
 
-	row(styleSidebarLabel, i18n.T("TOOLS"))
-	for _, t := range m.activeToolNames() {
-		row(styleHint, " · "+t)
-	}
-	b.WriteString("\n")
-
-	// The plan sits between the tools and the hotkeys: it is state the turn is
-	// producing, where the tool list is fixed and the hotkeys never change.
-	m.planSidebar(row, value)
-	b.WriteString("\n")
-
-	row(styleSidebarLabel, i18n.T("HOTKEYS"))
-	row(styleHint, i18n.T(" ctrl+p  commands"))
-	row(styleHint, i18n.T(" ctrl+b  hide panel"))
-	row(styleHint, i18n.T(" ctrl+y  copy reply"))
-	row(styleHint, i18n.T(" ctrl+z  undo last message"))
-	row(styleHint, i18n.T(" tab     plan/act"))
-	row(styleHint, i18n.T(" esc     stop turn"))
-	row(styleHint, i18n.T(" pgup/dn scroll"))
-
-	// Measuring at sbInner wraps and pads every row to exactly the width the
-	// framed box will have available, so the split below counts real rows.
-	body := lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
-	if height <= 0 {
-		return styleSidebar.Width(sidebarBoxWidth).Render(body)
-	}
-
-	lines := strings.Split(body, "\n")
-	if budget := height - 2*sbEdge; len(lines) > budget {
-		if budget < 1 {
-			budget = 1
+		row(styleSidebarLabel, i18n.T("MODEL"))
+		value(styleSidebarValue, " ", m.prov.Model)
+		if m.prov.Label != "" {
+			row(styleHint, truncate("via "+m.prov.Label, sbInner))
 		}
-		lines = lines[:budget]
-		// Mark the cut so a trimmed panel is not read as a complete one.
-		lines[budget-1] = styleHint.Render("…")
+		b.WriteString("\n")
+
+		row(styleSidebarLabel, i18n.T("SESSION"))
+		row(styleHint, " "+truncate(m.sessionID, sbInner-1))
+		row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
+		row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
+		// What the agent actually changed. The counts come from the tools, which are
+		// the only place that knows a file's before and after, so this is the real
+		// diff of the session rather than a sum of the write calls that produced it.
+		// It stays hidden until something has changed: a column of zeroes on a fresh
+		// session is noise, and its absence is the information.
+		if cs := dmtools.Changes(); cs.Files > 0 {
+			row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
+			row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
+		}
+		b.WriteString("\n")
+
+		row(styleSidebarLabel, i18n.T("FOLDER"))
+		// The full path, trimmed from the left: a Windows path is far wider than the
+		// panel, and the tail is the part that identifies the project.
+		value(styleSidebarValue, " ", shortenPath(m.workDir, sbInner-1))
+		b.WriteString("\n")
+
+		if m.lastTool != "" {
+			row(styleSidebarLabel, i18n.T("LAST TOOL"))
+			value(styleTool, " ⏺ ", m.lastTool)
+			b.WriteString("\n")
+		}
+
+		row(styleSidebarLabel, i18n.T("TOOLS"))
+		rows := flow(styleHint, " ", strings.Join(m.activeToolNames(), ", "))
+		if len(rows) > maxToolRows {
+			rows = append(rows[:maxToolRows], " …")
+		}
+		for _, r := range rows {
+			b.WriteString(r + "\n")
+		}
+		b.WriteString("\n")
+
+		// The plan sits between the tools and the hotkeys: it is state the turn is
+		// producing, where the tool list is fixed and the hotkeys never change.
+		m.planSidebar(row, value)
+		b.WriteString("\n")
+
+		if hotkeys {
+			row(styleSidebarLabel, i18n.T("HOTKEYS"))
+			row(styleHint, i18n.T(" ctrl+p  commands"))
+			row(styleHint, i18n.T(" ctrl+b  hide panel"))
+			row(styleHint, i18n.T(" ctrl+y  copy reply"))
+			row(styleHint, i18n.T(" ctrl+z  undo last message"))
+			row(styleHint, i18n.T(" tab     plan/act"))
+			row(styleHint, i18n.T(" esc     stop turn"))
+			row(styleHint, i18n.T(" pgup/dn scroll"))
+		}
+
+		// Measuring at sbInner wraps and pads every row to exactly the width the
+		// framed box will have available, so the split below counts real rows.
+		return lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+	}
+
+	if height <= 0 {
+		return styleSidebar.Width(sidebarBoxWidth).Render(build(true))
+	}
+
+	budget := max(height-2*sbEdge, 1)
+	lines := strings.Split(build(true), "\n")
+	if len(lines) > budget {
+		// The full body does not fit. The hotkeys go first — they are the most
+		// replaceable rows on the panel — and only what still overflows after
+		// that is trimmed.
+		lines = strings.Split(build(false), "\n")
+		if len(lines) > budget {
+			lines = lines[:budget]
+			// Mark the cut so a trimmed panel is not read as a complete one.
+			lines[budget-1] = styleHint.Render("…")
+		}
 	}
 
 	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
+}
+
+// progressNote is the live progress text: what the agent is doing right now,
+// or the generic running note when the step has not named itself. The spinner
+// travels with it — the bar no longer carries the note while a turn runs, so
+// the motion cue goes where the text went.
+func (m *uiModel) progressNote() string {
+	if m.statusText != "" {
+		return m.spin.View() + " " + m.statusText
+	}
+	return m.spin.View() + " " + i18n.T("running…")
 }
 
 // statusBarView renders the single-row footer.
@@ -2975,14 +3119,15 @@ func (m *uiModel) statusBarView() string {
 
 	badge := m.stateBadge()
 
+	// While a turn runs the note lives in the chat panel's progress row, next
+	// to the transcript it describes; carrying it here too would be two places
+	// saying the same thing, and the bar's one row is the scarcer of the two.
 	statusDesc := m.statusText
 	switch {
-	case statusDesc == "" && m.busy:
-		statusDesc = m.spin.View() + " " + i18n.T("running…")
+	case m.busy:
+		statusDesc = ""
 	case statusDesc == "":
 		statusDesc = i18n.T("waiting for a task")
-	case m.busy:
-		statusDesc = m.spin.View() + " " + statusDesc
 	}
 
 	// The mode leads: it is the one thing a user must never have to hunt for,
@@ -3459,7 +3604,9 @@ func (m *uiModel) View() tea.View {
 
 	// Every row of the frame is exactly m.width wide and together they are
 	// exactly m.height rows: the chat panel and the sidebar are framed to the
-	// same outer height, and the viewport gets the panel's inner rows.
+	// same outer height, and the viewport gets the panel's inner rows. The
+	// progress note is not a row of the frame — syncVP appends it to the
+	// content, right under the last message.
 	rows := m.vp.Height()
 	panel := stylePanel.Width(m.chatBoxWidth()).Height(rows + panelBorder).Render(m.vp.View())
 
@@ -3472,7 +3619,11 @@ func (m *uiModel) View() tea.View {
 	// overflowing row is enough to shift the whole frame sideways. The command
 	// list is deliberately not a part: it is painted over the panel below, so
 	// opening and closing it leaves the frame byte-identical.
-	parts := []string{m.headerView(), middle, m.statusBarView()}
+	parts := make([]string, 0, 4)
+	if m.headerVisible() {
+		parts = append(parts, m.headerView())
+	}
+	parts = append(parts, middle, m.statusBarView())
 	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -3530,7 +3681,7 @@ func (m *uiModel) askWait(req ask.Request) time.Duration {
 // and cannot get one, so it cannot send anything itself. A plain
 // func(SubEvent) parameter could only be called by main, which would be the
 // wrong direction.
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent))) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent))) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -3540,7 +3691,13 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames)
 	m.pool = pool
 	m.ctx = ctx
+	m.mcpToolsets = mcpToolsets
 	m.askTimeout = config.AskTimeout()
+	// A server the eager listing could not ask is a real problem the user has
+	// to see: its tools will not exist until it comes up.
+	if len(mcpNotes) > 0 {
+		m.statusText = strings.Join(mcpNotes, "; ")
+	}
 
 	prog := tea.NewProgram(m)
 	m.prog = prog
@@ -3579,7 +3736,7 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 		}
 		ts = append(slices.Clone(ts), switchTool)
 	}
-	a, err := dmagent.BuildPooledAgent(m.ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), mode.agentMode())
+	a, err := dmagent.BuildPooledAgent(m.ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), mode.agentMode(), m.mcpToolsets...)
 	if err != nil {
 		return nil, err
 	}
