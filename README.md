@@ -6,11 +6,6 @@
 
 Ask it something. It reads your files, edits them, runs your tests, searches the
 web and talks to your MCP servers.
-Built on [google/adk-go](https://github.com/google/adk-go) and
-[Bubble Tea](https://github.com/charmbracelet/bubbletea).
-
-One static binary. No API key required.
-
 </div>
 
 ---
