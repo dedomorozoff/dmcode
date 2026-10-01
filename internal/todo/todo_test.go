@@ -1,9 +1,12 @@
 package todo
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
+
+	"google.golang.org/genai"
 )
 
 func write(t *testing.T, s *Store, steps ...Item) error {
@@ -225,5 +228,118 @@ func TestMakeToolsNamesThemAll(t *testing.T) {
 	}
 	if len(got) != len(Names) {
 		t.Errorf("built %d tools, want %d", len(got), len(Names))
+	}
+}
+
+// toolSchema is the named tool's argument schema as the model will see it: the
+// generated declaration, round-tripped through JSON so the assertions are about
+// the wire rather than about the Go types behind it.
+func toolSchema(t *testing.T, name string) map[string]any {
+	t.Helper()
+	ts, err := New().MakeTools()
+	if err != nil {
+		t.Fatalf("MakeTools: %v", err)
+	}
+	for _, tl := range ts {
+		if tl.Name() != name {
+			continue
+		}
+		d, ok := tl.(interface {
+			Declaration() *genai.FunctionDeclaration
+		})
+		if !ok {
+			t.Fatalf("%s does not expose a declaration", name)
+		}
+		fd := d.Declaration()
+		if fd == nil || fd.ParametersJsonSchema == nil {
+			t.Fatalf("%s carries no argument schema", name)
+		}
+		raw, err := json.Marshal(fd.ParametersJsonSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(raw, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	t.Fatalf("no tool named %q", name)
+	return nil
+}
+
+func schemaProp(t *testing.T, schema map[string]any, name string) map[string]any {
+	t.Helper()
+	props, _ := schema["properties"].(map[string]any)
+	p, _ := props[name].(map[string]any)
+	if p == nil {
+		t.Fatalf("the schema has no property %q", name)
+	}
+	return p
+}
+
+// TestTodoWriteStepNeedsOnlyItsText is the regression this tool had.
+//
+// The step's status field carried no omitempty, so the generator marked it
+// required. A model that wrote the obvious thing — a list of steps, each with
+// just what it does — had the whole plan rejected before todoWrite ran, over
+// the one field a step that has not started has no reason to state. A step with
+// no status is a pending step, which is what normalise already assumed.
+func TestTodoWriteStepNeedsOnlyItsText(t *testing.T) {
+	schema := toolSchema(t, "todo_write")
+
+	items := schemaProp(t, schema, "items")
+	step, _ := items["items"].(map[string]any)
+	if step == nil {
+		t.Fatal("items has no item schema, so a model cannot tell what a step is")
+	}
+	required, _ := step["required"].([]any)
+	if len(required) != 1 || required[0] != "content" {
+		t.Errorf("a step requires %v, want only content — status has a sensible default", required)
+	}
+	// content itself must stay required: a step with no text is not a step.
+	if _, ok := step["properties"].(map[string]any)["content"]; !ok {
+		t.Error("the step schema has no content property")
+	}
+}
+
+// TestPlanToolsDescribeTheirArguments: a field with no `jsonschema` tag reaches
+// the model as a bare {"type":"string"}, which says nothing about what belongs
+// there. That is how a status came to be left out and a plan rejected.
+func TestPlanToolsDescribeTheirArguments(t *testing.T) {
+	for _, name := range []string{"todo_write", "todo_set"} {
+		schema := toolSchema(t, name)
+		props, _ := schema["properties"].(map[string]any)
+		if len(props) == 0 {
+			t.Errorf("%s has no properties", name)
+			continue
+		}
+		for field, raw := range props {
+			p, _ := raw.(map[string]any)
+			// A property with nothing but a type is the "a model is guessing"
+			// case. todo_read takes no arguments, so it is not checked here.
+			if desc, _ := p["description"].(string); strings.TrimSpace(desc) == "" {
+				t.Errorf("%s: argument %q has no description", name, field)
+			}
+		}
+	}
+}
+
+// TestTodoSetStillNeedsBothFields: unlike a step's status, there is no default
+// for "which step" or "move it where", so both stay required.
+func TestTodoSetStillNeedsBothFields(t *testing.T) {
+	schema := toolSchema(t, "todo_set")
+	required, _ := schema["required"].([]any)
+	var hasID, hasStatus bool
+	for _, r := range required {
+		switch r {
+		case "id":
+			hasID = true
+		case "status":
+			hasStatus = true
+		}
+	}
+	if !hasID || !hasStatus {
+		t.Errorf("todo_set requires %v, want both id and status", required)
 	}
 }

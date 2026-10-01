@@ -65,23 +65,6 @@ type failoverModel struct {
 	retry        RetryPolicy
 }
 
-// NewFailoverModel builds the pool for a session: the providers the user asked
-// for, in order, with the free endpoints behind them as a lazily probed
-// reserve.
-//
-// The wrapper is kept even for a single configured provider, because that is
-// precisely the case where the reserve is worth having. Returning the bare
-// client instead would make a working Groq key indistinguishable from a session
-// with nowhere to go when it starts returning 429s.
-// NewFailoverModel builds the pool for a session: the providers the user asked
-// for, in order, with a lazily probed reserve behind them.
-//
-// The wrapper is kept even for a single configured provider, because that is
-// precisely the case where the reserve is worth having. Returning the bare
-// client instead would make a working Groq key indistinguishable from a session
-// with nowhere to go when it starts returning 429s. backups may be nil: a pool
-// without a reserve simply reports the first failure instead of hunting for a
-// free endpoint mid-turn.
 // RetryEvent records a retry that is about to happen, so the transcript can say
 // what the wait is for instead of showing a spinner that looks hung.
 type RetryEvent struct {

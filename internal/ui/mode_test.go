@@ -10,7 +10,9 @@ import (
 	"charm.land/bubbles/v2/cursor"
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
+	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
@@ -95,14 +97,18 @@ func TestMouseToggleGatesScrolling(t *testing.T) {
 	}
 }
 
+// TestViewRequestsMouseModeOnlyWhenEnabled: with the mouse on, the terminal has
+// to be asked for motion as well as button events, because a drag is delivered as
+// MouseMotionMsg and cell-motion reporting never sends one. That is the whole
+// reason this mode changed when selection was added.
 func TestViewRequestsMouseModeOnlyWhenEnabled(t *testing.T) {
 	m := InitialModel(nil, nil, config.Provider{}, nil, nil, nil)
 	m.width, m.height = 100, 30
 	m.layout()
 
 	m.mouseEnabled = true
-	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
-		t.Errorf("MouseMode with the mouse on = %v, want CellMotion", got)
+	if got := m.View().MouseMode; got != tea.MouseModeAllMotion {
+		t.Errorf("MouseMode with the mouse on = %v, want AllMotion so a drag is reported", got)
 	}
 	m.mouseEnabled = false
 	if got := m.View().MouseMode; got != tea.MouseModeNone {
@@ -173,6 +179,419 @@ func TestTabSwitchesModeAndToolSet(t *testing.T) {
 	}
 	if !containsName(m.activeTools(), "write_file") {
 		t.Error("switching back to act did not restore the write tools")
+	}
+}
+
+// askToolName is the question tool's name, written out rather than imported from
+// the ask package: the test only needs to recognise one tool out of a set.
+const askToolName = "ask_user"
+
+// stubAskTool is a stand-in for the question tool. The real one is built in
+// main.go, not by tools.MakeTools, so a model built straight from the workspace
+// tools has no ask_user in it at all — and a test that filtered a set which never
+// held the tool would pass whatever activeTools returned. The stub is what makes
+// the removal observable.
+func stubAskTool(t *testing.T) tool.Tool {
+	t.Helper()
+	tl, err := functiontool.New(functiontool.Config{Name: askToolName},
+		func(adkagent.Context, struct{}) (string, error) { return "", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tl
+}
+
+// yoloModel is modeModel with the question tool in the act set and the yolo set
+// main.go would build: the same tools, minus the question tool. The set is built
+// here rather than shared with a helper, so the test pins the rule ("ask_user is
+// what comes out") rather than whatever a helper happened to pass.
+func yoloModel(t *testing.T) *uiModel {
+	t.Helper()
+	m := modeModel(t)
+	// Act gets the question tool, so that dropping it is a real change.
+	m.tools = append(append([]tool.Tool(nil), m.tools...), stubAskTool(t))
+	m.toolNames = dmtools.ToolNames(m.tools)
+
+	yolo := make([]tool.Tool, 0, len(m.tools))
+	for _, tl := range m.tools {
+		if tl.Name() == askToolName {
+			continue
+		}
+		yolo = append(yolo, tl)
+	}
+	m.yoloTools = yolo
+	return m
+}
+
+// TestShiftTabTogglesYoloAndNothingElseReachesIt: the binding is the feature.
+// Yolo cannot stop a running turn to ask, so a mode that is entered by accident
+// is a turn that runs unattended — which is why it is on one key and on no
+// command.
+func TestShiftTabTogglesYoloAndNothingElseReachesIt(t *testing.T) {
+	m := yoloModel(t)
+	var model tea.Model = m
+
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != modeYolo {
+		t.Fatalf("shift+tab left the mode at %v, want yolo", m.mode)
+	}
+
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != modeAct {
+		t.Errorf("the second shift+tab left the mode at %v, want the mode it came from", m.mode)
+	}
+
+	// /mode cannot reach it, by name or by synonym. The refusal has to name the
+	// key, because the likeliest way to meet this mode is to have heard of it and
+	// guessed the command.
+	for _, name := range []string{"yolo", "auto", "YOLO"} {
+		m.setMode(name)
+		if m.mode == modeYolo {
+			t.Errorf("/mode %s entered yolo; the key is the only way in", name)
+		}
+	}
+	if !strings.Contains(m.statusText, "shift+tab") {
+		t.Errorf("the /mode refusal does not say which key it is: %q", m.statusText)
+	}
+}
+
+// TestAQueuedSwitchCannotLandTheSessionInYolo is the other door. The switch tool
+// is built in plan mode only and can only ask for act, so setModeRequest already
+// refuses a yolo request; this covers the queue itself, for the case where one
+// was recorded before that check existed. A mode the user never pressed a key for
+// is the one thing the key exists to prevent.
+func TestAQueuedSwitchCannotLandTheSessionInYolo(t *testing.T) {
+	m := yoloModel(t)
+	m.mode = modePlan
+	m.pendingMode = pendingMode{mode: modeYolo, asked: true}
+	m.applyPendingMode()
+	if m.mode == modeYolo {
+		t.Error("a queued request put the session into yolo")
+	}
+	if m.pendingMode.asked {
+		t.Error("the refused request was left queued for the next turn")
+	}
+}
+
+// TestYoloHasActReachWithoutTheQuestionTool is the whole contract in one test:
+// same reach as act, no way to interrupt. Reach is act's because a mode that
+// quietly narrowed the tools as well would be a second plan mode.
+func TestYoloHasActReachWithoutTheQuestionTool(t *testing.T) {
+	m := yoloModel(t)
+	m.mode = modeYolo
+
+	if !containsName(m.activeTools(), "write_file") {
+		t.Error("yolo mode cannot write; it is meant to be act's reach")
+	}
+	if !containsName(m.activeTools(), "run_command") {
+		t.Error("yolo mode cannot run commands; it is meant to be act's reach")
+	}
+	if containsName(m.activeTools(), askToolName) {
+		t.Errorf("yolo mode still offers %q, so it cannot deliver what it promises", askToolName)
+	}
+	// The sidebar must agree, or a user would sit waiting for a question the agent
+	// has no way to ask.
+	for _, n := range m.activeToolNames() {
+		if n == askToolName {
+			t.Error("the sidebar still lists ask_user in yolo mode")
+		}
+	}
+	if len(m.activeToolNames()) != len(m.activeTools()) {
+		t.Errorf("the sidebar lists %d tools for %d reachable ones",
+			len(m.activeToolNames()), len(m.activeTools()))
+	}
+}
+
+// TestTabDoesNotWalkIntoYolo: tab means the plan/act pair and only that. If tab
+// could reach yolo, the mode with the least warning attached would be one
+// keypress from the mode the user actually chose, on the key they already trust
+// for something else.
+func TestTabDoesNotWalkIntoYolo(t *testing.T) {
+	m := yoloModel(t)
+	var model tea.Model = m
+	for i := 0; i < 4; i++ {
+		model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+		if m.mode == modeYolo {
+			t.Fatalf("tab reached yolo on press %d", i+1)
+		}
+	}
+	if m.mode != modeAct {
+		t.Errorf("four presses of tab left the mode at %v, want act", m.mode)
+	}
+}
+
+// TestYoloRemembersTheModeItCameFrom: leaving yolo must not silently undo a
+// deliberate plan-mode choice, or the key that turns the mode off also changes
+// what the session is allowed to do.
+func TestYoloRemembersTheModeItCameFrom(t *testing.T) {
+	m := yoloModel(t)
+	var model tea.Model = m
+
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab}) // act -> plan
+	if m.mode != modePlan {
+		t.Fatalf("tab left the mode at %v, want plan", m.mode)
+	}
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != modeYolo {
+		t.Fatalf("shift+tab left the mode at %v, want yolo", m.mode)
+	}
+	model, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.mode != modePlan {
+		t.Errorf("leaving yolo landed in %v, want the plan mode it was entered from", m.mode)
+	}
+}
+
+// TestYoloIsRefusedMidTurn: the runner is built around one tool set for a turn,
+// and a set that loses ask_user underneath a model about to call it would strand
+// the tool goroutine on a question nobody can answer.
+func TestYoloIsRefusedMidTurn(t *testing.T) {
+	m := yoloModel(t)
+	m.busy = true
+	m.toggleYolo()
+	if m.mode == modeYolo {
+		t.Error("yolo was entered while a turn was running")
+	}
+	if m.statusText == "" {
+		t.Error("the refusal was silent; the keypress looked like it did nothing")
+	}
+}
+
+// TestYoloSaysSoWhenThereIsNoInstrumentSetForIt: a session built without a yolo
+// set would keep the question tool, so the badge would be the only difference
+// between a mode that works and one that lies.
+func TestYoloSaysSoWhenThereIsNoInstrumentSetForIt(t *testing.T) {
+	m := modeModel(t) // no yolo set
+	m.toggleYolo()
+	if m.mode == modeYolo {
+		t.Error("yolo was entered with no instrument set behind it")
+	}
+	if m.statusText == "" {
+		t.Error("the refusal was silent")
+	}
+}
+
+// TestYoloBadgeSaysYolo: the badge is the only thing on screen saying the agent
+// will not come back and ask, so it has to name the mode and survive a narrow bar
+// like the other two do.
+func TestYoloBadgeSaysYolo(t *testing.T) {
+	m := yoloModel(t)
+	m.mode = modeYolo
+	if got := m.modeBadge(); !strings.Contains(got, "YOLO") {
+		t.Errorf("badge = %q, want it to name yolo", got)
+	}
+	m.width = 8
+	if got := m.modeBadge(); strings.TrimSpace(got) == "" {
+		t.Error("the yolo badge vanished on a narrow status bar")
+	}
+}
+
+// ------------------------------------------------------- mouse text selection
+
+// selectDrag drives a real drag through the event loop — press, motion, release —
+// because the interesting failures are in the hand-off between the messages, not
+// in any one of them.
+func selectDrag(t *testing.T, m *uiModel, ax, ay, bx, by int) {
+	t.Helper()
+	var model tea.Model = m
+	model, _ = model.Update(tea.MouseClickMsg{X: ax, Y: ay, Button: tea.MouseLeft})
+	model, _ = model.Update(tea.MouseMotionMsg{X: (ax + bx) / 2, Y: (ay + by) / 2})
+	model, _ = model.Update(tea.MouseMotionMsg{X: bx, Y: by})
+	model, _ = model.Update(tea.MouseReleaseMsg{X: bx, Y: by, Button: tea.MouseLeft})
+}
+
+// selectModel is a session with a known frame, so a selection can be asserted
+// against exact text instead of whatever the layout happened to produce.
+func selectModel(t *testing.T, frame string) *uiModel {
+	t.Helper()
+	m := InitialModel(nil, nil, config.Provider{}, nil, nil, nil)
+	m.mouseEnabled = true
+	m.width, m.height = 40, 10
+	m.layout()
+	m.frame = frame
+	return m
+}
+
+// TestSelectionCopiesWhatWasHighlighted is the point of the feature: the text
+// under the drag goes to the clipboard, taken from the rendered frame so it is
+// what the user actually pointed at.
+func TestSelectionCopiesWhatWasHighlighted(t *testing.T) {
+	m := selectModel(t, "hello world\nsecond line\nthird line")
+	m.selAnchorX, m.selAnchorY = 6, 0
+	// Row 1 cut at column 6: "second". A pointer on the last cell of a row
+	// selects the whole row, so the end has to be past the text, not on it.
+	m.selFocusX, m.selFocusY = 6, 1
+	m.selMoved = true
+
+	if got := m.selectedText(); got != "world\nsecond" {
+		t.Errorf("selectedText() = %q, want %q", got, "world\nsecond")
+	}
+}
+
+// TestSelectionReadsBackwardsTheSameWay: a drag that goes up and to the left
+// selects the same text as one that goes down and to the right. Copying in the
+// order the mouse travelled would hand back gibberish.
+func TestSelectionReadsBackwardsTheSameWay(t *testing.T) {
+	m := selectModel(t, "alpha beta\ngamma delta")
+	// Anchored on the last row, dragged up to the start of "beta": the selection
+	// is the rectangle between them, and it has to come back in reading order.
+	m.selAnchorX, m.selAnchorY = 5, 1
+	m.selFocusX, m.selFocusY = 6, 0
+	m.selMoved = true
+
+	if got := m.selectedText(); got != "beta\ngamma" {
+		t.Errorf("a backwards drag copied %q, want %q", got, "beta\ngamma")
+	}
+}
+
+// TestSelectionDropsStylingAndPadding: what lands on the clipboard has to be the
+// text, not the escape sequences the renderer wrapped it in.
+func TestSelectionDropsStylingAndPadding(t *testing.T) {
+	styled := "\x1b[1;32merror:\x1b[0m build failed        "
+	m := selectModel(t, styled)
+	m.selAnchorX, m.selAnchorY = 0, 0
+	m.selFocusX, m.selFocusY = 25, 0
+	m.selMoved = true
+
+	got := m.selectedText()
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("the copied text still carries escape sequences: %q", got)
+	}
+	if got != "error: build failed" {
+		t.Errorf("selectedText() = %q, want the text without styling or padding", got)
+	}
+}
+
+// TestSelectionCountsWideRunesAsTwoCells: a pointer reports cells, not bytes
+// and not runes. An east-asian character occupies two cells, so a row of four
+// such cells is two characters — a selection that counted runes would cut the
+// first one in half and hand back something the user never pointed at.
+func TestSelectionCountsWideRunesAsTwoCells(t *testing.T) {
+	m := selectModel(t, "世界 wide")
+	m.selAnchorX, m.selAnchorY = 0, 0
+	m.selFocusX, m.selFocusY = 4, 0 // two double-width runes
+	m.selMoved = true
+
+	if got := m.selectedText(); got != "世界" {
+		t.Errorf("selectedText() = %q, want %q — four cells are two wide characters", got, "世界")
+	}
+	// The highlight has to agree with the copy, or the user sees one range lit up
+	// and gets another on the clipboard.
+	got := m.paintSelection(m.frame)
+	if plain := ansi.Strip(got); !strings.HasPrefix(plain, "世界") {
+		t.Errorf("the painted frame starts with %q, want the wide characters intact", plain)
+	}
+}
+
+// TestSelectionSurvivesADragPastTheEndOfALine: releasing below the last row, or to
+// the right of a short one, has to contribute what exists rather than fail —
+// which is what a user dragging to the bottom-right corner actually does.
+func TestSelectionSurvivesADragPastTheEndOfALine(t *testing.T) {
+	m := selectModel(t, "short\n\nanother")
+	m.selAnchorX, m.selAnchorY = 0, 0
+	m.selFocusX, m.selFocusY = 500, 99
+	m.selMoved = true
+
+	got := m.selectedText()
+	if !strings.Contains(got, "short") || !strings.Contains(got, "another") {
+		t.Errorf("an over-long drag copied %q, want the whole frame's text", got)
+	}
+}
+
+// TestAPlainClickCopiesNothing: without this, every click in the transcript would
+// overwrite the clipboard with a single character and the feature would be worse
+// than useless.
+func TestAPlainClickCopiesNothing(t *testing.T) {
+	m := selectModel(t, "some text on screen")
+	before := m.statusText
+	selectDrag(t, m, 4, 0, 4, 0)
+
+	if m.selMoved {
+		t.Error("a click with no movement left a live selection")
+	}
+	if m.statusText != before {
+		t.Errorf("a plain click reported %q, want nothing", m.statusText)
+	}
+}
+
+// TestARightClickDoesNotStartASelection: the right button belongs to the
+// terminal's own paste menu, and hijacking it would break a workflow that works
+// today.
+func TestARightClickDoesNotStartASelection(t *testing.T) {
+	m := selectModel(t, "some text")
+	var model tea.Model = m
+	model, _ = model.Update(tea.MouseClickMsg{X: 2, Y: 0, Button: tea.MouseRight})
+	model, _ = model.Update(tea.MouseMotionMsg{X: 8, Y: 0})
+	if m.selMoved || m.selDown {
+		t.Error("a right-button drag started a selection")
+	}
+}
+
+// TestSelectionIsIgnoredWithTheMouseOff: /mouse hands the terminal back to the
+// user, and that has to mean the wheel and the selection both, or the toggle lies
+// about what it turned off.
+func TestSelectionIsIgnoredWithTheMouseOff(t *testing.T) {
+	m := selectModel(t, "some text")
+	m.mouseEnabled = false
+	var model tea.Model = m
+	model, _ = model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	model, _ = model.Update(tea.MouseMotionMsg{X: 9, Y: 0})
+	if m.selDown || m.selMoved {
+		t.Error("a selection started with the mouse disabled")
+	}
+}
+
+// TestTheFrameIsHighlightedWhileSelected: a selection the user cannot see is a
+// selection they cannot aim, so the drawn frame has to carry the reverse-video
+// attribute over exactly the cells that will be copied.
+func TestTheFrameIsHighlightedWhileSelected(t *testing.T) {
+	m := selectModel(t, "hello world")
+	m.selAnchorX, m.selAnchorY = 6, 0
+	m.selFocusX, m.selFocusY = 11, 0
+	m.selMoved = true
+
+	got := m.paintSelection(m.frame)
+	if !strings.Contains(got, selReverseOn) {
+		t.Fatalf("the selection was not painted at all: %q", got)
+	}
+	// The highlight must sit over "world" and not over the word before it.
+	plain := ansi.Strip(got)
+	if strings.Contains(plain, selReverseOn) {
+		t.Errorf("the highlight leaked into the plain text: %q", plain)
+	}
+	// Reversing [6,11) of "hello world" leaves the first six cells untouched.
+	if idx := strings.Index(plain, selReverseOn); idx != -1 {
+		t.Errorf("unexpected marker at %d", idx)
+	}
+	if !strings.HasSuffix(got, selReverseOff) && !strings.Contains(got, selReverseOff) {
+		t.Error("the highlight was never turned off, so the rest of the frame would render inverted")
+	}
+	// Re-running the same paint must be stable: the highlight goes on the plain
+	// frame, so painting twice cannot nest a second reverse inside the first.
+	again := m.paintSelection(m.frame)
+	if strings.Count(got, selReverseOn) != strings.Count(again, selReverseOn) {
+		t.Errorf("painting is not idempotent: %d markers then %d",
+			strings.Count(got, selReverseOn), strings.Count(again, selReverseOn))
+	}
+}
+
+// TestTheHighlightSurvivesAColourChangeMidRow: a transcript row carries its own
+// SGR resets, and a highlight wrapped once around the slice would be cancelled by
+// the first colour change — the selection would visibly stop halfway along a line.
+func TestTheHighlightSurvivesAColourChangeMidRow(t *testing.T) {
+	row := "\x1b[1mred\x1b[0m plain"
+	m := selectModel(t, row)
+	m.selAnchorX, m.selAnchorY = 0, 0
+	m.selFocusX, m.selFocusY = 9, 0
+	m.selMoved = true
+
+	got := m.paintSelection(m.frame)
+	// One marker before the reset, and the reverse re-armed after it — so the
+	// second half of the row is still highlighted.
+	if n := strings.Count(got, selReverseOn); n < 2 {
+		t.Errorf("the highlight was cancelled by the row's own reset: %d markers in %q", n, got)
+	}
+	if got := m.selectedText(); got != "red plain" {
+		t.Errorf("selectedText() = %q, want %q", got, "red plain")
 	}
 }
 

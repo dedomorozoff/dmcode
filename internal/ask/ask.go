@@ -31,6 +31,9 @@ type Option struct {
 }
 
 // Request is a question the agent needs answered before it can go on.
+//
+// It is the shape the broker and the overlay speak, not the shape the model
+// writes: askArgs is that, and it is deliberately flatter. See askArgs for why.
 type Request struct {
 	Question string   `json:"question"`
 	Options  []Option `json:"options"`
@@ -42,6 +45,68 @@ type Request struct {
 	// TimeoutSeconds asks for a specific wait. Zero means the broker's own
 	// setting, which is off unless the user turned it on.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+// askArgs is what the model actually writes, and it is not Request.
+//
+// The first version of this tool took the options as a list of objects,
+// {label, note, recommended}, and it failed in practice for a reason no amount
+// of prompt wording fixes. A tool's argument schema is generated from its Go
+// type, and a nested object comes out with additionalProperties:false, a
+// required list, and — unless every field carries a `jsonschema` tag — no
+// description of what any of it means. A model shown that has to guess, and a
+// guess is rejected before the tool body ever runs:
+//
+//	options: ["fix the build", "add a test"]            → items must be objects
+//	options: [{"Label": "fix the build", "value": "1"}] → unknown property "value"
+//
+// The rejection is a hard error the model cannot act on, and the visible symptom
+// is a tool that "does not work" however carefully it is described. So the
+// options are plain strings — the shape every model reaches for first and the
+// only one with nothing to get wrong — and the recommendation is named by its
+// label instead of by a boolean on a nested object.
+type askArgs struct {
+	Question string `json:"question" jsonschema:"The question to put to the user, in one sentence. Say what decision has to be made and why it matters."`
+	// Options is a list of plain strings — the exact text the user will see and
+	// the exact text that comes back as the answer. Two to five of them.
+	Options []string `json:"options" jsonschema:"Two to five choices, each one a plain string of words — not an object. The user picks one of these strings and that string is what you are told they chose, so make each one a complete, self-contained answer."`
+	// Recommended names one of Options. It is a label, not an index, so a
+	// mismatch is visible rather than silently pointing at the wrong row.
+	Recommended    string `json:"recommended,omitempty" jsonschema:"Copy one of the options strings exactly, to mark it as the one you would pick. Leave empty if you have no preference."`
+	Multi          bool   `json:"multi,omitempty" jsonschema:"True when several of the options can be correct at once and the user should tick all that apply."`
+	AllowCustom    bool   `json:"allow_custom,omitempty" jsonschema:"True to offer the user a free-text box as well, for an answer that is not on your list."`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"How long to wait for an answer, in seconds. Leave empty to wait as long as the user is willing."`
+}
+
+// request turns the model's arguments into the question the overlay shows.
+//
+// An option the model left blank, or a recommendation that names nothing on the
+// list, is dropped rather than carried: the overlay highlights by label, and a
+// recommendation that matches no row is a recommendation the user cannot see.
+func (a askArgs) request() Request {
+	req := Request{
+		Question:       strings.TrimSpace(a.Question),
+		Multi:          a.Multi,
+		AllowCustom:    a.AllowCustom,
+		TimeoutSeconds: a.TimeoutSeconds,
+	}
+	for _, raw := range a.Options {
+		label := strings.TrimSpace(raw)
+		if label == "" {
+			continue
+		}
+		req.Options = append(req.Options, Option{Label: label})
+	}
+	want := strings.TrimSpace(a.Recommended)
+	if want != "" {
+		for i := range req.Options {
+			if req.Options[i].Label == want {
+				req.Options[i].Recommended = true
+				break
+			}
+		}
+	}
+	return req
 }
 
 // Answer is what the user chose.
@@ -192,8 +257,8 @@ func (b *Broker) Ask(ctx context.Context, req Request) (Answer, error) {
 // missing interface and a skipped question are all "nobody answered", and the
 // model needs that as an answer it can act on — not as a failure it would
 // sensibly retry, and not as a failed tool call in the transcript.
-func (b *Broker) askUser(ctx agent.Context, in Request) (string, error) {
-	ans, _ := b.Ask(ctx, in)
+func (b *Broker) askUser(ctx agent.Context, in askArgs) (string, error) {
+	ans, _ := b.Ask(ctx, in.request())
 	return ans.String(), nil
 }
 
@@ -202,11 +267,11 @@ func (b *Broker) MakeTool() (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name: "ask_user",
 		Description: "Asks the user to choose, and waits for the answer. Use it when a decision is needed before " +
-			"you can go on: give the question, two to five concrete options, and mark the one you recommend with " +
-			"recommended=true. Set multi=true when several answers are valid, allow_custom=true when the user may " +
-			"want something not on the list. Do not guess instead of asking, and do not ask about anything you " +
-			"can find out by reading the code. If the user skips the question, carry on with your best guess and " +
-			"say what you assumed.",
+			"you can go on. Pass the question, two to five options as plain strings, and — if you have a " +
+			"preference — the exact text of one of them in recommended. Set multi=true when several answers are " +
+			"valid, allow_custom=true when the user may want something not on the list. Do not guess instead of " +
+			"asking, and do not ask about anything you can find out by reading the code. If the user skips the " +
+			"question, carry on with your best guess and say what you assumed.",
 	}, b.askUser)
 }
 
