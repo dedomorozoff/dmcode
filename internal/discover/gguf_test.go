@@ -129,3 +129,19 @@ func TestGGUFModelNameFallsBackToTheFileStem(t *testing.T) {
 		t.Errorf("server id gave %q, want model-id-from-server", got)
 	}
 }
+
+// A config carries its paths between machines: a Windows model path must
+// still give a stem on Linux CI, and a Unix one on Windows.
+func TestFileStemSplitsBothSeparatorFlavors(t *testing.T) {
+	cases := map[string]string{
+		`C:\models\Qwen2.5-Coder-7B-Q4_K_M.gguf`: "Qwen2.5-Coder-7B-Q4_K_M",
+		"/home/u/models/qwen.gguf":               "qwen",
+		"plain.gguf":                             "plain",
+		"no-extension":                           "no-extension",
+	}
+	for in, want := range cases {
+		if got := fileStem(in); got != want {
+			t.Errorf("fileStem(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -221,7 +221,20 @@ func ggufModelName(ggufPath, base string) string {
 	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0] != "" {
 		return served[0]
 	}
-	return strings.TrimSuffix(filepath.Base(ggufPath), filepath.Ext(ggufPath))
+	return fileStem(ggufPath)
+}
+
+// fileStem strips a model file's directory and extension. The path may name a
+// Windows file on a Linux machine and the other way round — a config is
+// carried between machines — so both separator flavors are split, not just
+// the one the running platform uses: filepath.Base on Linux sees no
+// directory in "C:\models\qwen.gguf" and hands the whole line back.
+func fileStem(p string) string {
+	p = filepath.Base(p)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		p = p[i+1:]
+	}
+	return strings.TrimSuffix(p, filepath.Ext(p))
 }
 
 // ggufStartupTimeout is how long LaunchGGUF waits for the model to load.
