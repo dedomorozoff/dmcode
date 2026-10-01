@@ -8,6 +8,11 @@
 ```
 **A coding agent for your terminal.**
 
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
+[![License](https://img.shields.io/github/license/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode/blob/main/LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
+[![Issues](https://img.shields.io/github/issues/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode/issues)
+
 Ask it something. It reads your files, edits them, runs your tests, searches the
 web and talks to your MCP servers.
 
