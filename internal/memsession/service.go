@@ -731,15 +731,36 @@ func replayState(st *stored) {
 
 // eventText returns the plain text of an event, ignoring tool calls — a
 // function call has no prose to show a user.
+//
+// A picture becomes a named placeholder rather than nothing at all. Three things
+// read this and all three need to see an attachment: the rewind, which uses it
+// as the prompt to put back in the input; the session title, which is the first
+// user message; and /sessions' summary. A turn sent as just a screenshot has no
+// text, and a function that returned "" for it left the user with an empty input
+// box and an unnamed session for something they had plainly attached a file to.
 func eventText(ev *session.Event) string {
 	if ev == nil || ev.Content == nil {
 		return ""
 	}
 	var b strings.Builder
+	pictures := 0
 	for _, p := range ev.Content.Parts {
-		if p != nil && p.Text != "" {
+		switch {
+		case p == nil:
+		case p.Text != "":
 			b.WriteString(p.Text)
+		case p.InlineData != nil:
+			pictures++
 		}
+	}
+	// The placeholders go after the prose: they describe the turn rather than
+	// being part of it, and a session named "look at this [image 1]" reads better
+	// than one named "[image 1] look at this".
+	for i := 1; i <= pictures; i++ {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "[image %d]", i)
 	}
 	return strings.TrimSpace(b.String())
 }

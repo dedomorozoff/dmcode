@@ -81,9 +81,28 @@ func (m *uiModel) rewind() {
 	m.promptMarks = m.promptMarks[:len(m.promptMarks)-1]
 	// The mark's idx is where the prompt line was appended, so truncating to it
 	// removes the prompt and everything the turn produced after it. Anything
-	// above — a /new notice, an earlier turn — stays.
+	// above — a /new notice, an earlier turn — stays. The previews were appended
+	// before the mark, so they go with the prompt that sent them rather than
+	// staying on screen describing a turn that no longer exists.
 	if mark.idx <= len(m.history) {
 		m.history = m.history[:mark.idx]
+	}
+	// The pictures come back with the prompt. A turn sent as nothing but a
+	// screenshot has no text for the store to hand back, so without this the user
+	// would find an empty input box and have to go and find the file again.
+	if len(mark.images) > 0 {
+		// The strip comes back rather than the transcript line: a rewind un-sends
+		// the turn, so the pictures return to being undecided, and the strip above
+		// the input is where an undecided picture lives. Putting them back into the
+		// transcript would show a conversation entry for a turn that no longer
+		// happened.
+		//
+		// They come back with fromInput false: the path is no longer in the input
+		// — the prompt went with the rewind — so editing the text must not be able
+		// to take them away.
+		for _, a := range mark.images {
+			m.pending = append(m.pending, pendingImage{Attachment: a})
+		}
 	}
 	m.turnCount--
 	// The recall list offered the prompt as something already sent; offering it
@@ -95,6 +114,10 @@ func (m *uiModel) rewind() {
 	m.history = append(m.history, line{kindSys, "↩ " + i18n.T("rolled back to the previous message")})
 	m.historyDirty = true
 	m.statusText = i18n.T("the message is back in the input — edit it and send again")
+	// A picture that came back with the prompt reappears in the pending strip, and
+	// the strip needs rows the transcript no longer has. Resized before the
+	// viewport is re-synced, or the frame ends up taller than the terminal.
+	m.layout()
 	m.followVP()
 }
 
@@ -140,6 +163,10 @@ func (m *uiModel) newSession(title string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.promptMarks = nil
+	// An attachment belongs to the prompt it was going to ride with, and /new is
+	// a different conversation. Carrying it over would attach the previous
+	// session's screenshot to the first message of this one.
+	m.pending = nil
 	// The change tally belongs to the session that produced it. Carrying the
 	// numbers into a fresh session would report edits the new one never made,
 	// against files it has never opened.
@@ -160,6 +187,9 @@ func (m *uiModel) newSession(title string) {
 	}
 	m.history = append(m.history, line{kindSys, label})
 	m.historyDirty = true
+	// Dropping the attachments empties the pending strip, and the rows it held go
+	// back to the transcript.
+	m.layout()
 	m.followVP()
 }
 
@@ -192,6 +222,7 @@ func (m *uiModel) switchSession(id string) {
 	prev := m.sessionID
 	m.sessionID = id
 	m.promptMarks = nil
+	m.pending = nil
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.lastTool = ""
@@ -199,6 +230,7 @@ func (m *uiModel) switchSession(id string) {
 	m.summariseSession(id)
 	m.statusText = i18n.T("session: ") + id
 	m.historyDirty = true
+	m.layout()
 	m.followVP()
 }
 

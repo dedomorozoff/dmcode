@@ -26,6 +26,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	"github.com/dedomorozoff/dmcode/internal/imgprev"
 	"github.com/dedomorozoff/dmcode/internal/llm"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
@@ -48,6 +49,9 @@ const (
 	kindSys
 	kindErr
 	kindLogo
+	// kindImage is the preview of a picture the user attached. It is appended
+	// last because the values are iota and tests compare them by number.
+	kindImage
 )
 
 type line struct {
@@ -74,6 +78,8 @@ func kindName(k lineKind) string {
 		return "err"
 	case kindLogo:
 		return "logo"
+	case kindImage:
+		return "image"
 	}
 	return "?"
 }
@@ -141,10 +147,15 @@ const (
 	panelBorder  = 2 // the chat panel's top and bottom border
 	minViewRows  = 1 // a framed panel is an empty row between two borders
 
+	// pendingPanelBorder is the pending-image strip's own top and bottom border.
+	// It is separate from panelBorder because the strip is a panel of its own
+	// above the input box, not more of the chat panel.
+	pendingPanelBorder = 2
+
 	// chromeHeight is everything on screen that is not transcript: the status
-	// bar, the input box and the chat panel's own two borders. The header is
-	// added on top when it is shown — see chromeHeight(), the one place the
-	// two combine.
+	// bar, the input box and the chat panel's own two borders. The header and the
+	// pending-image strip are added on top when they are shown — see
+	// chromeHeight(), the one place the three combine.
 	chromeHeight = statusHeight + inputHeight + panelBorder
 )
 
@@ -432,6 +443,19 @@ type uiModel struct {
 	historyDirty  bool
 	cachedRows    []cachedLine
 	proxy         proxyState
+	// pending are the images attached to the next turn. They live on the model
+	// rather than inside the input text so a preview can be drawn and the bytes
+	// sent without re-reading the file, and so a rewind can put them back.
+	pending []pendingImage
+	// profile is the colour profile the terminal reported, which decides how an
+	// image preview is drawn. It is recorded rather than asked for at draw time
+	// because the renderer is the only thing that knows it.
+	profile colorprofile.Profile
+	// watchedPath is the picture path last looked at in the input. It exists so
+	// that a path already attached is not attached again on every keystroke — the
+	// input is watched on each one, and re-decoding the same file for each is a
+	// stall the user can see.
+	watchedPath string
 }
 
 // cachedLine holds the rendered rows of one history line. It is index-aligned
@@ -460,6 +484,11 @@ type promptMark struct {
 	// appended, so the rewind truncates to exactly that and keeps everything
 	// above it — including the "session reset" notices /new leaves behind.
 	idx int
+	// images are the pictures that turn carried, restored on a rewind. Without
+	// them a prompt sent as nothing but a screenshot comes back as an empty
+	// input box: the store has no text for it, so the fallback to mark.text is
+	// also empty, and the user has to find the file again.
+	images []imgprev.Attachment
 }
 
 type paletteState struct {
@@ -573,6 +602,13 @@ func (m *uiModel) commands() []command {
 		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
 			return m.changeDir("")
 		}},
+		{name: "image", desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
+			return m.attachImageCmd("")
+		}},
+		{name: "unimage", desc: i18n.T("drop the last attached picture"), run: func(m *uiModel) tea.Cmd {
+			m.dropPendingImage()
+			return nil
+		}},
 		{name: "mouse", desc: i18n.T("toggle mouse wheel scrolling"), run: func(m *uiModel) tea.Cmd {
 			m.mouseEnabled = !m.mouseEnabled
 			return nil
@@ -612,6 +648,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
+				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
 			m.historyDirty = true
 			return nil
@@ -860,6 +897,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var extra tea.Cmd
 	switch msg := msg.(type) {
 	case tea.ColorProfileMsg:
+		// Recorded because an image preview is drawn in whatever the terminal can
+		// actually show: truecolor escapes sent to a 16-colour terminal come out
+		// as a field of wrong-coloured blocks, and the ramp is the fallback that
+		// still carries the picture.
+		m.profile = msg.Profile
 		// The renderer has already adopted the reported profile; all that is left
 		// is to ask for the finer capabilities when this one is not enough.
 		return m, upgradeColorProfile(msg.Profile)
@@ -878,6 +920,18 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.pasteTarget() != nil {
 			m.pasteInto(string(msg.Content))
 			return m, nil
+		}
+		// This — and not the ctrl+v key — is where a pasted *picture* arrives in
+		// any terminal that binds ctrl+v itself, which is most of them: the key
+		// never reaches the program, the terminal converts it, and a screenshot
+		// on the clipboard comes out as this message with nothing in it or with
+		// the filename of a file that was copied rather than captured. Asking
+		// the clipboard here is what makes the paste work at all on those.
+		//
+		// No return: the text is inserted by the textinput at the tail of Update,
+		// and a clipboard holding both would otherwise lose the text.
+		if cmd := m.pasteImageCmd(); cmd != nil {
+			extra = cmd
 		}
 	case tea.MouseClickMsg:
 		if !m.mouseEnabled {
@@ -979,6 +1033,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// ctrl+v is not a paste inside a raw-mode TUI; the terminal sends the
 			// control character and nothing else. Read the clipboard directly, so
 			// the shortcut works wherever bracketed paste is unavailable.
+			//
+			// The picture is asked for first and the text second, in one command:
+			// a clipboard holding a screenshot has no text to give, and one holding
+			// a command line has no picture, so the two never really compete.
 			if m.pasteTarget() != nil {
 				text, err := clipboard.ReadAll()
 				if err != nil {
@@ -988,6 +1046,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pasteInto(text)
 				return m, nil
 			}
+			return m, m.ctrlPasteCmd()
 		case "esc":
 			// The command list closes on escape before anything else, so a user
 			// who opened it by accident gets their prompt back without losing the
@@ -1128,6 +1187,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" || m.busy {
 				return m, nil
 			}
+			// /unimage is a command about an attachment, and the prompt it is most
+			// often wanted in already holds a dropped path — typing it there appends
+			// to the path, so a whole-line match never fires. Worse than a no-op: the
+			// line is no longer a command, so it goes to the model as a question about
+			// a file called "/unimage", carrying the picture that was to be removed.
+			//
+			// It is taken out of the prompt before anything else runs, so what is left
+			// in the input is what the user was actually saying.
+			if rest, ok := cutCommandToken(text, "/unimage"); ok {
+				m.input.SetValue(rest)
+				m.dropPendingImage()
+				return m, nil
+			}
 			switch text {
 			case "/quit", "/exit":
 				return m, tea.Quit
@@ -1137,6 +1209,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
+					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
 				m.historyDirty = true
 				m.followVP()
@@ -1253,6 +1326,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.changeDir(strings.TrimSpace(arg))
 			}
+			if arg, ok := strings.CutPrefix(text, "/image"); ok {
+				// An attach does not start a turn, so this one is allowed while
+				// busy: a user who has just been shown a failure mid-turn is
+				// exactly the user who wants to try a different picture next.
+				return m, m.attachImageCmd(arg)
+			}
 			if strings.HasPrefix(text, "/debug") {
 				// Diagnostics for the transcript pipeline: which line kind the
 				// reply is stored under, and whether the markdown renderer saw
@@ -1285,16 +1364,67 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.switchModelCmd(id)
 			}
-			// The mark goes in before the prompt's own line, so a rewind cuts the
-			// transcript exactly above it and the prompt line goes with it.
-			m.promptMarks = append(m.promptMarks, promptMark{text: text, idx: len(m.history)})
+			// A picture dropped into the prompt as a path is taken out of the text
+			// and attached, so what the model reads is the question without a
+			// filename in it. A path that is not an image stays in the prompt:
+			// silently swallowing it would turn a typo into a turn about nothing.
+			text, imgs := m.takeImagePaths(text)
+			imgs = append(imgs, m.pendingImages()...)
+			m.pending = nil
+			if strings.TrimSpace(text) == "" && len(imgs) == 0 {
+				// Nothing to send: either the prompt was empty, or every token in
+				// it was a path that failed to load — and that reason is already
+				// on screen.
+				return m, nil
+			}
+			// Every picture the turn carries is written to the transcript here, and
+			// only here. A pending one was already drawn in the strip above the
+			// input; drawing it again would put two copies of the same picture on
+			// screen, and dropping the attachment would remove one and leave the
+			// other. This is the moment it joins the conversation.
+			m.showPreviews(imgs)
+			// The mark goes in before the previews, so its idx points at the first
+			// of them and a rewind truncates the whole turn away together: the
+			// pictures, the prompt that sent them, and the reply. Were the mark
+			// recorded after the previews they would survive the cut and stay on
+			// screen describing a turn that no longer exists.
+			m.promptMarks = append(m.promptMarks,
+				promptMark{text: text, idx: len(m.history), images: imgs})
 			m.history = append(m.history, line{kindUser, text})
 			m.historyDirty = true
 			m.busy = true
+			// The pictures have left the pending strip for the transcript, so the
+			// rows it was holding go back before the viewport is re-synced against
+			// them.
+			m.layout()
 			m.followVP()
 			m.savePrompt(text)
-			return m, m.startTurn(text)
+			return m, m.startTurn(text, imgs)
 		}
+	case imageAttachedMsg:
+		if msg.err != nil {
+			// Not reported here: a path the user is midway through typing will
+			// fail to open and then succeed a moment later, and an error line for
+			// every intermediate state is noise. The status line already carries
+			// the last failure.
+			return m, nil
+		}
+		if msg.fromInput && msg.path != m.watchedPath {
+			// The prompt moved on while this file was being read. Attaching now
+			// would put a preview under a path the user has already deleted, and
+			// the next keystroke would then delete it again — a flicker of a
+			// picture they took back.
+			return m, nil
+		}
+		if msg.fromInput {
+			m.addPendingFrom(msg.a, true, msg.path)
+			return m, nil
+		}
+		m.addPending(msg.a, false)
+		return m, nil
+	case imageErrMsg:
+		m.reportImage(i18n.T("clipboard"), msg.err)
+		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -1403,8 +1533,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	m.updateSuggest()
+	// After the input's own update, so the candidate is the text the user has
+	// actually typed — and before followVP, so a strip appearing in the same
+	// frame is measured against a viewport that has already given up its rows.
+	watch := m.watchInputImage()
 	m.followVP()
-	return m, tea.Batch(cmd, extra)
+	return m, tea.Batch(cmd, extra, watch)
 }
 
 // sidebarVisible reports whether the sidebar is actually on screen. Having it
@@ -1433,7 +1567,28 @@ func (m *uiModel) chromeHeight() int {
 	if m.headerVisible() {
 		h += headerHeight
 	}
+	h += m.pendingHeight()
 	return h
+}
+
+// pendingHeight is how many rows the pending-image strip takes above the input,
+// or 0 when nothing is attached.
+//
+// It is a method and not a constant for the same reason chromeHeight is: the rows
+// belong to the transcript whenever they are not on screen. A strip that reserved
+// its height permanently would take a preview's worth of conversation away from a
+// user who has never attached anything.
+func (m *uiModel) pendingHeight() int {
+	if len(m.pending) == 0 {
+		return 0
+	}
+	rows := 0
+	for _, a := range m.pending {
+		rows += a.Rows + 1 // the art, plus its caption
+	}
+	// The strip is framed like the input box it sits above, so it costs its two
+	// borders as well.
+	return rows + pendingPanelBorder
 }
 
 // chatBoxWidth is the outer width of the chat panel, borders included. It is
@@ -1640,6 +1795,45 @@ func (m *uiModel) updateSuggest() {
 	m.rebuildSuggest(m.input.Value())
 }
 
+// watchInputImage looks at the input for a picture path and attaches it, so the
+// preview appears while the user is still writing the prompt rather than only
+// after they press enter.
+//
+// It runs on every keystroke, so the guard is cheap on purpose: a path is only
+// read once its extension says it could be an image, and only a change of that
+// candidate triggers anything. Decoding on every keypress would stall on each
+// character of a path still being typed.
+//
+// A change also *un-attaches* the previous candidate. A path in the prompt is a
+// statement the user is still editing: delete the path and the picture must go
+// with it, or the strip goes on showing something they have taken back.
+func (m *uiModel) watchInputImage() tea.Cmd {
+	cand := ""
+	for _, tok := range splitTokens(m.input.Value()) {
+		if looksLikeImage(tok.text) {
+			cand = tok.text
+			break
+		}
+	}
+	if cand == m.watchedPath {
+		return nil
+	}
+	m.watchedPath = cand
+
+	dropped := m.dropInputPending()
+	// Only re-laid-out when something actually went: a keystroke that merely
+	// changed the path candidate and read nothing should not resize the viewport
+	// for no reason.
+	if dropped {
+		m.layout()
+		m.followVP()
+	}
+	if cand == "" {
+		return nil
+	}
+	return m.watchImageCmd(cand)
+}
+
 // rebuildSuggest rebuilds the command list for text, keeping the highlighted row
 // when the list it was picked from is the same one. Typing narrows the list, and
 // a selection that pointed past the new end has to go — but nothing else may
@@ -1717,12 +1911,22 @@ type transcriptRow struct {
 	style lipgloss.Style
 	first string
 	rest  string
-	// verbatim marks pre-formatted art (the logo), which keeps its own line
-	// breaks: re-wrapping box-drawing runes would scramble the picture.
+	// verbatim marks pre-formatted art (the logo, an image preview), which keeps
+	// its own line breaks: re-wrapping box-drawing runes would scramble the
+	// picture.
 	verbatim bool
 	// markdown marks text the model produced, which is rendered as markdown
 	// rather than as literal prose.
 	markdown bool
+	// prestyled marks art that carries its own colour. The transcript wraps every
+	// other row in row.style, which would put the panel's foreground in front of
+	// the picture's own and reset it at the end of the row — a preview of a
+	// screenshot comes out tinted and half its colours replaced by the default.
+	prestyled bool
+	// captionLast marks a block whose final row is a caption rather than part of
+	// the picture, so a block too wide to draw can fall back to that row instead of
+	// disappearing. The logo has no such row and so keeps being dropped whole.
+	captionLast bool
 }
 
 func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
@@ -1741,6 +1945,15 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 		return transcriptRow{style: styleErr}
 	case kindLogo:
 		return transcriptRow{style: styleLogo, verbatim: true}
+	case kindImage:
+		// An empty style on purpose, paired with prestyled: the preview brings its
+		// own colours, so there is nothing to add and something to break.
+		return transcriptRow{
+			style:       lipgloss.NewStyle(),
+			verbatim:    true,
+			prestyled:   true,
+			captionLast: true,
+		}
 	}
 	return transcriptRow{style: styleAgent}
 }
@@ -1767,6 +1980,17 @@ func rowRows(text string, width int, row transcriptRow) []string {
 	rows := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	for _, r := range rows {
 		if ansi.StringWidth(r) > width {
+			// An image preview whose last row is its caption falls back to the
+			// caption: the picture is too wide to draw honestly, but "a picture was
+			// sent, this one" is still worth saying. Dropping the whole block
+			// would leave a turn sent as nothing but a screenshot with nothing at
+			// all on screen to say so.
+			if row.captionLast && len(rows) > 0 {
+				last := rows[len(rows)-1]
+				if ansi.StringWidth(last) <= width {
+					return []string{last}
+				}
+			}
 			return nil
 		}
 	}
@@ -1792,6 +2016,7 @@ func (m *uiModel) renderHistory() string {
 	var b strings.Builder
 	for i := range m.history {
 		l := &m.history[i]
+		row := m.rowStyle(l.kind)
 		var rows []string
 		hit := false
 		if i < len(m.cachedRows) {
@@ -1801,11 +2026,11 @@ func (m *uiModel) renderHistory() string {
 			}
 		}
 		if !hit {
-			row := m.rowStyle(l.kind)
 			for _, r := range rowRows(l.text, w, row) {
-				// A markdown row arrives already styled by the renderer; wrapping it
+				// A markdown row arrives already styled by the renderer, and a
+				// prestyled one already carries its own colours; wrapping either
 				// again would nest the escapes and break the width accounting.
-				if row.markdown {
+				if row.markdown || row.prestyled {
 					rows = append(rows, r)
 					continue
 				}
@@ -1823,8 +2048,17 @@ func (m *uiModel) renderHistory() string {
 				m.cachedRows = append(m.cachedRows, entry)
 			}
 		}
+		// An image preview brings its own left margin, painted in the picture's
+		// background: adding chatIndent on top of it would put a stripe of the
+		// terminal's own background down the side of the picture, which reads as a
+		// column of the image that is out of step with the rest.
+		margin := strings.Repeat(" ", chatIndent)
 		for _, r := range rows {
-			b.WriteString(strings.Repeat(" ", chatIndent) + r + "\n")
+			if row.prestyled {
+				b.WriteString(r + "\n")
+				continue
+			}
+			b.WriteString(margin + r + "\n")
 		}
 	}
 	m.cachedHistory = b.String()
@@ -2927,7 +3161,14 @@ func (m *uiModel) retryNotifier() func(llm.RetryEvent) {
 	}
 }
 
-func (m *uiModel) startTurn(text string) tea.Cmd {
+// startTurn sends one prompt to the model.
+//
+// The prompt is built as parts rather than as text because a turn may carry
+// pictures: genai.NewContentFromText can only ever hold a string, so a turn with
+// an image attached would have had to drop it. With no images the result is the
+// same single text part that was always sent, which is what keeps every existing
+// conversation byte-identical on the wire.
+func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 	p := m.prog
 	r, userID, sessionID := m.runner, "user", m.sessionID
 	turnCtx, cancel := context.WithCancel(context.Background())
@@ -2935,7 +3176,7 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 	m.turnCount++
 	m.statusText = i18n.T("generating a reply…")
 	return func() tea.Msg {
-		userMsg := genai.NewContentFromText(text, genai.RoleUser)
+		userMsg := userContent(text, imgs)
 		// The accumulator is per LLM round, and a round ends at every
 		// finalised response — see turnText.
 		var tt turnText
@@ -2979,6 +3220,41 @@ func (m *uiModel) startTurn(text string) tea.Cmd {
 		}
 		return turnDoneMsg{nil}
 	}
+}
+
+// userContent assembles the user turn: the text the user typed, then the pictures
+// they attached.
+//
+// Text comes first and the images follow, which is the order the vision APIs
+// document. It also decides what a picture-only turn says: the images alone would
+// leave the model nothing to tie them to, and the transcript's own caption is
+// already stored separately, so this is the only place a bare attachment gets a
+// word of context.
+func userContent(text string, imgs []imgprev.Attachment) *genai.Content {
+	if len(imgs) == 0 {
+		return genai.NewContentFromText(text, genai.RoleUser)
+	}
+	parts := make([]*genai.Part, 0, len(imgs)+1)
+	if t := strings.TrimSpace(text); t != "" {
+		parts = append(parts, genai.NewPartFromText(t))
+	} else if len(imgs) == 1 {
+		parts = append(parts, genai.NewPartFromText(
+			i18n.T("Here is the image I want you to look at.")))
+	} else {
+		parts = append(parts, genai.NewPartFromText(
+			i18n.T("Here are the images I want you to look at.")))
+	}
+	for _, a := range imgs {
+		parts = append(parts, &genai.Part{InlineData: &genai.Blob{
+			Data:     a.Data,
+			MIMEType: a.MIME,
+			// The file name travels with the blob so a session read back from
+			// disk still says which picture a part was, rather than presenting
+			// an anonymous blob.
+			DisplayName: a.Name,
+		}})
+	}
+	return genai.NewContentFromParts(parts, genai.RoleUser)
 }
 
 // mouseCell is one point of a selection, in terminal cells.
@@ -3382,6 +3658,35 @@ func (m *uiModel) statusBarView() string {
 		return styleStatusBar.Width(width).Render(truncate(m.modeBadge(), inner))
 	}
 	return styleStatusBar.Width(width).Render(left + "  " + truncate(statusDesc, inner-ansi.StringWidth(left)-2))
+}
+
+// pendingStrip is the preview of what the next message will carry, framed like the
+// input box above which it sits. It is empty when nothing is attached.
+//
+// The same art the transcript shows is reused rather than redrawn, so what waits to
+// be sent and what was sent cannot disagree — a second renderer for the same picture
+// would eventually give two answers to "what am I about to attach".
+//
+// Width is the terminal's, not the panel's: the strip is not inside the chat panel,
+// so a sidebar beside it does not narrow it. That is why the art is drawn at the
+// preview's fixed width and simply has room, rather than being re-sampled to fit.
+func (m *uiModel) pendingStrip() string {
+	if len(m.pending) == 0 {
+		return ""
+	}
+	rows := 0
+	for _, a := range m.pending {
+		rows += a.Rows + 1
+	}
+	// Each row is written at its own width and lipgloss pads the rest, because a
+	// row of half-blocks carries its own background only as far as the glyphs go.
+	body := make([]string, 0, rows)
+	for i, a := range m.pending {
+		body = append(body, strings.Split(a.Art, "\n")...)
+		body = append(body, truncate(a.Caption(i+1, len(m.pending), a.Name), max(m.width, 8)))
+	}
+	return stylePanel.Width(max(m.width, 16)).Height(rows + pendingPanelBorder).
+		Render(strings.Join(body, "\n"))
 }
 
 // headerView renders the app name, the model and the session id on one row.
@@ -3860,11 +4165,17 @@ func (m *uiModel) View() tea.View {
 	// overflowing row is enough to shift the whole frame sideways. The command
 	// list is deliberately not a part: it is painted over the panel below, so
 	// opening and closing it leaves the frame byte-identical.
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
 	if m.headerVisible() {
 		parts = append(parts, m.headerView())
 	}
 	parts = append(parts, middle, m.statusBarView())
+	// The strip goes between the status bar and the input box rather than into
+	// either: it is about what the *next* message will carry, which is the input's
+	// business, and putting it above the bar would read as part of the transcript.
+	if strip := m.pendingStrip(); strip != "" {
+		parts = append(parts, strip)
+	}
 	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)

@@ -293,5 +293,22 @@ var catalog = map[Lang]map[string]string{
 		"enter — send · esc — back":                                  "enter — отправить · esc — назад",
 		"write your own answer":                                      "вписать свой вариант",
 		"(recommended)":                                              "(рекомендуется)",
+
+		// Pictures.
+		"attach a picture to the next message (/image <path>)":     "прикрепить картинку к следующему сообщению (/image <путь>)",
+		"drop the last attached picture":                           "убрать последнюю прикреплённую картинку",
+		"usage: /image <path> — or drop a picture into the prompt": "usage: /image <путь> — или перетащите картинку в поле ввода",
+		"cannot read that image: ":                                 "не удалось прочитать картинку: ",
+		"cannot attach that image: ":                               "не удалось прикрепить картинку: ",
+		"the attached image is empty":                              "прикреплённая картинка пустая",
+		"images need the chat wire: ":                              "картинки требуют chat-протокола: ",
+		"uses /v1/responses. Set DMCODE_API=chat, or pick a provider on /setup that speaks /chat/completions.": "работает через /v1/responses. Поставьте DMCODE_API=chat или выберите на /setup провайдера с /chat/completions.",
+		"clipboard": "буфер обмена",
+		"image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last": "картинки: /image <путь> прикрепляет картинку · перетащенный путь забирается из поля ввода · ctrl+v вставляет из буфера обмена · /unimage убирает последнюю",
+		"attached (%d waiting to send)":              "прикреплено (%d ждёт отправки)",
+		"removed ":                                   "убрано ",
+		"no image is attached":                       "картинка не прикреплена",
+		"Here is the image I want you to look at.":   "Вот картинка, на которую нужно посмотреть.",
+		"Here are the images I want you to look at.": "Вот картинки, на которые нужно посмотреть.",
 	},
 }

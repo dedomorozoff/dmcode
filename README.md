@@ -177,6 +177,61 @@ Replies are laid out as markdown, not re-wrapped as plain prose:
 Prose without markup passes through unchanged. Tool output and your own prompts
 are never treated as markdown, so a JSON payload containing `**` survives intact.
 
+## Sending a picture
+
+Attach an image and you see it before you send it — a small coloured preview
+drawn in the transcript out of half-block glyphs, two pixels to a cell, with the
+file name, the dimensions and the size underneath:
+
+```
+[image] screenshot.png · 1920×1080 · 214 KB
+```
+
+Three ways in, and they all end at the same place:
+
+- `/image <path>` attaches one without sending anything, so you can look at the
+  preview and decide. It appears once, as a strip above the input while it waits,
+  and moves into the transcript when it is sent — the same rendered art either
+  time, so what you approved and what went are the same picture.
+- **Drag and drop.** A terminal cannot hand over a file — dropping one inserts its
+  *path* as text — so a picture path in the prompt is taken out of the prompt and
+  attached. The model reads your question without the filename in it. A quoted path
+  with spaces works; a path that is not a picture stays exactly where it is. The
+  preview appears the moment the path is complete, not when you press enter.
+- `ctrl+v` pastes the clipboard's picture when it holds one, and falls through to
+  the usual text paste when it does not. Windows only: a screenshot there is a DIB
+  and the rest of the platforms would each need their own protocol.
+
+### Taking one back
+
+A picture that came from a path in the prompt belongs to that text, so deleting the
+path takes the preview with it — on the keystroke that removes the last character
+of it, not on the next one. A picture from `/image` or the clipboard is not tied to
+the prompt and stays put, because it was attached on purpose.
+
+`/unimage` drops the last attachment whatever the prompt holds, and it works
+mid-sentence as long as it is the last thing typed. It also removes the dropped
+path, because a removal that leaves the path behind is not one: the prompt still
+names the file, so sending would attach the same picture again.
+
+PNG, JPEG and GIF are read. An image longer than 1568 pixels is reduced before it
+goes anywhere, because that is the size the vision APIs treat as the point of
+diminishing returns and a 4K screenshot is several megabytes of base64 in every
+subsequent request of the conversation. Over 4 MB after that is refused with a
+message rather than sent: it would not fit the session store's per-line limit, and
+the store drops a line it cannot read — a lost turn with nothing on screen to say
+so.
+
+Pictures need the **chat wire** (`/chat/completions`). On a provider configured for
+`/v1/responses` dmcode says so at the moment you attach, naming the fix, rather
+than failing later inside the SDK — ADK's own client rejects an inline picture
+outright. `DMCODE_API=chat` sends everything, including OpenAI, down the chat wire
+instead.
+
+Rewinding a turn brings its pictures back with the prompt, and `/new` and a session
+switch leave them behind — they belong to the conversation that was going to carry
+them.
+
 ## Plan, act and yolo modes
 
 `tab` switches between act and plan. `shift+tab` turns yolo mode on and off —
@@ -347,7 +402,17 @@ Cancellation reaches the context but not the process, so a running `run_command`
 finishes on its own schedule. The workspace boundary is a lexical check at
 resolve time; the tools that open files close the symlink gap themselves, but
 `grep` skipping symlinks means it will not follow one to a file outside the
-tree. Please report what breaks.
+tree. Pictures reach only providers on the `/chat/completions` wire, and
+`ctrl+v` reads the clipboard's image on Windows alone — on Linux and macOS it
+pastes text, as it always did. A pasted DIB is read at 24 or 32 bits; a
+palettised or compressed one is refused with a message saying so rather than
+guessed at.
+
+Attaching and previewing a picture is confirmed working end to end on Windows.
+**Sending one to a model is not yet confirmed** — no picture has been through a
+real vision endpoint, so whether the `image_url` data URL dmcode puts on the wire
+is one a live endpoint accepts, and whether the model then answers about the
+picture, are both untested. Please report what breaks.
 
 ## Troubleshooting
 
@@ -400,9 +465,11 @@ plus `.deb`, `.rpm`, an Arch package and a Windows zip.
 main.go              chains the packages together, nothing else
 internal/agent       the agent, its instructions, sub-agents, the mode switch
 internal/ask         the ask_user broker and its timer
+internal/clipimg     reads a picture off the system clipboard (Windows)
 internal/config      .env, endpoints, the setup wizard
 internal/discover    finds the providers that actually answer
 internal/i18n        English source strings and the Russian catalog
+internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire
 internal/llm         OpenAI-compatible wire, failover, retries
 internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence
