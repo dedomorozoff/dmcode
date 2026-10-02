@@ -1,3 +1,226 @@
+# dmCode v0.1.8
+
+The agent can see. Drop a screenshot into the prompt, paste one from the
+clipboard, or attach one with `/image` — and dmcode draws it, in colour, before
+you send it, so you can see what you are about to ask about.
+
+> ### ⚠️ Partly verified — read this before trusting it with a real screenshot
+>
+> **Attaching and previewing are confirmed working on Windows**: a clipboard
+> screenshot is read, drawn, and attached, and a dropped path attaches the moment
+> the path is complete. That was tested against a real clipboard, on a real
+> session, and the failures it took to get there are listed at the bottom because
+> each of them was invisible until something was measured.
+>
+> **Sending a picture to a model is not yet confirmed.** A picture has not been
+> put through a real vision endpoint end to end, so what is unproven is that the
+> `image_url` data URL dmcode puts on the wire is one a live endpoint accepts, and
+> that the model then answers about the picture. Everything up to the request is
+> covered by tests, including the exact JSON shape.
+>
+> Known gaps, stated plainly: `ctrl+v` reads the clipboard on Windows only, because
+> a screenshot is a DIB there and every other platform needs its own protocol —
+> pasting a picture on Linux or macOS falls through to the text paste. 24- and
+> 32-bit DIBs are read; a 1-, 4- or 8-bit palettised one, or a compressed one, is
+> refused with a message naming what is supported. The picture sent to the model
+> is the same reduced bytes the preview is drawn from, never the original.
+
+## Install
+
+```bash
+# macOS / Linux / BSD
+curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
+```
+
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
+
+```bash
+go install github.com/dedomorozoff/dmcode@latest
+```
+
+## What's new since v0.1.7
+
+### You can see the picture you are about to send
+
+An attachment is drawn in the transcript out of half-block glyphs, two pixels to a
+cell, with the file name, the dimensions and the size underneath:
+
+```
+[image] screenshot.png · 1920×1080 · 214 KB
+```
+
+It is in exactly one place at a time. While it waits it is a strip above the
+input; when you send, that same rendering moves into the transcript and the strip
+empties. It used to do both, and that was a bug rather than a redundancy: the same
+picture sat on screen twice, and removing it took away one copy and left the
+other. So "what am I about to send" is answerable from the screen, and there is
+only ever one copy of it.
+
+### Three ways in, and two of them are how you already work
+
+- `/image <path>` attaches without sending, so you can look and decide.
+- **Drag and drop.** A terminal cannot hand over a file — dropping one inserts its
+  *path* as text — so a picture path in the prompt is taken out of the prompt and
+  attached. The model reads your question without the filename in it. A quoted
+  path with spaces works; a path that is not a picture stays exactly where it is.
+- `ctrl+v` pastes the clipboard's picture when it holds one, and falls through to
+  the ordinary text paste when it does not. Windows only.
+
+### The preview is the picture, not a picture of the picture
+
+Reduction happens first and both outputs come from it: an image longer than 1568
+pixels is shrunk, and *then* the preview is drawn and the same bytes go on the
+wire. Drawing the original and sending a reduced copy would show you a preview of
+something the model never saw.
+
+The preview is also a fixed width rather than the panel's, because a row that does
+not fit is dropped whole — a preview sized to the panel would vanish on a narrower
+terminal instead of shrinking. And the left edge is part of the image: the
+transcript indents every row, so the picture samples two extra cells to reach the
+border. A margin of spaces was tried first and reads as a dark stripe down the side
+on a dark terminal; painting the margin in a sampled colour is worse still, because
+a space holds one colour while the cell beside it holds two, so a seam runs down
+the edge wherever the image changes top to bottom.
+
+### Pictures need the chat wire, and dmcode says so when you attach
+
+On a provider configured for `/v1/responses` the attach is refused at once, naming
+the fix, instead of failing later inside the SDK — ADK's own client rejects an
+inline picture outright. `DMCODE_API=chat` sends everything, including OpenAI, down
+the chat wire instead.
+
+### Deleting the path takes the picture with it
+
+A picture that came from a path in the prompt belongs to that text: delete the path
+and the preview goes, on the keystroke that removed the last character of it. A
+picture from `/image` or the clipboard is not tied to the prompt and stays, because
+it was attached on purpose.
+
+The slow part of this was the delete. Decoding a file is asynchronous, so a read
+started on a path can finish after the path is gone — the picture arrives onto a
+prompt that no longer mentions it, which is the same bug as a preview that will
+not be deleted, arriving afterwards instead of before. The read now carries the
+path it was started for and the arrival is matched against what the prompt says.
+
+### `/unimage` works in a prompt that already holds a file
+
+`/unimage` is most often wanted exactly when a dropped path is sitting in the
+prompt, and typing it there *appends* to the path, so a whole-line command match
+never fired. That was worse than doing nothing: the line stopped being a command
+and was sent to the model as a question about a file called `/unimage`, carrying
+the very picture being removed.
+
+It is now recognised as the last thing typed, and it takes the path with it —
+otherwise the removal does not hold, because the prompt still names the file and
+the send attaches the same picture again. A pasted picture has no path in the
+prompt, so nothing is cut and your text is left alone.
+
+### Four things that only showed up once something was measured
+
+Each of these looked correct and was wrong, and none of them was found by reading
+the code. They are here because the pattern is the point: every one is a case where
+a *question* was answered with the wrong question.
+
+- **`ctrl+v` was on a key the terminal never sends.** A terminal that binds `ctrl+v`
+  converts the key to a paste and does not deliver the keystroke, so the picture
+  branch was unreachable on most terminals — and a screenshot on the clipboard has
+  no text to paste, so there was nothing to fall back to. The paste event now asks
+  the clipboard too, and the keystroke route asks for the picture and falls back to
+  the text, because it previously returned the picture command unconditionally and
+  so did *nothing at all* when the clipboard held text.
+- **A format the clipboard advertises is not a format it will render.** Windows
+  synthesises clipboard formats from the ones it holds, so an application that
+  lists `CF_DIBV5` but will not render it leaves the format "available" while
+  `GetClipboardData` returns `ERROR_NOT_FOUND` — reported to the user as
+  "Element not found" while a perfectly readable `CF_DIB` sat next to it. dmcode now
+  takes the first format that actually *decodes*, which is the only thing that can
+  tell a handle that is not a picture from one that is missing.
+- **The picture bounds check forgot the header was in the same allocation.** It
+  compared the pixel count against the handle's size, so a DIB lying about its
+  dimensions by more than a header's worth of bytes passed and the decoder read
+  memory the clipboard does not own — directly under a comment claiming every read
+  was bounds-checked.
+- **The preview never reset its colour.** Each cell re-states both of its colours,
+  so the one that survived a row was the last cell's, and the caption underneath
+  was drawn in the colour of the image's bottom-right pixel. Invisible on a picture
+  whose edges happen to be dark, which is why it survived a careful look.
+
+One more, about the tests rather than the code: the clipboard round-trip test
+destroyed the user's clipboard on every `go test ./...` while its own comment
+claimed an environment-variable gate that did not exist. It is gone. The decoder is
+now tested through synthesised bytes — orientation, 24- and 32-bit, row padding,
+bit-field masks, and nine malformed headers — and the format-selection policy is
+tested through injected functions. Nothing in the suite touches the clipboard, and
+a test that has to reach a global, shared, destructive resource to check a branch
+is a test that will fail for someone else.
+
+# dmCode v0.1.7
+
+Three tools that did nothing, a yolo mode, and selection you can copy with.
+
+## What's new since v0.1.6
+
+### Two tools that never ran, and why
+
+`ask_user` and `todo_write` compiled, passed their unit tests, and did nothing at
+all: the transcript showed a tool call and a schema-validation message, and no
+result. The cause was not their logic but their *generated argument schema*,
+which `functiontool` derives from the Go type — so a field with no description
+reaches the model as a bare `{"type":"string"}` and tells it nothing, and a field
+is required unless its JSON tag says otherwise. `ask_user` had declared its options
+as a nested object, so every shape a model naturally sent was refused;
+`todo_write` marked a step's `status` required, so a plan written without it was
+rejected whole.
+
+Both are flat now, every field described, with the exact payloads a model was
+observed to send driven through a real `runner.Run` turn by the tests.
+
+### `shift+tab` runs without stopping to ask
+
+Yolo mode is act's reach with `ask_user` withdrawn, so "the agent will not stop to
+ask" is a property of what it can reach rather than a line in the instruction it is
+asked to believe. It is that one key and nothing else: `tab` cannot reach it, no
+command names it, and leaving it returns to the mode it came from.
+
+### Selecting with the mouse
+
+A drag selects in the transcript and releases into the clipboard, with a character
+count in the status bar because a selection can be a word or three screens of build
+output. `/mouse` turns it off, because with the mouse on the terminal's own
+drag-select is gone.
+
+# dmCode v0.1.6
+
+The agent reaches the web, and to the tools you already have.
+
+## What's new since v0.1.5
+
+### `web_search`, without a key
+
+DuckDuckGo's HTML endpoint, fetched directly. It is the one instrument that
+deliberately reaches past the workspace boundary, and it is the reason the boundary
+is stated as a boundary rather than a wall: everything else stays inside the
+project, and this one does not.
+
+### MCP servers
+
+Config from `~/.dmcode/mcp.json` and from a `.mcp.json` in the workspace, in the
+common `mcpServers` format — a stdio `command` or a `url`. One lazy toolset per
+server, wired in so a dead server costs nothing until a turn actually needs it.
+`/mcp` is the one eager pass: names for the sidebar, and a note for each server
+that did not come up.
+
 # dmCode v0.1.5
 
 A conversation you can take back: undo the last message, keep several sessions and

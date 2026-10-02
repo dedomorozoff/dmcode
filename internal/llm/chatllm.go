@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
 // chatModel implements model.LLM on top of the classic OpenAI
@@ -225,7 +227,7 @@ func stringSliceToAny(v any) any {
 // function responses arrive as separate model/user contents and become
 // tool_calls / tool messages respectively, which is how the chat API expects
 // the tool loop to be spelled.
-func contentsToChat(contents []*genai.Content) []chatMessage {
+func contentsToChat(contents []*genai.Content) ([]chatMessage, error) {
 	var msgs []chatMessage
 	for _, c := range contents {
 		if c == nil {
@@ -237,6 +239,7 @@ func contentsToChat(contents []*genai.Content) []chatMessage {
 		}
 		var text strings.Builder
 		var calls []chatToolCall
+		var images []chatContentPart
 		for _, p := range c.Parts {
 			if p == nil {
 				continue
@@ -269,19 +272,75 @@ func contentsToChat(contents []*genai.Content) []chatMessage {
 					ToolCallID: p.FunctionResponse.ID,
 					Content:    body,
 				})
+			case p.InlineData != nil:
+				// The one part type that used to vanish here without a word. An
+				// image dropped on the floor is the worst kind of bug in this
+				// function: the turn succeeds, the model answers about something
+				// else, and nothing on screen says a picture was involved.
+				part, err := imagePart(p.InlineData)
+				if err != nil {
+					// A part that is neither text nor a call nor a response is
+					// refused rather than passed over. Silence here would be the
+					// same bug one level up.
+					return nil, err
+				}
+				images = append(images, part)
 			case p.Text != "":
 				text.WriteString(p.Text)
 			}
 		}
-		if text.Len() > 0 || len(calls) > 0 {
+		if text.Len() > 0 || len(calls) > 0 || len(images) > 0 {
 			msgs = append(msgs, chatMessage{
 				Role:      role,
-				Content:   text.String(),
+				Content:   chatContent(text.String(), images),
 				ToolCalls: calls,
 			})
 		}
 	}
-	return msgs
+	return msgs, nil
+}
+
+// chatContent picks between the two shapes the API allows for `content`.
+//
+// The string form is used whenever there is no picture, which is every turn
+// except the ones that attach one — so a request that never mentions an image is
+// byte-identical to what it was before images were supported, and an endpoint
+// that only ever implemented the string form keeps working.
+func chatContent(text string, images []chatContentPart) any {
+	if len(images) == 0 {
+		return text
+	}
+	parts := make([]chatContentPart, 0, len(images)+1)
+	// Text first, then the pictures: that is the order the APIs document, and a
+	// model reads a question before it looks at what the question is about.
+	if text != "" {
+		parts = append(parts, chatContentPart{Type: "text", Text: text})
+	}
+	return append(parts, images...)
+}
+
+// imagePart turns an inline blob into a chat image part, as a data URL.
+//
+// The base64 is built here rather than by the caller so there is exactly one
+// place a picture becomes a string, and no way for the transcript to claim one
+// thing was sent while another went.
+func imagePart(b *genai.Blob) (chatContentPart, error) {
+	if b == nil || len(b.Data) == 0 {
+		return chatContentPart{}, fmt.Errorf("dmcode: %s", i18n.T("the attached image is empty"))
+	}
+	mime := b.MIMEType
+	if mime == "" {
+		// The API rejects a data URL with no media type, and an absent one here
+		// means the caller built the blob by hand. PNG is the safe assumption:
+		// it is the format every endpoint accepts and none of them re-encode.
+		mime = "image/png"
+	}
+	return chatContentPart{
+		Type: "image_url",
+		ImageURL: &chatImageURL{
+			URL: "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(b.Data),
+		},
+	}, nil
 }
 
 func usageToGenai(u *chatUsage) *genai.GenerateContentResponseUsageMetadata {
@@ -404,7 +463,11 @@ func (m *chatModel) buildChatRequest(req *model.LLMRequest, stream bool) (chatRe
 			msgs = append(msgs, chatMessage{Role: "system", Content: sys.String()})
 		}
 	}
-	msgs = append(msgs, contentsToChat(req.Contents)...)
+	turn, err := contentsToChat(req.Contents)
+	if err != nil {
+		return chatRequest{}, err
+	}
+	msgs = append(msgs, turn...)
 	if len(msgs) == 0 {
 		return chatRequest{}, fmt.Errorf("dmcode: в запросе нет ни одного сообщения")
 	}
@@ -760,12 +823,62 @@ func (m *chatModel) generate(ctx context.Context, body chatRequest) iter.Seq2[*m
 	}
 }
 
+// chatMessage is one message on the wire.
+//
+// Content is `any` rather than a string because the chat API has two shapes for
+// it: a bare string when a turn is text, and an array of parts when it carries a
+// picture. The union is what every OpenAI-compatible endpoint accepts, and it is
+// why the field cannot stay typed — a string here would either drop the image or
+// smuggle it in as text.
+//
+// A turn with no parts still sends a string rather than an empty array, so the
+// overwhelmingly common request is byte-identical to what it was before images
+// existed.
 type chatMessage struct {
 	Role       string         `json:"role"`
-	Content    string         `json:"content,omitempty"`
+	Content    any            `json:"content,omitempty"`
 	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	Name       string         `json:"name,omitempty"`
+}
+
+// Text is the message's text, whatever shape Content took.
+//
+// It exists because Content is a union and every reader wants the prose: the
+// truncation re-ask appends to a message, the tests assert on what a turn said,
+// and each of them would otherwise have to type-assert. A part array with no text
+// element is not an error here — a picture-only turn is a real turn.
+func (m chatMessage) Text() string {
+	switch c := m.Content.(type) {
+	case string:
+		return c
+	case []chatContentPart:
+		var b strings.Builder
+		for _, p := range c {
+			if p.Type == "text" {
+				b.WriteString(p.Text)
+			}
+		}
+		return b.String()
+	case nil:
+		return ""
+	}
+	return fmt.Sprint(m.Content)
+}
+
+// chatContentPart is one element of a multi-part message. Only the two types the
+// chat API defines for this position are modelled; audio and file parts are not
+// something dmcode produces, and a struct that cannot express them is better
+// than one that can.
+type chatContentPart struct {
+	Type     string        `json:"type"`
+	Text     string        `json:"text,omitempty"`
+	ImageURL *chatImageURL `json:"image_url,omitempty"`
+}
+
+type chatImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type chatToolCall struct {

@@ -2,7 +2,7 @@
 
 `dmcode` is an autonomous, terminal-based AI coding assistant inspired by Charmbracelet's `crush`, built with **Go**, **google/adk-go** (`google.golang.org/adk/v2`), and **Bubble Tea** (`charm.land/bubbletea/v2`).
 
-> ### ✅ Verified — `ask_user`, `todo_*`; ⚠️ still unverified — the rest
+> ### ✅ Verified — `ask_user`, `todo_*`, and attaching a picture; ⚠️ still unverified — the rest
 >
 > The `todo_*` and `ask_user` tools **were broken end to end and are now fixed**.
 > They compiled, their unit tests passed, and in use they did nothing at all: the
@@ -14,6 +14,15 @@
 > a plan written without it was rejected whole. Both are fixed, and the fix is
 > covered by tests that drive the exact payloads a model was observed to send
 > through a real `runner.Run` turn.
+>
+> **Attaching a picture is verified on Windows against a live session**: a
+> clipboard screenshot is read, drawn and attached, and a dropped path attaches as
+> the path completes. Four bugs on that path were invisible until something was
+> measured, and every one is worth reading before changing this feature — see §5,
+> "Four bugs that only a measurement found". The one thing still unproven is the
+> step after the attachment: no picture has been sent to a real vision endpoint, so
+> nothing has confirmed that a live endpoint accepts the `image_url` data URL dmcode
+> puts on the wire, or that the model then answers about the picture.
 >
 > Still unverified, and worth testing first:
 > - `sub_agent`'s nested turn — a second agent with its own session, run from
@@ -31,7 +40,7 @@
 > - that `switch_mode`'s `EndInvocation` plus deferred `rebuildRunner` does not
 >   strand the runner — the UI test covers the pending-mode bookkeeping only;
 > - yolo mode has unit tests for the binding, the tool set and the badge, but no
->   TUI session has been driven through a real yolo turn.
+>   TUI session has been driven through a real yolo turn;
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
@@ -64,6 +73,13 @@
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
   - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
+  - `internal/imgprev`: turns image bytes into a picture in the terminal and into
+    the reduced bytes that go on the wire. Two outputs from one input, in that
+    order, so what is drawn is what is sent. `Load` does all of it.
+  - `internal/clipimg`: reads the clipboard's picture. A package of its own
+    because the answer is entirely platform-specific — a Windows screenshot is a
+    DIB, a macOS one a file URL, a Linux one an image URI from whichever tool owns
+    the selection — and nothing about that belongs in the TUI.
 
 ### Mouse selection
 
@@ -148,6 +164,65 @@ rather than showing a badge it cannot honour.
   appear in `/sessions`. It also gets no `sub_agent` (recursion) and no
   `ask_user` (a prompt whose context the user cannot see).
 
+### Pictures
+
+Five decisions in here are the ones to keep:
+
+- **The art is stored in `line.text`, not in a field.** `line{kind, text}` is
+  built positionally in a hundred places, so a third field would touch all of
+  them. `kindImage` + `verbatim` renders the stored string as-is instead, which
+  means `cachedLine` needed no change either — its key is `(kind, text, width)`
+  and the art *is* the text.
+- **The preview is a fixed width, not the panel's.** A verbatim row that does not
+  fit is dropped whole, so a preview sized to the panel would vanish on a narrower
+  terminal; a fixed one also means `rowRows` never has to re-render it.
+  `captionLast` is the exception that keeps this honest: when the block cannot
+  fit, the caption row survives on its own, because a turn sent as nothing but a
+  screenshot would otherwise leave nothing on screen at all.
+- **The bleed is part of the picture, not a margin beside it.** The transcript
+  indents every row by `chatIndent`, so a preview has to reach the panel border.
+  Two other ways were tried and both are worse: bare spaces carry the terminal's
+  own background (a dark stripe down the left on a dark terminal), and painting the
+  margin in a sampled colour is worse still, because a space holds one colour while
+  the cell beside it holds two — so a seam runs down the edge wherever the image
+  changes top to bottom. `imgprev.Load` takes a `bleed` and samples `cols+bleed`
+  cells, so the edge is continuous.
+- **A pending attachment is drawn in exactly one place.** `addPending` writes
+  nothing to the transcript; the strip above the input is the whole of what an
+  unsent picture looks like, and `showPreviews` runs at the send, which is the
+  moment it joins the conversation. It used to do both, and that was a bug rather
+  than a redundancy: the same picture sat on screen twice, and dropping it removed
+  one copy and left the other. A rewind returns pictures to the strip for the same
+  reason — an un-sent turn's pictures are undecided, and the transcript is for
+  things that happened.
+- **`watchInputImage` runs on every keystroke**, so its guard is the whole design:
+  a path is only read once its extension says it could be an image, and only a
+  change of that candidate (`m.watchedPath`) triggers anything. It returns a command
+  rather than decoding inline, because a file read inside `Update` freezes the
+  interface on the keystroke that completed the path.
+- **Reduction happens before both outputs.** `imgprev.Load` shrinks to 1568px
+  *first*, then renders the preview from the shrunk image and hands the same bytes
+  to the wire. Drawing the original and sending a reduced copy would make the
+  preview a picture of something the model never saw.
+- **`chatMessage.Content` is `any`.** The chat API has two shapes for it and a
+  turn with no picture still sends a plain string — byte-identical to what it was
+  before images existed, which is what keeps an endpoint that implements only the
+  string form working. `Text()` exists because every reader wants the prose and
+  none of them should type-assert.
+
+`contentsToChat` gained an `InlineData` case that used to be **absent**, and its
+absence is the bug this whole feature would have shipped against: a part that is
+neither text, nor a call, nor a response was skipped, so a turn carrying a picture
+would succeed and the model would answer about something else with nothing on
+screen to say a picture was involved. An empty blob is now an error for the same
+reason.
+
+**Pictures only reach the chat wire.** `canSendImages()` refuses on
+`/v1/responses` at the moment of the attach, naming `DMCODE_API=chat`, because
+ADK's `openaimodel` rejects an inline blob outright (`unsupported content part:
+InlineData` — true in both v2.4.0 and v2.5.0). Refusing early turns an SDK
+error into an instruction.
+
 ### Session store
 
 `memsession.Service` replaces `session.InMemoryService` for one reason: that
@@ -187,6 +262,12 @@ with an error naming both directories. Two consequences to keep in mind:
   `write_file` has to be allowed to create files that do not exist yet, so they
   cannot be resolved first. The tools that open something now re-check the path
   after following symlinks (see §4).
+- **The boundary does not apply to a picture the user attached.** Screenshots live
+  in `~/Pictures` as often as in the project, and a user naming their own file is
+  not the agent reaching out of its workspace. `tools.ResolveExisting(p,
+  allowOutside)` is the seam: the symlink re-check is still done, but a path
+  outside the root is only refused when the caller says so. An image leaves the
+  machine either way, which is the thing the boundary is actually for.
 
 ---
 
@@ -265,6 +346,12 @@ If you are asked to fix or improve `dmcode`, be aware of these known architectur
   on a cancellable context and `Esc`/`Ctrl+C` cancel it, but a tool that ignores
   its context — `run_command` on a child process, a sub-agent mid-model-call —
   finishes on its own schedule first.
+- **An oversized picture is a lost turn, not a slow one.** The session store reads
+  JSONL with `bufio.Scanner` capped at `maxLineBytes` (8 MB) and *skips* a line it
+  cannot scan (`readLines`, `store.go:377`). Base64 of a 6 MB screenshot does not
+  fit, so the event would vanish and the model's memory would lose a message with
+  nothing on screen to say so. `imgprev`'s 4 MB limit is what keeps that
+  unreachable; it is not a courtesy to the endpoint.
 - **Session store and retries are unverified.** See the warning at the top: the
   rewind, the JSONL round trip, the ask overlay's timer and the mode switch have
   unit tests but no end-to-end check.
@@ -349,3 +436,49 @@ Already fixed, and worth not regressing:
   one, never as whatever the failed re-ask said. The cost is a second generation
   on a local model, and it can still fail — a model that insists on one huge call
   gets the truncation error, which is the honest answer.
+
+---
+
+## 5. Four bugs that only a measurement found
+
+Attaching a picture compiled, passed its unit tests, and was wrong in four
+separate ways. Each one looks correct when read, and each one survived a careful
+look at the code. They are collected here because the pattern is the lesson: in
+every case the code answered a **different question** than the one being asked.
+
+- **`ctrl+v` was bound to a key the terminal never sends.** A terminal that binds
+  `ctrl+v` converts the key to a paste and does not deliver the keystroke, so
+  `case "ctrl+v"` was unreachable on most terminals — and a screenshot on the
+  clipboard produces no text, so there was no paste to fall back to and the
+  shortcut did nothing at all. `tea.PasteMsg` now asks the clipboard too. The
+  keystroke route asks for the picture and *then* the text, because it used to
+  return the picture command unconditionally: on any chat-wire provider, a
+  text-only clipboard produced no message whatsoever, so `ctrl+v` had silently
+  stopped pasting text too.
+
+- **An advertised clipboard format is not a renderable one.** Windows synthesises
+  clipboard formats from the ones it holds, so an application that lists
+  `CF_DIBV5` and declines to render it leaves the format "available" while
+  `GetClipboardData` returns `ERROR_NOT_FOUND` — surfaced to the user as "Element
+  not found" while a readable `CF_DIB` sat beside it. `clipimg.firstImage` takes
+  the first format that actually *decodes*, because a handle that is not a DIB
+  cannot be told apart from a missing one until its header has been read.
+
+- **The bounds check forgot the header shares the allocation.** `decodeDIB`
+  compared the pixel count against the handle's size, so a DIB overstating its
+  dimensions by more than a header's worth passed and the read went past the end
+  of memory the clipboard owns — immediately below a comment claiming every read
+  was bounds-checked. The check is now `off+total > size`.
+
+- **The preview never reset its colour.** Each cell re-states both of its
+  colours, so the one surviving a row is the last cell's, and the caption below
+  was drawn in the colour of the image's bottom-right pixel. Invisible on a
+  picture whose edges are dark, which is why looking at it did not find it.
+
+And one about the tests rather than the code: the clipboard round-trip test
+destroyed the user's clipboard on every `go test ./...`, while its own comment
+claimed an environment gate it never implemented. It is gone. `decodeDIB` is
+tested through synthesised bytes and the format policy through injected
+functions, because **a test that has to reach a global, shared, destructive
+resource to check a branch is a test that will fail for someone else** — and will
+be deleted, or worked around, by whoever it breaks for.

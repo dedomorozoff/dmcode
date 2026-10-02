@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -173,6 +174,51 @@ func withinRootAfterLinks(abs string) error {
 		return fmt.Errorf("%s is %w: %s", abs, ErrOutsideRoot, base)
 	}
 	return nil
+}
+
+// ResolveExisting validates a path a *user* named rather than one a tool was
+// called with, and returns the absolute path of an existing file inside the
+// workspace.
+//
+// It is exported for the image attachments, which are chosen by the user typing
+// or dropping a path rather than by the agent. The boundary applies to them for
+// the same reason it applies to read_file: a path that leaves the workspace
+// turns a preview of "a screenshot" into a preview of anything on the disk, and
+// the picture then goes out to a model. Both halves of resolve's job are here —
+// the lexical check and the re-check after symlinks — because unlike
+// write_file this path must exist, so the second check has nothing to excuse.
+//
+// The workspace can be left behind deliberately: screenshots live in
+// ~/Pictures or on the Desktop as often as in the project. That is what
+// AllowOutside is for.
+func ResolveExisting(p string, allowOutside bool) (string, error) {
+	abs, err := resolve(p)
+	if err != nil {
+		if !allowOutside || !errors.Is(err, ErrOutsideRoot) {
+			return "", err
+		}
+		// Re-resolve without the boundary rather than reaching past resolve:
+		// filepath.Abs on its own is the whole of what resolve adds when no root
+		// is set, and going through it keeps the two paths agreeing on what a
+		// relative path means.
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(Root(), p)
+		}
+		if abs, err = filepath.Abs(p); err != nil {
+			return "", err
+		}
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a folder, not an image", p)
+	}
+	if err := withinRootAfterLinks(abs); err != nil && !allowOutside {
+		return "", err
+	}
+	return abs, nil
 }
 
 // existingAncestor returns the deepest ancestor of dir, starting with dir

@@ -185,7 +185,7 @@ func TestTruncatedToolCallIsAskedAgain(t *testing.T) {
 			len(second.Messages), len((*bodies)[0].Messages))
 	}
 	note := second.Messages[len(second.Messages)-1]
-	if note.Role != "user" || !strings.Contains(note.Content, "edit_file") {
+	if note.Role != "user" || !strings.Contains(note.Text(), "edit_file") {
 		t.Errorf("the re-ask note is %+v: it must be a user turn naming the call", note)
 	}
 	// The server applied a cap of 4096, so the second attempt asks for twice the

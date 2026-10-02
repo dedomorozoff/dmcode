@@ -195,7 +195,7 @@ func TestChatModelStreamingText(t *testing.T) {
 // requires: an assistant message carrying tool_calls followed by tool messages
 // keyed by tool_call_id.
 func TestContentsToChatToolLoop(t *testing.T) {
-	msgs := contentsToChat([]*genai.Content{
+	msgs, err := contentsToChat([]*genai.Content{
 		{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "сделай"}}},
 		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
 			ID: "c1", Name: "read_file", Args: map[string]any{"path": "a.go"},
@@ -204,6 +204,9 @@ func TestContentsToChatToolLoop(t *testing.T) {
 			ID: "c1", Name: "read_file", Response: map[string]any{"output": "ok"},
 		}}}},
 	})
+	if err != nil {
+		t.Fatalf("contentsToChat: %v", err)
+	}
 	if len(msgs) != 3 {
 		t.Fatalf("got %d messages, want 3: %+v", len(msgs), msgs)
 	}
