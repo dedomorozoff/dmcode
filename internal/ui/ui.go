@@ -17,7 +17,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
@@ -751,7 +750,7 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := clipboard.WriteAll(text); err != nil {
+	if err := writeClipboardText(text); err != nil {
 		m.statusText = i18n.T("clipboard error: ") + err.Error()
 		return nil
 	}
@@ -984,7 +983,7 @@ func (m *uiModel) printWelcome() {
 		line{kindSys, ""},
 		line{kindLogo, logo},
 		line{kindSys, ""},
-		line{kindSys, i18n.T("ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop")},
+		line{kindSys, i18n.T("ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop")},
 		line{kindSys, ""})
 }
 
@@ -1107,7 +1106,7 @@ func (m *uiModel) copyLastResponse() {
 		m.statusText = i18n.T("nothing to copy")
 		return
 	}
-	if err := clipboard.WriteAll(text); err != nil {
+	if err := writeClipboardText(text); err != nil {
 		m.history = append(m.history, line{kindErr, i18n.T("clipboard error: ") + err.Error()})
 	} else {
 		m.statusText = i18n.T("reply copied to the clipboard!")
@@ -1132,6 +1131,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ed.DropPanelFocus()
 			m.ed.ClosePanels()
 			return m, nil
+		case editor.ToggleEditorMsg:
+			// The status-bar icon at the head of the strip. The mode is the
+			// host's to flip — the editor only asks — and it reads the current
+			// one off Chat, so the same message serves both directions.
+			if m.ed.Chat {
+				init := m.ensureEditor()
+				m.enterEditor()
+				return m, init
+			}
+			m.ed.Chat = true
+			m.ed.DropPanelFocus()
+			m.ed.ClosePanels()
+			return m, nil
 		case tea.WindowSizeMsg:
 			// The editor owns the geometry in embedded mode; the chat is
 			// re-laid-out by its frame callback at the main area's size.
@@ -1139,6 +1151,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.editorUpdate(msg)
 		case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.MouseWheelMsg:
 			return m.editorUpdate(msg)
+		}
+		// The editor's lifecycle traffic — terminal output, file watches, LSP
+		// diagnostics, git transfers — must reach it in chat mode too, or the
+		// listener chains die and the panels freeze. The chat's own switch
+		// below ignores what it does not know.
+		if editor.OwnsMsg(msg) {
+			_, edCmd := m.editorUpdate(msg)
+			if edCmd != nil {
+				return m, edCmd
+			}
 		}
 	}
 	// extra carries a follow-up command a case wants to run after the switch,
@@ -1230,7 +1252,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// a clipboard holding a screenshot has no text to give, and one holding
 			// a command line has no picture, so the two never really compete.
 			if m.pasteTarget() != nil {
-				text, err := clipboard.ReadAll()
+				text, err := readClipboardText()
 				if err != nil {
 					m.statusText = i18n.T("clipboard error: ") + err.Error()
 					return m, nil
@@ -1402,9 +1424,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
+					line{kindSys, i18n.T("ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -3746,6 +3769,7 @@ func (m *uiModel) sidebarView(height int) string {
 
 		if hotkeys {
 			row(styleSidebarLabel, i18n.T("HOTKEYS"))
+			row(styleHint, i18n.T(" ctrl+e  editor"))
 			row(styleHint, i18n.T(" ctrl+p  commands"))
 			row(styleHint, i18n.T(" ctrl+b  hide panel"))
 			row(styleHint, i18n.T(" ctrl+y  copy reply"))

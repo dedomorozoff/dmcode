@@ -166,8 +166,9 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		return cmd
 	}
 
-	// Git inline diff preview fills the rest of the editor area.
-	if m.gitOpen && (m.gitMode == gitModeStatus || m.gitMode == gitModeLog) && len(m.diffRows) > 0 {
+	// Git inline diff preview fills the rest of the editor area — never in
+	// chat mode, where the main area belongs to the transcript.
+	if !m.Chat && m.gitOpen && (m.gitMode == gitModeStatus || m.gitMode == gitModeLog) && len(m.diffRows) > 0 {
 		m.gitDiffFocused = true
 		return nil
 	}
@@ -315,12 +316,18 @@ func (m *Model) clickOverlay(y int, dbl bool) (bool, tea.Cmd) {
 // project tree.
 func (m *Model) clickLeftRail(x, y int) tea.Cmd {
 	h := m.viewHeight()
+	// The framed chat panels put a border row above the entries; the editor's
+	// bare divider does not.
+	bodyTop := 1
+	if m.Chat {
+		bodyTop = 2
+	}
 	switch {
 	case m.gitOpen:
 		m.gitFocus = true
 		switch m.gitMode {
 		case gitModeStatus:
-			idx := m.gitOffset + (y - 1)
+			idx := m.gitOffset + (y - bodyTop)
 			if idx >= 0 && idx < len(m.gitFiles) {
 				m.gitSel = idx
 				m.clampGitScroll()
@@ -328,7 +335,7 @@ func (m *Model) clickLeftRail(x, y int) tea.Cmd {
 			}
 			m.gitDiffFocused = false
 		case gitModeLog:
-			idx := m.gitLogOffset + (y-1)/2
+			idx := m.gitLogOffset + (y-bodyTop)/2
 			if idx >= 0 && idx < len(m.gitLogEntries) {
 				m.gitLogSel = idx
 				m.clampGitLogScroll()
@@ -336,14 +343,14 @@ func (m *Model) clickLeftRail(x, y int) tea.Cmd {
 			}
 			m.gitDiffFocused = false
 		case gitModeBranch:
-			idx := m.gitBranchOffset + (y - 1)
+			idx := m.gitBranchOffset + (y - bodyTop)
 			if idx >= 0 && idx < len(m.gitBranchList) {
 				m.gitBranchSel = idx
 				m.clampGitBranchScroll()
 			}
 		}
 	case m.sidebarOn():
-		idx := m.treeOffset + (y - 1)
+		idx := m.treeOffset + (y - bodyTop)
 		if idx >= 0 && idx < len(m.treeRows) {
 			m.treeSel = idx
 			m.treeFocus = true

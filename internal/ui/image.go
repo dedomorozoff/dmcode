@@ -263,15 +263,20 @@ func (m *uiModel) showPreviews(imgs []imgprev.Attachment) {
 	}
 }
 
-// The clipboard is read through these two indirections rather than called
+// The clipboard is read through these indirections rather than called
 // directly, because it is a global, shared, destructive resource: a test that
 // read the real one would both be unreliable (anything the user copies mid-run
 // changes the answer) and destructive (it is the only clipboard there is). Every
 // clipboard test swaps these instead, so the behaviour is driven by a synthetic
 // selection and the real one is left alone.
+//
+// The write side is here for the same reason: ctrl+y and a drag-selection both
+// land in the user's clipboard, and a test of either used to leave its own text
+// there.
 var (
 	readClipboardImage = clipimg.Read
 	readClipboardText  = clipboard.ReadAll
+	writeClipboardText = clipboard.WriteAll
 )
 
 // pasteImageCmd attaches the clipboard's picture, if it holds one.

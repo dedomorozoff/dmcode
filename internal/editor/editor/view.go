@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/editor/i18n"
 	"github.com/dedomorozoff/dmcode/internal/editor/lsp"
@@ -21,6 +22,7 @@ var (
 	curGutterStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 	cursorStyle     = lipgloss.NewStyle().Reverse(true)
 	statusStyle     = lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("250"))
+	frameStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	statusHiStyle   = lipgloss.NewStyle().Background(lipgloss.Color("61")).Foreground(lipgloss.Color("255")).Bold(true)
 	langStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
 	hintStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
@@ -51,26 +53,30 @@ type helpEntry struct {
 var helpEntries = []helpEntry{
 	{"Ctrl+S", "help.save"},
 	{"", ""},
+	// The first entry: the status-bar icon at the head of the strip is how a
+	// user leaves the editor for the chat, and there is no key for it inside the
+	// editor — the chat is the host's mode. Help is where a user looks for the
+	// way out, so the way out is listed first.
+	{"Ctrl+Q or the ▣ icon", "help.to_chat"},
+	{"", ""},
 	{"Ctrl+P / F2 / Shift+Shift", "help.palette"},
 	{"Shift+Arrows", "help.select"},
 	{"Ctrl+C / Ctrl+X / Ctrl+V", "help.clipboard"},
 	{"", ""},
-	{"Ctrl+F", "help.search"},
+	{"Ctrl+F / F3 / Shift+F3", "help.search"},
 	{"Ctrl+H", "help.replace"},
 	{"Ctrl+L", "help.goto_line"},
 	{"Alt+Z", "help.word_wrap"},
-	{"Alt+B", "help.blame"},
 	{"Ctrl+G", "help.git_panel"},
-	{"D (in Git panel)", "help.git_diff"},
 	{"D (in Git panel)", "help.git_diff"},
 	{"Alt+[ / Alt+]", "help.hunk"},
 	{"Alt+M / Alt+N / S+Alt+N", "help.bookmark"},
+	{"F12", "help.goto_def"},
 	{"Ctrl+O", "help.finder"},
 	{"Ctrl+T", "help.open"},
 	{"Alt+T", "help.terminal"},
 	{"Ctrl+B / F9", "help.tree"},
 	{"↑↓/Enter/←→ in tree", "help.tree_nav"},
-	{"n / N / r / d / Del / t in tree", "help.tree_ops"},
 	{"Alt+←/→", "help.tab_switch"},
 	{"Alt+1..9", "help.tab_jump"},
 	{"Ctrl+\\ / F6", "help.split_vert"},
@@ -81,6 +87,8 @@ var helpEntries = []helpEntry{
 	{"", ""},
 	{"Arrows/Home/End/PgUp/PgDn", "help.move"},
 	{"Enter/Backspace/Delete/Tab", "help.edit"},
+	{"Ctrl+Space", "help.complete"},
+	{"Ctrl+/", "help.comment"},
 	{"Ctrl+Z / Ctrl+R", "help.undo"},
 	{"Ctrl+Y / Ctrl+D", "help.lines"},
 	{"Ctrl+U", "help.uppercase"},
@@ -194,7 +202,9 @@ func (m Model) contextBottomExtraRows() int {
 	case m.diffViewOpen,
 		m.gitOpen && (m.gitMode == gitModeStatus || m.gitMode == gitModeLog) && len(m.diffRows) > 0,
 		m.conflictOpen, m.treeConfirm != "", m.quitConfirm,
-		m.gitOpen, m.promptSave, m.promptOpen,
+		// The git hint lines are dropped in chat mode — the reserved row
+		// goes back to the main area with them.
+		m.gitOpen && !m.Chat, m.promptSave, m.promptOpen,
 		m.searchOpen, m.gotoOpen:
 		return 1
 	default:
@@ -221,7 +231,9 @@ func (m Model) contextBottomRow() string {
 		return m.treeConfirmLine()
 	} else if m.quitConfirm {
 		return m.quitLine()
-	} else if m.gitOpen {
+	} else if m.gitOpen && !m.Chat {
+		// The chat workspace drops the git command/hint lines for now — what
+		// to do with them there is still an open question.
 		switch m.gitMode {
 		case gitModeCommit:
 			return m.gitLine()
@@ -317,7 +329,16 @@ func (m Model) View() tea.View {
 		rows = append(rows, m.withDivider(m.pluginStorePanel())...)
 	}
 	if m.termOpen {
-		rows = append(rows, m.withDivider(m.terminalPanel())...)
+		// The chat workspace frames the terminal like its own boxes; the
+		// editor keeps the bare divider. The divider row is framed rather than
+		// dropped: termExtraRows reserves it and every mouse coordinate counts
+		// from it, so leaving it out makes the frame a row short of the
+		// terminal and lifts the status bar off the bottom edge.
+		if m.Chat {
+			rows = append(rows, m.frameRows(m.withDivider(m.terminalPanel()), m.width)...)
+		} else {
+			rows = append(rows, m.withDivider(m.terminalPanel())...)
+		}
 	}
 	rows = append(rows, m.statusBar())
 	// The completion popup floats under the edit line instead of being pinned
@@ -417,9 +438,41 @@ func (m Model) composeSidebar(editor []string) []string {
 	default:
 		return editor
 	}
+	if m.Chat {
+		// The chat workspace frames its panels like its own chat box.
+		rail = m.frameRows(rail, m.leftRailWidth())
+	}
 	out := make([]string, len(editor))
 	for row := range editor {
 		out[row] = rail[row] + editor[row]
+	}
+	return out
+}
+
+// frameRows wraps panel rows in a box border without changing the row count:
+// the first and last rows give up their content to the horizontal borders.
+// This is what the chat workspace draws instead of the editor's bare
+// divider, so its panels match the framed look of the chat box.
+func (m Model) frameRows(rows []string, w int) []string {
+	if len(rows) < 2 || w < 4 {
+		return rows
+	}
+	inner := w - 2
+	// The ASCII glyph set has no box corners; its hline is "-" and the
+	// corners become "+".
+	tl, tr, bl, br := "┌", "┐", "└", "┘"
+	if m.g.hline != "─" {
+		tl, tr, bl, br = "+", "+", "+", "+"
+	}
+	out := make([]string, len(rows))
+	out[0] = frameStyle.Render(tl + strings.Repeat(m.g.hline, w-2) + tr)
+	out[len(rows)-1] = frameStyle.Render(bl + strings.Repeat(m.g.hline, w-2) + br)
+	for i := 1; i < len(rows)-1; i++ {
+		cell := ansi.Truncate(rows[i], inner, "")
+		if pad := inner - lipgloss.Width(cell); pad > 0 {
+			cell += strings.Repeat(" ", pad)
+		}
+		out[i] = frameStyle.Render(m.g.vline) + cell + frameStyle.Render(m.g.vline)
 	}
 	return out
 }
@@ -1736,12 +1789,12 @@ func (m Model) statusBar() string {
 		mid = statusStyle.Render("  " + m.msg)
 	}
 	right := ""
-	if !perPane {
+	if !perPane && !m.Chat {
 		right = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
 	}
 	fileInfo := ""
 	langTag := ""
-	if !perPane && t.path != "" {
+	if !perPane && !m.Chat && t.path != "" {
 		endings := map[string]string{"lf": "LF", "crlf": "CRLF"}
 		enc := strings.ToUpper(t.encoding)
 		fileInfo = endings[t.lineEnding] + " " + enc + " "
@@ -1750,7 +1803,13 @@ func (m Model) statusBar() string {
 		}
 	}
 	hint := ""
-	if !m.promptOpen && !m.promptSave && !m.quitConfirm && !m.finderOpen && !m.searchOpen && !m.gotoOpen && !m.gitOpen && !m.conflictOpen && !m.diffViewOpen && !m.termOpen && !m.helpOpen {
+	// Chat mode has no buffer of its own on screen: the transcript belongs to the
+	// host and the cursor is nowhere near it, so Ln/Col, the encoding and the
+	// language tag describe a file the user cannot see and did not ask about.
+	// They also compete for the one row with the icon strip, which is the only
+	// part of that row the user can act on. The F1 hint goes for the same reason
+	// — it advertises editor keys on a screen that is not the editor.
+	if !m.Chat && !m.promptOpen && !m.promptSave && !m.quitConfirm && !m.finderOpen && !m.searchOpen && !m.gotoOpen && !m.gitOpen && !m.conflictOpen && !m.diffViewOpen && !m.termOpen && !m.helpOpen {
 		hint = m.t("status.f1_help")
 		if m.layout != splitNone {
 			hint += m.t("status.f8_pane")

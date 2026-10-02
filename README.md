@@ -9,9 +9,9 @@
 **A coding agent for your terminal.**
 
 ![GitHub Release](https://img.shields.io/github/v/release/dedomorozoff/dmcode)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/dedomorozoff/dmed)](https://github.com/dedomorozoff/dmcode)
-[![License](https://img.shields.io/github/license/dedomorozoff/dmed)](https://github.com/dedomorozoff/dmcode/blob/main/LICENSE)
-[![Last Commit](https://img.shields.io/github/last-commit/dedomorozoff/dmed)](https://github.com/dedomorozoff/dmcode)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
+[![License](https://img.shields.io/github/license/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode/blob/main/LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
 ![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/dedomorozoff/dmcode/total)
 
 Ask it something. It reads your files, edits them, runs your tests, searches the
@@ -294,6 +294,7 @@ the agent is not going to ask before they stop watching.
 
 | | |
 |---|---|
+| `ctrl+e` | the editor — or back to the chat; the `▣` icon at the head of the status bar does the same |
 | `ctrl+p` | command palette |
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
@@ -305,6 +306,26 @@ the agent is not going to ask before they stop watching.
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
+
+Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
+PTY, LSP completions, splits and bookmarks, which is too much for a table here.
+
+## The editor
+
+`ctrl+e` opens a code editor in the same workspace, and `ctrl+q` puts it back.
+It is a real editor, not a viewer: syntax highlighting, a project tree, a git
+panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
+bookmarks, LSP completion and go-to-definition.
+
+The two modes share one screen rather than one window per thing. The transcript
+stays in the main area when the editor is closed, the panel toggles stay live in
+both, and the status bar at the bottom is the same row in each — in chat mode it
+carries the icons and the git branch, and in the editor mode it adds the file's
+own state (`Ln`, `Col`, encoding, language).
+
+The four icons at the left of that row are the workspace: `▣` editor, `▤` project
+tree, `⎇` git, `❯` terminal. Each is clickable, each shows its label on hover,
+and the first one is the mode toggle.
 
 ## Selecting with the mouse
 
@@ -474,6 +495,7 @@ internal/ask         the ask_user broker and its timer
 internal/clipimg     reads a picture off the system clipboard (Windows)
 internal/config      .env, endpoints, the setup wizard
 internal/discover    finds the providers that actually answer
+internal/editor      the workspace editor: tree, git, terminal, splits, LSP
 internal/i18n        English source strings and the Russian catalog
 internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire
 internal/llm         OpenAI-compatible wire, failover, retries

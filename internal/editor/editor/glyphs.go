@@ -28,6 +28,7 @@ type glyphSet struct {
 	dotSep     string // ·         separator dot (blame, status headers)
 	progFull   string // █         progress bar filled cell
 	progEmpty  string // ·         progress bar empty cell
+	iconEditor string // ▣         status-bar editor-mode toggle
 	iconTree   string // ▤         status-bar tree toggle
 	iconGit    string // ⎇         status-bar git toggle
 	iconTerm   string // ❯         status-bar terminal toggle
@@ -52,6 +53,7 @@ var unicodeGlyphs = glyphSet{
 	dotSep:     "·",
 	progFull:   "█",
 	progEmpty:  "·",
+	iconEditor: "▣",
 	iconTree:   "▤",
 	iconGit:    "⎇",
 	iconTerm:   "❯",
@@ -76,6 +78,7 @@ var asciiGlyphs = glyphSet{
 	dotSep:     ".",
 	progFull:   "#",
 	progEmpty:  ".",
+	iconEditor: "E",
 	iconTree:   "T",
 	iconGit:    "G",
 	iconTerm:   ">",
@@ -98,6 +101,8 @@ func (m *Model) ApplyTerminalCompat() {
 // icon returns the status-bar glyph for a panel toggle action.
 func (g glyphSet) icon(a statusAction) string {
 	switch a {
+	case actEditor:
+		return g.iconEditor
 	case actTree:
 		return g.iconTree
 	case actGit:

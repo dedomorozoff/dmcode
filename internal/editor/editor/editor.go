@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 	"github.com/hinshun/vt10x"
 
 	"github.com/dedomorozoff/dmcode/internal/editor/buffer"
@@ -1456,7 +1455,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+c":
 		if m.cur().buf.HasSelection() {
 			m.clipboard = m.cur().buf.SelectedText()
-			clipboard.WriteAll(m.clipboard)
+			writeClipboardText(m.clipboard)
 			m.msg = m.t("msg.copied")
 			return nil
 		}
@@ -1466,7 +1465,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+x":
 		if m.cur().buf.HasSelection() {
 			m.clipboard = m.cur().buf.SelectedText()
-			clipboard.WriteAll(m.clipboard)
+			writeClipboardText(m.clipboard)
 			m.cur().buf.DeleteSelection()
 			m.msg = m.t("msg.cut")
 			return nil
@@ -1703,7 +1702,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+alt+w":
 		m.closePane()
 	case "ctrl+v":
-		if sysClip, err := clipboard.ReadAll(); err == nil && sysClip != "" {
+		if sysClip, err := readClipboardText(); err == nil && sysClip != "" {
 			m.clipboard = normalizePaste(sysClip)
 		}
 		if m.clipboard != "" {
@@ -1836,6 +1835,16 @@ func (m *Model) requestQuit() tea.Cmd {
 // tea.Quit — the parent program decides what "closed" means.
 type CloseEditorMsg struct{}
 
+// ToggleEditorMsg asks the host to switch the workspace between the chat and
+// the editor. The editor cannot do it itself: the mode lives on the host side
+// (Chat is the flag that decides what the main area renders), so the icon
+// reports the request and the host answers it.
+//
+// It is one message for both directions on purpose — the icon is a toggle, and
+// making each direction its own type would have the host answer a question it
+// can already read off Chat.
+type ToggleEditorMsg struct{}
+
 // Host is the chat side of an embedded editor. In chat mode the workspace
 // chrome renders around a main area the host owns: these callbacks are what
 // the host's transcript, input line and overlays are reached through.
@@ -1858,6 +1867,21 @@ type Host struct {
 	// ChangedFiles lists the files the agent edited, so entering the editor
 	// opens a tab for each one the workspace does not show yet.
 	ChangedFiles func() []string
+}
+
+// OwnsMsg reports whether the message is one of the editor's own lifecycle
+// events — terminal output, file watches, LSP diagnostics, git transfers —
+// that the embedded editor consumes no matter which mode is on screen. The
+// host routes these to the editor even in chat mode, or the chains that keep
+// them coming (waitForTermOutput and friends) die and the panels freeze.
+func OwnsMsg(msg tea.Msg) bool {
+	switch msg.(type) {
+	case terminalOutputMsg, terminalExitMsg, FileChangedMsg, lspDiagMsg,
+		lspCompletionMsg, lspDefinitionMsg, gitTransferMsg, gitBlameMsg,
+		pluginStoreMsg, pluginSourceMsg:
+		return true
+	}
+	return false
 }
 
 // MainArea returns the screen origin and size of the main area: the region
@@ -1900,6 +1924,7 @@ func (m *Model) ClosePanels() {
 	m.termFocus = false
 	m.gitOpen = false
 	m.gitFocus = false
+	m.gitDiffFocused = false
 }
 
 // OpenTree shows the project tree with the focus on it — the editor-mode

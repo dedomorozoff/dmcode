@@ -482,3 +482,17 @@ tested through synthesised bytes and the format policy through injected
 functions, because **a test that has to reach a global, shared, destructive
 resource to check a branch is a test that will fail for someone else** — and will
 be deleted, or worked around, by whoever it breaks for.
+
+That rule was then broken a second time by the editor tree that landed after it,
+which called `clipboard.WriteAll` straight from ctrl+c, ctrl+x and ctrl+v. Every
+copy and cut test put its own fixture into the user's clipboard — which is why
+`go test ./...` left "hello" and "alpha" there — and ctrl+v *read* the real one,
+so what a paste test received depended on what the user had copied last. The
+seam `internal/ui` already had for reading is now on both sides in both
+packages (`writeClipboardText`, `readClipboardText` in `panel_select.go` and
+`image.go`), and `fakeClipboard` swaps it for the duration of a test.
+`TestClipboardTestsNeverTouchTheRealClipboard` is the guard on that seam: a
+direct call still compiles and still passes every other test, so something has
+to assert that the copy reached the write indirection. The lesson generalises —
+**the fix for a destructive test is an injection point plus a test that fails
+when the injection point is bypassed, not the removal of the test.**

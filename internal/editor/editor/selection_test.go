@@ -10,6 +10,11 @@ import (
 func TestSelectionCopyPasteCut(t *testing.T) {
 	dir := t.TempDir()
 	f := writeTemp(t, dir, "sel.txt", "hello world\nsecond line\n")
+	// The copy, the cut and the paste all go through the clipboard, so it is
+	// faked: writing "hello" into the user's real one on every `go test` is
+	// exactly what this replaces. The clipboard starts holding what ctrl+c is
+	// about to put there, which is what ctrl+v then reads back.
+	fakeClipboard(t, "hello")
 
 	m := New(f)
 	m.width, m.height = 80, 24

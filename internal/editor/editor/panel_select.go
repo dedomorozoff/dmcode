@@ -6,6 +6,18 @@ import (
 	"github.com/atotto/clipboard"
 )
 
+// The system clipboard is reached through these two indirections rather than
+// called directly, because it is a global, shared, destructive resource: there
+// is exactly one of it, it belongs to the user, and a test that writes to it
+// both leaves "hello"/"alpha" in the clipboard of whoever ran `go test` and
+// races every other program on the machine for it. Every clipboard test swaps
+// these instead, so the copy/cut/paste paths are driven by synthetic text and
+// the real clipboard is left alone.
+var (
+	writeClipboardText = clipboard.WriteAll
+	readClipboardText  = clipboard.ReadAll
+)
+
 // Text selection for the terminal output. It stores its content as fixed
 // rows, so a selection is a (row, visible column) span; on mouse release the
 // covered text goes to the system clipboard, the same behavior as selecting
@@ -26,7 +38,7 @@ func (m *Model) copyToClipboard(text string) {
 		return
 	}
 	m.clipboard = text
-	if err := clipboard.WriteAll(text); err != nil {
+	if err := writeClipboardText(text); err != nil {
 		m.msg = "clipboard: " + err.Error()
 		return
 	}

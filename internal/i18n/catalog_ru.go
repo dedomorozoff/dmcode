@@ -23,10 +23,11 @@ var catalog = map[Lang]map[string]string{
 		"quit":                                               "выход",
 
 		// Help and status line.
+		"ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+q — back here":                "ctrl+e или иконка ▣ — редактор; внутри F1 — клавиши редактора, ctrl+q — назад сюда",
 		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session": "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ · ctrl+l — очистить · ctrl+n — новая сессия",
 		"esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll":                    "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл",
 		"mouse — select and copy text right in the terminal":                                               "мышь — выделение и копирование текста прямо в терминале",
-		"ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop":                        "ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена",
+		"ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop":        "ctrl+e редактор · ctrl+p команды · ctrl+b панель · ctrl+y копировать · ↑/↓ история · esc отмена",
 		"describe the task… (/help for commands, esc to cancel)":                                           "опиши задачу… (/help — команды, esc — отмена)",
 
 		// Session and turn state.
@@ -111,6 +112,7 @@ var catalog = map[Lang]map[string]string{
 		"turns: %d":           " ходов: %d",
 		"files: %d":           " файлов: %d",
 		"tools: %d":           " тулов: %d",
+		" ctrl+e  editor":     " ctrl+e  редактор",
 		" ctrl+p  commands":   " ctrl+p  команды",
 		" ctrl+b  hide panel": " ctrl+b  скрыть панель",
 		" ctrl+y  copy reply": " ctrl+y  копировать ответ",

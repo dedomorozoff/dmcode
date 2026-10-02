@@ -20,6 +20,11 @@ type statusAction int
 
 const (
 	actNone statusAction = iota
+	// actEditor comes first so the workspace toggle sits at the far left of the
+	// strip: it is the one icon that changes what the whole screen is, and a
+	// control that big belongs where the eye lands first rather than at the end
+	// of a row of panel toggles.
+	actEditor
 	actTree
 	actGit
 	actTerm
@@ -34,6 +39,7 @@ type statusIcon struct {
 }
 
 var statusIconDefs = []statusIcon{
+	{actEditor, "▣", "status.tip_editor"},
 	{actTree, "▤", "status.tip_tree"},
 	{actGit, "⎇", "status.tip_git"},
 	{actTerm, "❯", "status.tip_term"},
@@ -57,8 +63,12 @@ func (m Model) statusIconsVisible() bool {
 }
 
 // statusIconActive reports whether the panel behind an icon is currently open.
+// For the editor icon it is the mode itself: lit means the editor is up, which
+// is the one fact a user glancing at the strip is checking.
 func (m Model) statusIconActive(a statusAction) bool {
 	switch a {
+	case actEditor:
+		return !m.Chat
 	case actTree:
 		return m.treeVisible
 	case actGit:
@@ -252,6 +262,9 @@ func (m Model) overlaySplitTooltip(rows []string) []string {
 // shortcut, so mouse and keys stay in lockstep.
 func (m *Model) activateStatusIcon(a statusAction) tea.Cmd {
 	switch a {
+	case actEditor:
+		// The host owns the mode; the icon only reports the request.
+		return func() tea.Msg { return ToggleEditorMsg{} }
 	case actTree:
 		m.toggleTree()
 		return nil

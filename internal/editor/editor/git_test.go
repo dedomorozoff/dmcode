@@ -344,6 +344,7 @@ func TestCloseTabKeysWorkInAllModes(t *testing.T) {
 
 func TestCutWithSelectionInGitMode(t *testing.T) {
 	f := writeTemp(t, t.TempDir(), "cut.txt", "")
+	fakeClipboard(t, "hello")
 
 	m := New(f)
 	m.width, m.height = 80, 24

@@ -219,6 +219,14 @@ func (m *Model) refreshGitDiffPreview() {
 		m.diffPath = ""
 		return
 	}
+	// Chat mode has no place to show the diff preview — the main area is the
+	// transcript — so it is not built, and the diff status line never shows.
+	if m.Chat {
+		m.diffRows = nil
+		m.diffHeadLines = nil
+		m.diffRightLines = nil
+		return
+	}
 	fs := m.gitFiles[m.gitSel]
 	r := m.repoForCur()
 	if r == nil {

@@ -390,8 +390,13 @@ func TestYoloBadgeSaysYolo(t *testing.T) {
 // selectDrag drives a real drag through the event loop — press, motion, release —
 // because the interesting failures are in the hand-off between the messages, not
 // in any one of them.
+//
+// The write seam is swapped for the duration: a drag that moves ends in a copy,
+// and without this the drag tests put their own fixture text into the one
+// clipboard the user has.
 func selectDrag(t *testing.T, m *uiModel, ax, ay, bx, by int) {
 	t.Helper()
+	fakeClipboardWrite(t)
 	var model tea.Model = m
 	model, _ = model.Update(tea.MouseClickMsg{X: ax, Y: ay, Button: tea.MouseLeft})
 	model, _ = model.Update(tea.MouseMotionMsg{X: (ax + bx) / 2, Y: (ay + by) / 2})

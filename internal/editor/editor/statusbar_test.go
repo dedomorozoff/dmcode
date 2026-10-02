@@ -10,6 +10,86 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/editor/vcs"
 )
 
+// TestEditorIconLeadsTheStripAndDropsTheEditorState pins the two decisions
+// about the status bar in chat mode: the editor toggle is the first icon, and
+// the right-hand per-file state is gone.
+//
+// Both are about the same screen. Chat mode shows the host's transcript, so Ln/Col,
+// the encoding and the language tag describe a file nobody can see — while the
+// row they compete with is the strip, the only part of it the user can act on.
+func TestEditorIconLeadsTheStripAndDropsTheEditorState(t *testing.T) {
+	dir := t.TempDir()
+	f := writeTemp(t, dir, "main.go", "package main\n")
+
+	m := New(f)
+	m.width, m.height = 80, 24
+	m.Chat = true
+
+	// The editor icon leads: it is the one control that changes what the whole
+	// screen is, so it belongs where the eye lands first.
+	if len(statusIconDefs) == 0 || statusIconDefs[0].act != actEditor {
+		t.Fatalf("first status icon = %v, want actEditor", statusIconDefs)
+	}
+	if x := m.statusIconX(actEditor); x != 0 {
+		t.Errorf("editor icon starts at column %d, want 0", x)
+	}
+
+	chatBar := stripANSI(m.statusBar())
+	for _, unwanted := range []string{"Ln ", "Col ", "UTF-8", "GO ", "F1 "} {
+		if strings.Contains(chatBar, unwanted) {
+			t.Errorf("chat status bar %q carries editor state %q", chatBar, unwanted)
+		}
+	}
+	// The strip itself has to survive the trim: it is the row's only control.
+	if !strings.Contains(chatBar, "▣") {
+		t.Errorf("chat status bar %q lost the icon strip", chatBar)
+	}
+
+	// In the editor the same row keeps everything it had: this is a chat-mode
+	// trim, not a simplification of the bar.
+	m.Chat = false
+	edBar := stripANSI(m.statusBar())
+	for _, want := range []string{"Ln 1", "Col 1", "UTF-8", "F1"} {
+		if !strings.Contains(edBar, want) {
+			t.Errorf("editor status bar %q lost %q", edBar, want)
+		}
+	}
+}
+
+// TestEditorIconTogglesThroughTheHost pins the two-way contract: the icon asks,
+// the host answers. Clicking it in chat mode must produce ToggleEditorMsg rather
+// than flip anything itself — the mode is the host's field, and an editor that
+// set it directly would be overwritten by the copy Update returns.
+func TestEditorIconTogglesThroughTheHost(t *testing.T) {
+	dir := t.TempDir()
+	writeTemp(t, dir, "a.txt", "alpha\n")
+	m := New(dir)
+	m.width, m.height = 80, 24
+	m.Chat = true
+
+	cmd := m.activateStatusIcon(actEditor)
+	if cmd == nil {
+		t.Fatal("the editor icon must produce a command")
+	}
+	if _, ok := cmd().(ToggleEditorMsg); !ok {
+		t.Fatal("the editor icon must ask the host with ToggleEditorMsg")
+	}
+	if !m.Chat {
+		t.Error("asking must not flip the mode inside the editor")
+	}
+
+	// Lit while the editor is up, dim while the chat is: it is the only icon
+	// whose state is a mode rather than a panel.
+	m.Chat = false
+	if !m.statusIconActive(actEditor) {
+		t.Error("the editor icon must light up in editor mode")
+	}
+	m.Chat = true
+	if m.statusIconActive(actEditor) {
+		t.Error("the editor icon must not stay lit in chat mode")
+	}
+}
+
 func TestStatusIconAtSpansStrip(t *testing.T) {
 	dir := t.TempDir()
 	chdir(t, t.TempDir())

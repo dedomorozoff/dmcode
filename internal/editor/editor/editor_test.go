@@ -5,10 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/atotto/clipboard"
 )
 
 // The editor test suite asserts English UI strings, so pin the language to
@@ -397,25 +395,17 @@ func TestPasteCRLFNormalized(t *testing.T) {
 		t.Fatal("PasteMsg CRLF: stray \\r leaked into buffer")
 	}
 
-	// Ctrl+V path with a CRLF system clipboard. The Windows clipboard is a
-	// global resource and Open() can transiently fail while another process
-	// holds it, so retry before giving up.
+	// Ctrl+V path with a CRLF clipboard. The clipboard is faked rather than
+	// written: the Windows clipboard is a single global resource that belongs
+	// to the user, so a test that put "\r\nline one..." there destroyed whatever
+	// they had copied — and on a headless machine it could skip for reasons
+	// that have nothing to do with the code. The seam also removes the retry
+	// loop that was there to work around another process holding the clipboard
+	// open, which is a race no test should be taking part in.
+	fakeClipboard(t, "\r\nline one\r\nline two\r\n")
 	m = New(f1)
 	m.width, m.height = 80, 24
 	m.cur().buf.SetCursor(0, 5)
-	var clipErr error
-	for i := 0; i < 10; i++ {
-		clipErr = clipboard.WriteAll("\r\nline one\r\nline two\r\n")
-		if clipErr == nil {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	if clipErr != nil {
-		// Headless CI (no xsel/xclip/wl-clipboard) legitimately has nothing
-		// to paste from; the PasteMsg path above already proves CRLF handling.
-		t.Skipf("system clipboard unavailable: %v", clipErr)
-	}
 	m = press(m, tea.KeyPressMsg{Code: 'v', Mod: tea.ModCtrl})
 	if got := m.cur().buf.Text(); got != want {
 		t.Fatalf("ctrl+v CRLF: buffer = %q, want %q", got, want)
@@ -428,6 +418,7 @@ func TestPasteCRLFNormalized(t *testing.T) {
 func TestQuitCopySkipsConfirm(t *testing.T) {
 	dir := t.TempDir()
 	f1 := writeTemp(t, dir, "a.txt", "alpha\n")
+	fakeClipboard(t, "alpha")
 	m := New(f1)
 	m.width, m.height = 80, 24
 	m.cur().buf.StartSelection()
@@ -588,6 +579,7 @@ func TestTerminalCursor(t *testing.T) {
 func TestOSC52Clipboard(t *testing.T) {
 	dir := t.TempDir()
 	f := writeTemp(t, dir, "clip.txt", "hello world\n")
+	fakeClipboard(t, "hello")
 	m := New(f)
 	m.width, m.height = 80, 24
 
