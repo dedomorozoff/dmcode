@@ -1,3 +1,180 @@
+# dmCode v0.2.0
+
+dmcode is a workspace now. The chat is still the agent you know; the same
+window also holds a real code editor — project tree, git, a terminal, splits,
+bookmarks and LSP — and switches between them with one key.
+
+> ### ⚠️ Two things to read before trusting them
+>
+> **The editor's keys and the terminal panel have been exercised, but not
+> driven for hours by a person.** The frames, the mouse arithmetic and the
+> chat-mode composition are covered by tests that assert the row counts and
+> the hit-testing; what is not proven is how the editor feels over a long
+> session, or how the panels behave on platforms other than the one this was
+> built on.
+>
+> **Sending a picture to a model is still unverified.** Attaching and
+> previewing are confirmed working on Windows against a live session; no
+> picture has been through a real vision endpoint, so whether the `image_url`
+> data URL dmcode puts on the wire is one a live endpoint accepts is untested.
+> Please report what breaks.
+
+## Install
+
+```bash
+# macOS / Linux / BSD
+curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
+```
+
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
+
+```bash
+go install github.com/dedomorozoff/dmcode@latest
+```
+
+## What's new since v0.1.7
+
+### The editor lives in the same window
+
+`ctrl+e` opens it, `ctrl+q` puts it back. One screen rather than one window per
+thing: the transcript is the main area when the editor is closed, and the panel
+toggles stay live in both modes.
+
+What came across is the editor body — syntax highlighting, the project tree, a
+git panel with inline diffs and blame, a real PTY, fuzzy file finding, splits,
+bookmarks, LSP completion and go-to-definition. dmcode keeps its own agent, so
+the old editor's AI panel, ghost text, chat rail and DAP debug panel are gone
+rather than half-present.
+
+`F1` inside the editor lists its keys. It is a long list on purpose: a project
+tree, a git panel and a terminal are three different grammars, and a table in a
+README is not where anyone looks while they are typing.
+
+### One status bar, and only what belongs to the screen you are on
+
+The bottom row is the workspace's, and its four icons are: editor, tree, git,
+terminal. Each is clickable, each shows its label on hover.
+
+The editor icon is first deliberately. Every other icon opens a panel; that one
+changes what the whole screen is, so it belongs where the eye lands before a row
+of toggles has been read. It is also the only icon whose state is a mode rather
+than a panel, and it lights up while the editor is up.
+
+That reorder freed the rest of the row. In chat mode the bar now carries the
+icons and the git branch, and nothing else: `Ln 4, Col 12`, the encoding, the
+language tag and the F1 hint are gone, because they described a file nobody can
+see on that screen while competing with the only part of the row a user can act
+on. In the editor mode all of it comes back — the file's own state belongs to
+the file's own screen.
+
+### The agent can see
+
+Drop a screenshot into the prompt, paste one from the clipboard, or attach one
+with `/image` — and dmcode draws it, in colour, before you send it.
+
+An attachment lives in exactly one place at a time: while it waits it is a strip
+above the input, and when you send that same rendering moves into the transcript.
+Three ways in — `/image <path>`, drag-and-drop of a picture path in the prompt,
+and `ctrl+v` for the clipboard's picture on Windows.
+
+Reduction happens before both outputs: an image over 1568px is shrunk first, and
+*then* the preview is drawn and the same bytes go on the wire. Drawing the
+original and sending a reduced copy would show you a preview of something the
+model never saw.
+
+Pictures reach only providers on the `/chat/completions` wire, and dmcode says so
+at the moment you attach rather than failing later inside the SDK.
+`DMCODE_API=chat` sends everything down the chat wire instead.
+
+### A conversation you can take back
+
+`ctrl+z` rewinds the last turn — the prompt comes back to the input and the
+answer goes with it — and `/sessions` lists conversations with `/resume` to
+switch between them.
+
+### Selection, yolo mode, and the tools that now work
+
+`ask_user` and `todo_write` compiled, passed their unit tests and did nothing at
+all: the transcript showed a tool call and a schema-validation message, and no
+result. The cause was not their logic but their *generated argument schema* —
+`functiontool` derives it from the Go type, so a field with no description
+reaches the model as a bare `{"type":"string"}`, and a field is required unless
+its JSON tag says otherwise. `ask_user` had declared its options as a nested
+object, so every shape a model naturally sent was refused. Both are flat now,
+every field described, with the exact payloads a model was observed to send driven
+through a real `runner.Run` turn by the tests.
+
+`shift+tab` is yolo: act's reach with `ask_user` withdrawn, so "the agent will
+not stop to ask" is a property of what it can reach rather than a line in an
+instruction it is asked to believe.
+
+A drag selects in the transcript and releases into the clipboard, with a
+character count in the status bar — a selection can be one word or three screens
+of build output, and "copied" alone does not say which happened. `/mouse` turns
+it off, because with the mouse on the terminal's own drag-select is gone.
+
+## Fixes worth naming
+
+Each of these looked correct and was wrong, and none was found by reading the
+code. They are here because the pattern is the lesson.
+
+- **The chat frame was one row short with the terminal docked**, so the status bar
+  sat a character above the bottom edge. Chat mode framed the terminal without
+  the leading divider row that `termExtraRows` reserves and that every mouse
+  coordinate counts from.
+- **The tests wrote to your clipboard.** Every copy and cut test in the editor
+  suite put its own fixture — "hello", "alpha" — into the one clipboard the user
+  has, so a `go test ./...` left that text behind; and a paste test *read* the
+  real one, so what the buffer received depended on what you had copied last.
+  The clipboard is now reached through two indirections in both packages and
+  swapped per test, and a test fails if anything calls the clipboard directly.
+- **`ctrl+v` was bound to a key the terminal never sends.** A terminal that binds
+  `ctrl+v` converts it to a paste, and a screenshot produces no text to fall back
+  to, so the shortcut did nothing at all.
+- **A clipboard format the OS advertises is not one it will render.** Windows
+  synthesises formats from the ones it holds, so an app that lists `CF_DIBV5`
+  and declines to render it left the format "available" while `GetClipboardData`
+  returned `ERROR_NOT_FOUND` — as "Element not found", with a readable `CF_DIB`
+  beside it.
+- **The picture bounds check forgot the header shared the allocation**, so a DIB
+  overstating its dimensions by more than a header's worth read past the end of
+  memory the clipboard owns.
+- **The preview never reset its colour**, so the caption below was drawn in the
+  colour of the image's bottom-right pixel — invisible on a picture with dark
+  edges, which is why a careful look missed it.
+- **The help had rotted.** It listed a duplicate git-diff row, a tree-ops row
+  pointing at `help.tree_ops`, a key that does not exist and so rendered as the
+  raw key, and it left out F12, Ctrl+Space and Ctrl+/. It also had no entry for
+  the way back to the chat. A test now holds the list to the catalog and to
+  itself, which is how the missing key was found.
+
+## Known limitations
+
+Stated plainly, not hidden.
+
+- Sending a picture to a model is unverified end to end (above).
+- A rewind does not rewrite `~/.dmcode/history.jsonl`, so an undone prompt is
+  still offered by `/history` until the next start.
+- Cancellation reaches the context but not the process, so a running
+  `run_command` finishes on its own schedule.
+- The workspace boundary is a lexical check at resolve time; the tools that open
+  files close the symlink gap themselves, but `grep` skips symlinks rather than
+  following one out of the tree.
+- The editor's sub-agent nested turn, the rewind against a real runner, and the
+  session-file round trip through `runner.Run` all have unit tests and no
+  end-to-end check.
+
 # dmCode v0.1.8
 
 The agent can see. Drop a screenshot into the prompt, paste one from the
