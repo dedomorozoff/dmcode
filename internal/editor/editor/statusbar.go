@@ -22,7 +22,6 @@ const (
 	actNone statusAction = iota
 	actTree
 	actGit
-	actDebug
 	actTerm
 	actSplitV
 	actSplitH
@@ -37,7 +36,6 @@ type statusIcon struct {
 var statusIconDefs = []statusIcon{
 	{actTree, "▤", "status.tip_tree"},
 	{actGit, "⎇", "status.tip_git"},
-	{actDebug, "◉", "status.tip_debug"},
 	{actTerm, "❯", "status.tip_term"},
 }
 
@@ -65,8 +63,6 @@ func (m Model) statusIconActive(a statusAction) bool {
 		return m.treeVisible
 	case actGit:
 		return m.gitOpen
-	case actDebug:
-		return m.dapOpen
 	case actTerm:
 		return m.termOpen
 	case actSplitV:
@@ -268,8 +264,6 @@ func (m *Model) activateStatusIcon(a statusAction) tea.Cmd {
 			m.openGitPanel()
 		}
 		return nil
-	case actDebug:
-		return m.toggleDebugPanel()
 	case actTerm:
 		return m.toggleTerminal()
 	}

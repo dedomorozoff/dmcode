@@ -1,6 +1,6 @@
 // Package bundled ships a small set of official plugins embedded in the
 // binary so users can install them from the built-in plugin store without a
-// network connection. Installed plugins are copied into ~/.dmed/plugins and
+// network connection. Installed plugins are copied into ~/.dmcode/plugins and
 // behave like any other Lua plugin.
 package bundled
 

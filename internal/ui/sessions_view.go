@@ -93,7 +93,7 @@ func (m *uiModel) sessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		list.confirmDelete = ""
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	case "up":
 		if list.selected > 0 {
 			list.selected--

@@ -25,11 +25,13 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/editor/editor"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/imgprev"
 	"github.com/dedomorozoff/dmcode/internal/llm"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
+	"github.com/dedomorozoff/dmcode/internal/tools"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -456,6 +458,21 @@ type uiModel struct {
 	// input is watched on each one, and re-decoding the same file for each is a
 	// stall the user can see.
 	watchedPath string
+	// ed is the workspace: the merged dmed editor with its project tree, git
+	// panel and terminal. It is created on the first ctrl+e and lives for the
+	// rest of the session — tabs, tree state and the PTY survive the switches
+	// between the editor's main area and the chat (ed.Chat).
+	ed *editor.Model
+	// hostCall guards the re-entrancy in the host callbacks: the editor calls
+	// back into the chat's key handling, which is the same Update — the flag
+	// tells it the message has already been routed past the editor once.
+	hostCall bool
+	// pendingEditor is a switch into the editor mode asked for from inside the
+	// editor's own Update (a host callback: ctrl+e, the /editor command). The
+	// editor's Update returns its own copy and editorUpdate would clobber a
+	// direct flip of m.ed — so the flip is deferred until the copy lands.
+	pendingEditor bool
+	winW, winH    int
 }
 
 // cachedLine holds the rendered rows of one history line. It is index-aligned
@@ -578,6 +595,209 @@ type command struct {
 	run  func(m *uiModel) tea.Cmd
 }
 
+// editorUpdate forwards a message into the embedded editor and keeps the
+// pointer fresh: the editor's Update has a value receiver, so the state that
+// survived the message is the value it returns.
+func (m *uiModel) editorUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.ed.Update(msg)
+	if em, ok := nm.(editor.Model); ok {
+		m.ed = &em
+	}
+	if m.pendingEditor {
+		m.pendingEditor = false
+		m.enterEditor()
+	}
+	return m, cmd
+}
+
+// quitCmd tears the workspace down — the terminal's shell above all — and
+// ends the program. Every exit path goes through it, so closing dmcode never
+// leaves a shell running behind the terminal.
+func (m *uiModel) quitCmd() tea.Cmd {
+	if m.ed != nil {
+		m.ed.Shutdown()
+	}
+	return tea.Quit
+}
+
+// openEditor switches the workspace into the editor mode. Called either from
+// the plain chat (the editor does not exist yet) or from inside the editor's
+// own Update — a host callback — where a direct flip of m.ed would be
+// clobbered by the copy the editor's Update returns, so the flip defers.
+func (m *uiModel) openEditor() tea.Cmd {
+	init := m.ensureEditor()
+	if m.hostCall {
+		m.pendingEditor = true
+		return init
+	}
+	m.enterEditor()
+	return init
+}
+
+// enterEditor flips the (already existing) workspace into the editor mode:
+// the tabs for the files the agent changed open on top, and the tree comes
+// with them — a bare editor without a navigator is not the editor anyone
+// asked for.
+func (m *uiModel) enterEditor() {
+	m.ed.Chat = false
+	m.ed.OpenChangedTabs()
+	m.ed.OpenTree()
+}
+
+// ensureEditor creates the workspace the first time it is needed, on the
+// folder the session is scoped to, and wires the chat side of it: the keys
+// and clicks its main-area callbacks hand back, and the transcript rendered
+// at the editor's geometry. The returned command is the editor's Init — its
+// watchers are channel listeners that must run exactly once.
+func (m *uiModel) ensureEditor() tea.Cmd {
+	if m.ed != nil {
+		return nil
+	}
+	var args []string
+	if m.workDir != "" {
+		args = append(args, m.workDir)
+	}
+	ed := editor.New(args...)
+	ed.Embed = true
+	ed.Chat = true
+	ed.ApplyTerminalCompat()
+	// The panels start closed: the first screen is the chat, the panels are
+	// one key or one status-bar icon away.
+	ed.ClosePanels()
+	if m.winW > 0 {
+		nm, _ := ed.Update(tea.WindowSizeMsg{Width: m.winW, Height: m.winH})
+		if em, ok := nm.(editor.Model); ok {
+			ed = em
+		}
+	}
+	ed.Host = &editor.Host{
+		Key: func(msg tea.KeyPressMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			_, cmd := m.Update(msg)
+			return cmd
+		},
+		Click: func(msg tea.MouseClickMsg) tea.Cmd {
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatClick(msg)
+		},
+		Wheel: func(msg tea.MouseWheelMsg) tea.Cmd {
+			return m.chatWheel(msg)
+		},
+		Motion: func(msg tea.MouseMotionMsg) tea.Cmd {
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatMotion(msg)
+		},
+		Release: func(msg tea.MouseReleaseMsg) tea.Cmd {
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatRelease(msg)
+		},
+		Paste: func(text string) tea.Cmd {
+			if m.pasteTarget() != nil {
+				m.pasteInto(text)
+				return nil
+			}
+			return m.pasteImageCmd()
+		},
+		View:         m.chatFrame,
+		ChangedFiles: func() []string { return tools.ChangedFiles() },
+	}
+	m.ed = &ed
+	return ed.Init()
+}
+
+// chatClick starts a transcript selection drag with the button that went down.
+// Right and middle are left to the terminal so a user who wants the terminal's
+// own paste menu keeps it.
+func (m *uiModel) chatClick(msg tea.MouseClickMsg) tea.Cmd {
+	if !m.mouseEnabled {
+		return nil
+	}
+	if tea.Mouse(msg).Button == tea.MouseLeft {
+		m.selAnchorX, m.selAnchorY = msg.X, msg.Y
+		m.selFocusX, m.selFocusY = msg.X, msg.Y
+		m.selDown, m.selMoved = true, false
+	}
+	return nil
+}
+
+func (m *uiModel) chatMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	if !m.mouseEnabled || !m.selDown {
+		return nil
+	}
+	m.selFocusX, m.selFocusY = msg.X, msg.Y
+	if msg.X != m.selAnchorX || msg.Y != m.selAnchorY {
+		m.selMoved = true
+	}
+	return nil
+}
+
+func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
+	if !m.mouseEnabled || !m.selDown {
+		return nil
+	}
+	m.selDown = false
+	if !m.selMoved {
+		// A click, not a drag: clear the highlight and leave the clipboard be.
+		m.selMoved = false
+		return nil
+	}
+	m.selFocusX, m.selFocusY = msg.X, msg.Y
+	text := m.selectedText()
+	m.selMoved = false
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		m.statusText = i18n.T("clipboard error: ") + err.Error()
+		return nil
+	}
+	// The character count, because a selection can be a single word or three
+	// screens of build output and "copied" alone does not say which happened.
+	m.statusText = fmt.Sprintf(i18n.T("selection copied (%d characters)"), len([]rune(text)))
+	return nil
+}
+
+// chatWheel scrolls the transcript. The wheel is routed through the viewport's
+// own handler, which already knows the shift-modifier horizontal case; what it
+// cannot know is that scrolling up must release the follow-the-tail stick.
+func (m *uiModel) chatWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if !m.mouseEnabled {
+		return nil
+	}
+	switch msg.Button {
+	case tea.MouseWheelDown:
+		m.scrollBy(m.vp.MouseWheelDelta)
+	case tea.MouseWheelUp:
+		m.scrollBy(-m.vp.MouseWheelDelta)
+	default:
+		m.vp, _ = m.vp.Update(msg)
+		m.syncVP()
+	}
+	return nil
+}
+
+// chatFrame renders the chat inside the workspace main area. While the editor
+// exists, the model's width and height are the main area's size — the frame
+// callback is the only place they are set, straight from the editor geometry.
+func (m *uiModel) chatFrame(w, h int) []string {
+	if m.width != w || m.height != h {
+		m.width, m.height = w, h
+		m.layout()
+	}
+	rows := strings.Split(m.buildFrame(), "\n")
+	for len(rows) < h {
+		rows = append(rows, "")
+	}
+	if len(rows) > h {
+		rows = rows[:h]
+	}
+	return rows
+}
+
 func (m *uiModel) commands() []command {
 	return []command{
 		{name: "setup", desc: i18n.T("choose a provider (free, no key needed)"), run: func(m *uiModel) tea.Cmd {
@@ -595,6 +815,9 @@ func (m *uiModel) commands() []command {
 			m.layout()
 			m.followVP()
 			return nil
+		}},
+		{name: "editor", desc: i18n.T("open the code editor: tree, git, terminal (ctrl+e)"), run: func(m *uiModel) tea.Cmd {
+			return m.openEditor()
 		}},
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
@@ -667,7 +890,7 @@ func (m *uiModel) commands() []command {
 		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
 			return m.openProxy()
 		}},
-		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
+		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return m.quitCmd() }},
 	}
 }
 
@@ -766,7 +989,10 @@ func (m *uiModel) printWelcome() {
 }
 
 func (m *uiModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd())
+	// The workspace exists from the first frame — the terminal, the tree and
+	// the git panel are one key (or one status-bar icon) away — but every
+	// panel starts closed: the first screen is the chat, not furniture.
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor())
 }
 
 // upgradeColorProfile asks the terminal what it actually supports.
@@ -892,6 +1118,29 @@ func (m *uiModel) copyLastResponse() {
 }
 
 func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The workspace editor owns keys, mouse and geometry for as long as it
+	// runs; in chat mode (ed.Chat) it passes the main-area keys and clicks
+	// back through the Host callbacks below. The rest of the traffic — agent
+	// events, ticks, transport messages — keeps flowing through the chat
+	// below, so a running turn is not stalled while the user is reading code.
+	if m.ed != nil && !m.hostCall {
+		switch msg := msg.(type) {
+		case editor.CloseEditorMsg:
+			// ctrl+q in the editor: back to the chat, and the panels fold —
+			// closed is the chat mode's default.
+			m.ed.Chat = true
+			m.ed.DropPanelFocus()
+			m.ed.ClosePanels()
+			return m, nil
+		case tea.WindowSizeMsg:
+			// The editor owns the geometry in embedded mode; the chat is
+			// re-laid-out by its frame callback at the main area's size.
+			m.winW, m.winH = msg.Width, msg.Height
+			return m.editorUpdate(msg)
+		case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.MouseWheelMsg:
+			return m.editorUpdate(msg)
+		}
+	}
 	// extra carries a follow-up command a case wants to run after the switch,
 	// batched with the textinput's own command at the tail.
 	var extra tea.Cmd
@@ -907,6 +1156,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, upgradeColorProfile(msg.Profile)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.winW, m.winH = msg.Width, msg.Height
 		// No followVP here on purpose: the tail of Update re-syncs the viewport
 		// for every message, which is what re-wraps the transcript at the new
 		// width. Calling it twice would render the whole history twice.
@@ -934,71 +1184,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			extra = cmd
 		}
 	case tea.MouseClickMsg:
-		if !m.mouseEnabled {
-			break
-		}
-		// Only the left button drags a selection. Right and middle are left to the
-		// terminal so a user who wants the terminal's own paste menu keeps it.
-		if tea.Mouse(msg).Button == tea.MouseLeft {
-			m.selAnchorX, m.selAnchorY = msg.X, msg.Y
-			m.selFocusX, m.selFocusY = msg.X, msg.Y
-			m.selDown, m.selMoved = true, false
-		}
-		return m, nil
+		return m, m.chatClick(msg)
 	case tea.MouseMotionMsg:
-		if !m.mouseEnabled || !m.selDown {
-			break
-		}
-		m.selFocusX, m.selFocusY = msg.X, msg.Y
-		if msg.X != m.selAnchorX || msg.Y != m.selAnchorY {
-			m.selMoved = true
-		}
-		return m, nil
+		return m, m.chatMotion(msg)
 	case tea.MouseReleaseMsg:
-		if !m.mouseEnabled || !m.selDown {
-			break
-		}
-		m.selDown = false
-		if !m.selMoved {
-			// A click, not a drag: clear the highlight and leave the clipboard be.
-			m.selMoved = false
-			return m, nil
-		}
-		m.selFocusX, m.selFocusY = msg.X, msg.Y
-		text := m.selectedText()
-		m.selMoved = false
-		if strings.TrimSpace(text) == "" {
-			return m, nil
-		}
-		if err := clipboard.WriteAll(text); err != nil {
-			m.statusText = i18n.T("clipboard error: ") + err.Error()
-			return m, nil
-		}
-		// The character count, because a selection can be a single word or three
-		// screens of build output and "copied" alone does not say which happened.
-		m.statusText = fmt.Sprintf(i18n.T("selection copied (%d characters)"), len([]rune(text)))
-		return m, nil
+		return m, m.chatRelease(msg)
 	case tea.MouseWheelMsg:
-		// The wheel is routed through the viewport's own handler, which already
-		// knows the shift-modifier horizontal case. What it cannot know is that
-		// scrolling up must release the follow-the-tail stick: without this the
-		// tail of Update would call followVP and snap straight back to the
-		// bottom on the very next frame, making the wheel look dead.
-		if !m.mouseEnabled {
-			break
-		}
-		switch msg.Button {
-		case tea.MouseWheelDown:
-			m.scrollBy(m.vp.MouseWheelDelta)
-		case tea.MouseWheelUp:
-			m.scrollBy(-m.vp.MouseWheelDelta)
-		default:
-			// Left/right wheel and the horizontal modifiers stay with the
-			// viewport, which scrolls sideways without touching the stick.
-			m.vp, _ = m.vp.Update(msg)
-			m.syncVP()
-		}
-		return m, nil
+		return m, m.chatWheel(msg)
 	case tea.KeyPressMsg:
 		if m.setup.open {
 			model, cmd := m.setupKey(msg)
@@ -1080,7 +1272,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.followVP()
 				return m, nil
 			}
-			return m, tea.Quit
+			return m, m.quitCmd()
 		case "ctrl+p":
 			m.palette = paletteState{open: true}
 			return m, nil
@@ -1089,6 +1281,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.followVP()
 			return m, nil
+		case "ctrl+e":
+			return m, m.openEditor()
 		case "ctrl+y":
 			m.copyLastResponse()
 			return m, nil
@@ -1202,7 +1396,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch text {
 			case "/quit", "/exit":
-				return m, tea.Quit
+				return m, m.quitCmd()
 			case "/help":
 				m.history = append(m.history,
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
@@ -2325,7 +2519,7 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusText = i18n.T("cancelled")
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	}
 
 	switch m.proxy.stage {
@@ -2594,7 +2788,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusText = i18n.T("setup cancelled")
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	}
 
 	switch m.setup.stage {
@@ -4124,9 +4318,35 @@ func (m *uiModel) filteredCommands() []command {
 }
 
 func (m *uiModel) View() tea.View {
+	// The workspace chrome (tree, git panel, terminal) is the screen once the
+	// editor exists; the main area is its tabs or, in chat mode, the chat.
+	// The editor's own altscreen flag and mouse mode ride on the View it
+	// returns.
+	if m.ed != nil {
+		return m.ed.View()
+	}
 	if m.width == 0 {
 		return tea.NewView(i18n.T("dmcode is starting…"))
 	}
+	v := tea.NewView(m.buildFrame())
+	v.AltScreen = true
+	// All-motion reporting is what a selection needs: a drag only produces
+	// MouseMotionMsg when the terminal is told to report motion, so cell motion
+	// — which was enough for the wheel — never reaches the handler that does the
+	// selecting. The wheel still scrolls; /mouse turns all of it off for anyone
+	// who wants the terminal's own drag-select and paste menu back.
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeAllMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
+	return v
+}
+
+// buildFrame assembles the chat frame at the model's current width and height:
+// the whole window when the editor has never been opened, the workspace main
+// area in chat mode (chatFrame sets the sizes to the region's then).
+func (m *uiModel) buildFrame() string {
 	if m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.proxy.open || m.sessionsList.open || m.ask.open {
 		box := m.paletteBox()
 		switch {
@@ -4143,9 +4363,7 @@ func (m *uiModel) View() tea.View {
 		case m.ask.open:
 			box = m.askBox()
 		}
-		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
-		v.AltScreen = true
-		return v
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 	}
 
 	// Every row of the frame is exactly m.width wide and together they are
@@ -4187,19 +4405,7 @@ func (m *uiModel) View() tea.View {
 	// and all, not the same text before it was laid out.
 	frame = m.paintSelection(frame)
 	m.frame = frame
-	v := tea.NewView(frame)
-	v.AltScreen = true
-	// All-motion reporting is what a selection needs: a drag only produces
-	// MouseMotionMsg when the terminal is told to report motion, so cell motion
-	// — which was enough for the wheel — never reaches the handler that does the
-	// selecting. The wheel still scrolls; /mouse turns all of it off for anyone
-	// who wants the terminal's own drag-select and paste menu back.
-	if m.mouseEnabled {
-		v.MouseMode = tea.MouseModeAllMotion
-	} else {
-		v.MouseMode = tea.MouseModeNone
-	}
-	return v
+	return frame
 }
 
 // paintSelection draws the current selection in reverse video.

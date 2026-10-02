@@ -22,7 +22,7 @@ func TestHelpToggle(t *testing.T) {
 	v := m.View()
 	// Only the top window is visible on a 24-row terminal; "Ctrl+W" sits below
 	// the fold and is checked after scrolling in TestHelpScrolls.
-	for _, want := range []string{"dmed — keys", "Ctrl+S", "Ctrl+F", "Ctrl+H", "Ctrl+O", "Ctrl+Alt+D", "F5"} {
+	for _, want := range []string{"dmed — keys", "Ctrl+S", "Ctrl+F", "Ctrl+H", "Ctrl+O"} {
 		if !strings.Contains(v.Content, want) {
 			t.Fatalf("help view missing %q", want)
 		}
@@ -75,7 +75,7 @@ func TestHelpRussianLocale(t *testing.T) {
 	m.tr = i18n.New(i18n.Resolve("ru"))
 	m = press(m, tea.KeyPressMsg{Code: tea.KeyF1})
 	v := m.View()
-	for _, want := range []string{"клавиши", "сохранить активную вкладку", "быстрый поиск файлов", "брейкпоинт"} {
+	for _, want := range []string{"клавиши", "сохранить активную вкладку", "быстрый поиск файлов"} {
 		if !strings.Contains(v.Content, want) {
 			t.Fatalf("ru help view missing %q", want)
 		}

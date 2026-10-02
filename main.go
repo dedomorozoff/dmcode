@@ -15,10 +15,13 @@ import (
 	"os"
 	"sync"
 
+	tea "charm.land/bubbletea/v2"
+
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/editor/editor"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	dmmcp "github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/tools"
@@ -60,17 +63,43 @@ func subNotifier(ev dmagent.SubEvent) {
 }
 
 func main() {
+	// "dmcode editor [dir | files...]" is the same door as -e, spelled the way
+	// dmed spelled it, so old muscle memory and old scripts keep working.
+	if len(os.Args) > 1 && os.Args[1] == "editor" {
+		if err := runEditor(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	showVersion := flag.Bool("version", false, "print the dmcode version and exit")
 	dir := flag.String("C", "", "work as if dmcode was started in this directory")
 	flag.StringVar(dir, "dir", "", "alias for -C")
+	edit := flag.Bool("e", false, "open the file editor instead of the agent session")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("dmcode", version)
 		return
 	}
+	if *edit {
+		if err := runEditor(flag.Args()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if err := run(*dir); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// runEditor starts the merged dmed editor on the given paths. The editor is
+// a full Bubble Tea program of its own, so it never shares a process with the
+// agent TUI: one runs, the other does not exist.
+func runEditor(args []string) error {
+	model := editor.New(args...)
+	model.ApplyTerminalCompat()
+	p := tea.NewProgram(model)
+	_, err := p.Run()
+	return err
 }
 
 // run starts the session, optionally relocated to dir.

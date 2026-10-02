@@ -77,7 +77,7 @@ func TestBookmarkJumpNone(t *testing.T) {
 	}
 }
 
-func TestGutterClickTogglesBreakpointAndBookmark(t *testing.T) {
+func TestGutterClickTogglesBookmark(t *testing.T) {
 	dir := t.TempDir()
 	f := writeTemp(t, dir, "g.txt", "one\ntwo\nthree\n")
 	m := New(f)
@@ -87,18 +87,7 @@ func TestGutterClickTogglesBreakpointAndBookmark(t *testing.T) {
 	gw := m.gutterWidthForTab(&m.tabs[0])
 	leftW := m.leftRailWidth()
 
-	// Left click anywhere in the gutter toggles a breakpoint at that line.
-	_ = m.handleMouseClick(tea.MouseClickMsg{X: leftW + gw/2, Y: 2})
-	if !m.dapBreak[abs][2] {
-		t.Fatal("left gutter click must set a breakpoint at line 2")
-	}
-	// Click again → toggles off, and the cursor must not move into the line.
-	_ = m.handleMouseClick(tea.MouseClickMsg{X: leftW + gw/2, Y: 2})
-	if m.dapBreak[abs][2] {
-		t.Fatal("second left gutter click must remove the breakpoint")
-	}
-
-	// Middle click (the wheel button) toggles a bookmark instead.
+	// Middle click (the wheel button) toggles a bookmark.
 	_ = m.handleMouseClick(tea.MouseClickMsg{X: leftW + gw/2, Y: 1, Button: tea.MouseMiddle})
 	if !m.bookmarks[abs][1] {
 		t.Fatal("middle gutter click must set a bookmark at line 1")
@@ -125,17 +114,5 @@ func TestGutterRendersBookmarkMark(t *testing.T) {
 	v = m.View()
 	if strings.Contains(v.Content, "◆") {
 		t.Fatalf("gutter should not show bookmark mark after removal:\n%s", v.Content)
-	}
-
-	// One shared column: a breakpoint on the same line wins over the bookmark.
-	abs, _ := filepath.Abs(f)
-	m.toggleBookmarkAt(1)
-	m.dapBreak[abs] = map[int]bool{2: true}
-	v = m.View()
-	if !strings.Contains(v.Content, "●") {
-		t.Fatalf("breakpoint mark must render in the shared column:\n%s", v.Content)
-	}
-	if strings.Contains(v.Content, "◆") {
-		t.Fatalf("breakpoint must take precedence over bookmark:\n%s", v.Content)
 	}
 }

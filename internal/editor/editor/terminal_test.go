@@ -14,11 +14,11 @@ func altT() tea.KeyPressMsg { return tea.KeyPressMsg{Code: 't', Mod: tea.ModAlt}
 
 func TestTerminalShellSelection(t *testing.T) {
 	m := New()
-	t.Setenv("DMED_SHELL", "C:\\fake\\shell.exe")
+	t.Setenv("DMCODE_SHELL", "C:\\fake\\shell.exe")
 	if got := m.shellCommand(); got != "C:\\fake\\shell.exe" {
-		t.Fatalf("DMED_SHELL must win, got %q", got)
+		t.Fatalf("DMCODE_SHELL must win, got %q", got)
 	}
-	t.Setenv("DMED_SHELL", "")
+	t.Setenv("DMCODE_SHELL", "")
 	got := m.shellCommand()
 	if got == "" || strings.Contains(got, "/bin/") && runtime.GOOS == "windows" {
 		t.Fatalf("platform default shell must be usable, got %q", got)

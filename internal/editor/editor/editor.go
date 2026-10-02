@@ -15,7 +15,6 @@ import (
 
 	"github.com/dedomorozoff/dmcode/internal/editor/buffer"
 	"github.com/dedomorozoff/dmcode/internal/editor/config"
-	"github.com/dedomorozoff/dmcode/internal/editor/dap"
 	"github.com/dedomorozoff/dmcode/internal/editor/events"
 	"github.com/dedomorozoff/dmcode/internal/editor/i18n"
 	"github.com/dedomorozoff/dmcode/internal/editor/lsp"
@@ -253,6 +252,18 @@ func (t *tab) getDiff(repo *vcs.Repo) vcs.FileDiff {
 type Model struct {
 	root string
 	cfg  config.Config
+	// Embed marks a model running inside another Bubble Tea program (dmcode's
+	// TUI). The editor then never returns tea.Quit: its exit paths produce
+	// CloseEditorMsg, and the parent closes it without ending the process.
+	Embed bool
+	// Chat puts the workspace into chat mode: the chrome — tab bar, tree
+	// sidebar, git panel, terminal, status bar — stays on screen, but the
+	// main area and every key and click no panel owns belong to the host
+	// (dmcode's chat transcript and its input line).
+	Chat bool
+	// Host carries the callbacks chat mode calls back into. It is set once at
+	// embed time and never touched by the editor itself.
+	Host *Host
 	g    glyphSet // active render glyphs (unicode or ASCII fallback)
 	// syn is the syntax highlighter owned by the model. It was a package-level
 	// variable in internal/syntax, written from Update on config hot-reload
@@ -296,7 +307,6 @@ type Model struct {
 
 	helpOpen   bool
 	helpScroll int // help panel scroll offset (the list overflows small screens)
-
 
 	treeVisible    bool
 	treeFocus      bool
@@ -379,42 +389,9 @@ type Model struct {
 	termExitCh   chan terminalExitMsg
 	termGen      int
 
-	// DAP debug panel (Delve) — the backend is a DAP client or the DBGp
-	// Xdebug client, either of which serves the same panel interface.
-	dapClient             debugBackend
-	dapCh                 chan dapEventMsg
-	dapOpen               bool
-	dapRunState           string
-	dapReason             string
-	dapThreads            []dap.Thread
-	dapFrames             []dap.StackFrame
-	dapSelThread          int
-	dapSelFrame           int
-	dapFocus              int // 0=threads, 1=frames, 2=variables
-	dapVarStack           [][]dapVarRow
-	dapVarSel             int
-	dapScopes             []dap.Scope
-	dapConsole            []string
-	dapIn                 []rune
-	dapBreak              map[string]map[int]bool // abs path → line → true
-	dapBPVerif            map[string]map[int]bool // adapter-verified breakpoints
-	bookmarks             map[string]map[int]bool // abs path → line (1-based) → true
-	dapCurPath            string
-	dapCurLine            int
-	dapBusy               bool
-	dapGen                int  // session generation; drops stale start/launch msgs
-	dapFollowPending      bool // reveal the stopped location on the next Update
-	dapConsolePeek        bool
-	dapConsoleScroll      int // console lines scrolled back from the newest
-	dapPanelRows          int // panel height override; 0 = a quarter of the terminal
-	dapSupportsConfigDone bool
-	dapDeduced            *config.DebugConfig // language-detected [debug] for the live session
-
-	// DAP settings wizard (debug/launch configuration dialog)
-	dapCfgOpen  bool
-	dapCfgField int
-	dapCfgEdit  bool
-	dapCfgIn    []rune
+	// Bookmarks are session-local navigation marks; they share the gutter's
+	// marker column with diagnostics and git changes.
+	bookmarks map[string]map[int]bool // abs path → line (1-based) → true
 
 	// Command palette & Clipboard
 	paletteOpen   bool
@@ -448,7 +425,7 @@ type Model struct {
 	quitTab     bool // true if confirming close of a single tab (not quit)
 	pendingQuit bool
 
-	agentReviewOffX   int
+	agentReviewOffX int
 
 	// Mouse state
 	mouseDown  bool
@@ -477,7 +454,7 @@ type Model struct {
 	lastShiftTime time.Time
 }
 
-var debugKeys = os.Getenv("DMED_DEBUG_KEYS") != ""
+var debugKeys = os.Getenv("DMCODE_DEBUG_KEYS") != "" || os.Getenv("DMED_DEBUG_KEYS") != ""
 
 // Russian ЙЦУКЕН → English QWERTY mapping for layout-independent keybindings.
 var ruToEn = map[rune]rune{
@@ -530,9 +507,6 @@ func New(paths ...string) Model {
 		diagCh:                make(chan lspDiagMsg, 64),
 		diags:                 map[string][]lsp.Diagnostic{},
 		pendingPluginRemovals: map[string]bool{},
-		dapCh:                 make(chan dapEventMsg, 64),
-		dapBreak:              map[string]map[int]bool{},
-		dapBPVerif:            map[string]map[int]bool{},
 		bookmarks:             map[string]map[int]bool{},
 	}
 	if w, err := watcher.New(func(p string) {
@@ -561,7 +535,13 @@ func New(paths ...string) Model {
 	// precedence over the session.
 	restoreActiveTab := -1
 	if len(files) == 0 && m.root != "" {
-		if sess, err := session.Load(session.DefaultPath(m.root)); err == nil && len(sess.Files) > 0 {
+		sessPath := session.DefaultPath(m.root)
+		if sessPath != "" {
+			if _, err := os.Stat(sessPath); err != nil {
+				sessPath = session.LegacyPath(m.root)
+			}
+		}
+		if sess, err := session.Load(sessPath); err == nil && len(sess.Files) > 0 {
 			for _, f := range sess.Files {
 				m.openPath(f)
 			}
@@ -756,7 +736,7 @@ func (m *Model) startFinder() {
 	m.finderHits = searchFiles(m.finderFiles, "")
 }
 
-// openConfigFile opens the .dmed.conf file in a new tab for editing.
+// openConfigFile opens the .dmcode.conf file in a new tab for editing.
 // Creates the file with defaults if it doesn't exist.
 func (m *Model) openConfigFile() {
 	path := config.ConfigPath()
@@ -765,36 +745,21 @@ func (m *Model) openConfigFile() {
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// Create with defaults
-		content := "# dmed configuration\n" +
+		content := "# dmcode editor configuration\n" +
 			"# Uncomment settings to override defaults.\n\n" +
 			"[editor]\n" +
 			"# tab_width = 4\n" +
 			"# syntax_theme = monokai\n" +
 			"# line_numbers = true\n" +
 			"# skipped_dirs = .git,node_modules\n\n" +
-			"[ai]\n" +
-			"# provider = ollama  # ollama | openai\n" +
-			"# model =\n" +
-			"# ollama_url = http://localhost:11434\n" +
-			"# api_key =  # for OpenAI-compatible providers\n" +
-			"# context_max = 6000\n" +
-			"# temperature = 0  # tenths (7 => 0.7); 0 = provider default\n" +
-			"# num_ctx = 0  # Ollama context window tokens; 0 = default\n" +
-			"# num_predict = 0  # max output tokens; 0 = provider default\n" +
-			"# tool_rounds = 0  # chat tool-loop cap; 0 = built-in (6)\n" +
-			"# allow_run = ask  # always | never | ask (default: ask = confirm each command)\n" +
-			"# restrict_to_root = true  # true (default) = keep READ/EDIT/REPLACE inside the project\n\n" +
-			"[agent]\n" +
-			"# system_prompt =  # optional override for background agent tasks\n" +
-			"# context_max = 262144  # bytes of file context sent to the agent\n\n" +
 			"[ui]\n" +
-			"# tree_width = 25\n" +
-			"# chat_width_pct = 40\n\n" +
+			"# tree_width = 25\n\n" +
 			"[plugins]\n" +
 			"# repo = dedomorozoff/dmed  # GitHub store for the plugin store\n" +
 			"# dir = plugins\n" +
 			"# branch = main\n"
-		os.WriteFile(path, []byte(content), 0o644)
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, []byte(content), 0o644)
 	}
 	m.openPath(path)
 	m.msg = m.t("msg.edit_config")
@@ -1016,8 +981,7 @@ func (m *Model) handleSavePrompt(msg tea.KeyPressMsg) tea.Cmd {
 			m.msg = m.t("msg.saved")
 			if m.pendingQuit {
 				m.pendingQuit = false
-				m.shutdown()
-				return tea.Quit
+				return m.quit()
 			}
 		}
 	case "backspace":
@@ -1080,8 +1044,7 @@ func (m *Model) handleQuitConfirm(msg tea.KeyPressMsg) tea.Cmd {
 			m.shutdown()
 			return cmd
 		}
-		m.shutdown()
-		return tea.Quit
+		return m.quit()
 	case "n", "N":
 		m.quitConfirm = false
 		m.pendingQuit = false
@@ -1095,8 +1058,7 @@ func (m *Model) handleQuitConfirm(msg tea.KeyPressMsg) tea.Cmd {
 			m.shutdown()
 			return cmd
 		}
-		m.shutdown()
-		return tea.Quit
+		return m.quit()
 	}
 	return nil
 }
@@ -1119,15 +1081,15 @@ func waitForFileEvent(ch <-chan string) tea.Cmd {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(waitForFileEvent(m.fileEvents), waitForTermOutput(m.termCh), waitForLSPDiag(m.diagCh), waitForDAPEvent(m.dapCh))
+	return tea.Batch(waitForFileEvent(m.fileEvents), waitForTermOutput(m.termCh), waitForLSPDiag(m.diagCh))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case FileChangedMsg:
 		path := msg.Path
-		// Hot-reload config when .dmed.conf changes
-		if strings.HasSuffix(path, ".dmed.conf") {
+		// Hot-reload config when the editor conf changes
+		if strings.HasSuffix(path, ".dmcode.conf") || strings.HasSuffix(path, "editor.conf") || strings.HasSuffix(path, ".dmed.conf") {
 			m.cfg = config.Load(m.root)
 			m.tr = i18n.New(i18n.Resolve(m.cfg.UI.Lang))
 			// A new highlighter invalidates the per-tab cached lines.
@@ -1259,6 +1221,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmd := m.handleMouseWheel(msg)
 		return m, cmd
 	case tea.MouseReleaseMsg:
+		if m.Chat {
+			if m.Host != nil && m.Host.Release != nil {
+				return m, m.Host.Release(msg)
+			}
+			return m, nil
+		}
 		m.mouseDown = false
 		switch {
 		case m.dragTerm:
@@ -1274,12 +1242,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.forwardTerminalMouseEvent(button, msg.X, msg.Y-m.termStartRow(), 'm')
 		}
 	case tea.MouseMotionMsg:
+		if m.Chat {
+			if m.Host != nil && m.Host.Motion != nil {
+				return m, m.Host.Motion(msg)
+			}
+			return m, nil
+		}
 		if m.mouseDown {
 			cmd := m.handleMouseMotion(msg)
 			return m, cmd
 		}
 		m.updateStatusHover(msg)
 	case tea.PasteMsg:
+		if m.Chat {
+			if m.Host != nil && m.Host.Paste != nil {
+				return m, m.Host.Paste(msg.String())
+			}
+			return m, nil
+		}
 		if text := msg.String(); text != "" {
 			if m.termOpen && m.termSession != nil {
 				_, _ = m.termSession.Write([]byte(strings.ReplaceAll(text, "\r\n", "\r")))
@@ -1354,73 +1334,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if m.plugins != nil {
 			m.installFromSource(msg.file, msg.src)
 		}
-	case dapEventMsg:
-		return m, m.handleDAPEventUpdate(msg)
-	case dapStartMsg:
-		if msg.gen != m.dapGen {
-			// A newer stop/restart superseded this start; drop the late adapter.
-			if msg.cl != nil {
-				msg.cl.Close()
-			}
-			return m, nil
-		}
-		m.dapBusy = false
-		if msg.err != nil {
-			m.dapRunState = dapIdle
-			m.msg = msg.err.Error()
-			return m, nil
-		}
-		m.dapClient = msg.cl
-		m.dapSupportsConfigDone = msg.supports
-		m.msg = "debug: " + msg.adapter + " attached"
-		return m, m.dapLaunchCmd()
-	case dapLaunchMsg:
-		if msg.gen != m.dapGen {
-			return m, nil // stale launch result from a superseded session
-		}
-		m.dapBusy = false
-		m.applyDapBPSyncs(msg.bps)
-		if msg.err != nil {
-			m.dapRunState = dapIdle
-			m.msg = "debug launch: " + msg.err.Error()
-			// The adapter never produced a debuggee. Release it so F5 can
-			// launch again: leaving the client attached while the state reads
-			// idle made the "session already attached" guard swallow every
-			// later F5 press.
-			return m, m.dapRelease()
-		}
-		m.dapRunState = dapRunning
-		m.msg = "debug: running"
-	case dapStepMsg:
-		if msg.err != nil {
-			m.msg = "debug step: " + msg.err.Error()
-		} else {
-			m.dapRunState = dapRunning
-			m.dapCurPath = ""
-			m.dapCurLine = 0
-		}
-	case dapRefreshMsg:
-		m.applyDAPRefresh(msg)
-		if m.dapFollowPending {
-			m.dapFollowPending = false
-			return m, m.dapFollowCmd()
-		}
-		return m, nil
-	case dapFollowMsg:
-		return m, m.handleDapFollowMsg()
-	case dapEvalMsg:
-		m.dapAppendConsole("> " + msg.expr)
-		if msg.err != nil {
-			m.dapAppendConsole("! " + msg.err.Error())
-		} else {
-			m.dapAppendConsole("= " + msg.out)
-		}
-	case dapBPSyncMsg:
-		if msg.err != nil {
-			m.msg = "debug breakpoints: " + msg.err.Error()
-			return m, nil
-		}
-		m.applyDapBPSyncs([]dapBPSyncMsg{msg})
 	}
 	m.clampScroll()
 	return m, nil
@@ -1473,8 +1386,8 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	msg.Text = origText
 
 	// The PTY owns input while the panel is focused. Alt+T closes the panel
-	// from anywhere; clicking the editor or the chat rail takes focus back,
-	// so the editor and chat keep working while the terminal stays open.
+	// from anywhere; clicking the editor takes focus back, so the editor keeps
+	// working while the terminal stays open.
 	if m.termOpen {
 		if s == "alt+t" {
 			m.termOpen = false
@@ -1483,6 +1396,39 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		if m.termFocus {
 			return m.handleTerm(msg)
 		}
+	}
+
+	// Chat mode: the host owns the main area. The panel toggles stay live so
+	// the workspace chrome is driven the same way in both modes; a focused
+	// panel keeps its keys; everything else — typing, enter, esc — belongs
+	// to the chat.
+	if m.Chat {
+		switch s {
+		case "ctrl+b":
+			m.toggleTree()
+			return nil
+		case "alt+t":
+			return m.toggleTerminal()
+		case "ctrl+g":
+			if m.gitOpen {
+				m.gitOpen = false
+				m.gitFocus = false
+				m.msg = ""
+			} else {
+				m.openGitPanel()
+			}
+			return nil
+		}
+		if m.treeFocus {
+			return m.handleTree(msg)
+		}
+		if m.gitOpen && m.gitFocus {
+			return m.handleGit(msg)
+		}
+		if m.Host != nil && m.Host.Key != nil {
+			return m.Host.Key(msg)
+		}
+		return nil
 	}
 
 	// JetBrains-style double Shift opens the palette ("search everywhere").
@@ -1572,8 +1518,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "f12":
 		return m.gotoDefinition()
-	case "f4":
-		return m.toggleDebugBreakpoint()
 	case "alt+m":
 		m.toggleBookmarkAt(m.cur().buf.CurLine())
 		return nil
@@ -1583,36 +1527,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "alt+shift+n":
 		m.jumpBookmark(-1)
 		return nil
-	case "f5":
-		return m.startDebugging()
-	case "shift+f5":
-		return m.stopDebugging()
-	case "f6":
-		// With the debug panel open the F-keys step (F10/F11 are far from the
-		// home row); with the panel closed F6 falls through to the vertical
-		// split binding.
-		if m.dapOpen {
-			if m.dapRunState == dapStopped {
-				return m.dapStepCmd("next")
-			}
-			return nil
-		}
-	case "f7":
-		if m.dapOpen {
-			if m.dapRunState == dapStopped {
-				return m.dapStepCmd("stepIn")
-			}
-			return nil
-		}
-	case "shift+f7":
-		if m.dapOpen {
-			if m.dapRunState == dapStopped {
-				return m.dapStepCmd("stepOut")
-			}
-			return nil
-		}
-	case "ctrl+alt+d":
-		return m.toggleDebugPanel()
 	}
 	if m.conflictOpen {
 		switch s {
@@ -1686,9 +1600,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.folderOpen {
 		return m.handleFolderBrowser(msg)
 	}
-	if m.dapCfgOpen {
-		return m.handleDAPCfg(msg)
-	}
 	if m.helpOpen {
 		return m.handleHelp(msg)
 	}
@@ -1709,9 +1620,6 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	if m.treeFocus {
 		return m.handleTree(msg)
-	}
-	if m.dapOpen {
-		return m.handleDap(msg)
 	}
 	if m.searchOpen {
 		if m.replaceOpen {
@@ -1921,7 +1829,108 @@ func (m *Model) requestQuit() tea.Cmd {
 		m.quitConfirm = true
 		return nil
 	}
+	return m.quit()
+}
+
+// CloseEditorMsg is what an embedded editor produces on exit instead of
+// tea.Quit — the parent program decides what "closed" means.
+type CloseEditorMsg struct{}
+
+// Host is the chat side of an embedded editor. In chat mode the workspace
+// chrome renders around a main area the host owns: these callbacks are what
+// the host's transcript, input line and overlays are reached through.
+type Host struct {
+	// Key gets every key no panel owns: typing, enter, esc, the chat's own
+	// hotkeys and mode toggles.
+	Key func(msg tea.KeyPressMsg) tea.Cmd
+	// Click, Wheel, Motion and Release get the mouse events that land in the
+	// main area, untranslated — the host maps them onto its own layout.
+	Click   func(msg tea.MouseClickMsg) tea.Cmd
+	Wheel   func(msg tea.MouseWheelMsg) tea.Cmd
+	Motion  func(msg tea.MouseMotionMsg) tea.Cmd
+	Release func(msg tea.MouseReleaseMsg) tea.Cmd
+	// Paste gets the text a bracketed paste delivered while the chat input
+	// had the focus.
+	Paste func(text string) tea.Cmd
+	// View renders the main area at the editor's geometry: main-area width
+	// and height, without the chrome.
+	View func(width, height int) []string
+	// ChangedFiles lists the files the agent edited, so entering the editor
+	// opens a tab for each one the workspace does not show yet.
+	ChangedFiles func() []string
+}
+
+// MainArea returns the screen origin and size of the main area: the region
+// the host renders into and maps its mouse coordinates against. The origin is
+// the top-left cell of the main area on the physical screen.
+func (m Model) MainArea() (x, y, w, h int) {
+	return m.leftRailWidth(), 1, m.editorAreaWidth(), m.viewHeight()
+}
+
+// OpenChangedTabs opens a tab for every file the host reports the agent as
+// changed, focusing the one already open. It is called on entering the editor
+// from the chat, so the workspace shows what the last turns touched.
+func (m *Model) OpenChangedTabs() {
+	if m.Host == nil || m.Host.ChangedFiles == nil {
+		return
+	}
+	for _, p := range m.Host.ChangedFiles() {
+		if p != "" {
+			m.focusOrOpen(p)
+		}
+	}
+}
+
+// DropPanelFocus clears tree/git/terminal focus so the keys go back to the
+// main area — what the host needs when the workspace switches to chat mode
+// with a panel still focused from the last editor visit.
+func (m *Model) DropPanelFocus() {
+	m.treeFocus = false
+	m.gitFocus = false
+	m.termFocus = false
+}
+
+// ClosePanels hides every open panel — what an embedded startup does: the
+// workspace exists from the first frame, but the first screen is the host's.
+// The terminal's shell, not yet started, costs nothing.
+func (m *Model) ClosePanels() {
+	m.treeVisible = false
+	m.treeFocus = false
+	m.termOpen = false
+	m.termFocus = false
+	m.gitOpen = false
+	m.gitFocus = false
+}
+
+// OpenTree shows the project tree with the focus on it — the editor-mode
+// default when the host enters with every panel closed.
+func (m *Model) OpenTree() {
+	if !m.treeVisible {
+		m.toggleTree()
+	}
+}
+
+// PanelState reports the workspace chrome's flags: which panels are open and
+// whether the terminal owns the keys. Embedded startup and the tests read it;
+// nothing writes through it.
+func (m Model) PanelState() (termOpen, treeVisible, termFocus bool) {
+	return m.termOpen, m.treeVisible, m.termFocus
+}
+
+// Shutdown stops the editor's background processes (the terminal's shell
+// above all) and persists the session, without ending anything else. The
+// host program calls it when the whole session ends.
+func (m *Model) Shutdown() {
 	m.shutdown()
+}
+
+// quit tears the editor down and either ends the program (standalone run) or
+// asks the parent to close it (embedded run).
+func (m *Model) quit() tea.Cmd {
+	m.shutdown()
+	if m.Embed {
+		return func() tea.Msg { return CloseEditorMsg{} }
+	}
 	return tea.Quit
 }
 
@@ -1933,9 +1942,6 @@ func (m *Model) shutdown() {
 	}
 	if m.lspClient != nil {
 		m.lspClient.Close()
-	}
-	if m.dapClient != nil {
-		m.dapClient.Close()
 	}
 	m.saveSession()
 }
@@ -1956,8 +1962,7 @@ func (m *Model) closeActiveTab() tea.Cmd {
 			m.quitTab = false // This is a quit, not a tab close
 			return nil
 		}
-		m.shutdown()
-		return tea.Quit
+		return m.quit()
 	}
 
 	// Multiple tabs: check if the tab being closed is dirty
@@ -2553,17 +2558,6 @@ func (m *Model) updateStatusHover(msg tea.MouseMotionMsg) {
 		return
 	}
 	m.hoverIcon = actNone
-}
-
-// toggleDebugPanel mirrors the Ctrl+Alt+D shortcut so the status-bar icon and
-// the key behave identically.
-func (m *Model) toggleDebugPanel() tea.Cmd {
-	m.dapOpen = !m.dapOpen
-	if m.dapOpen {
-		m.termOpen = false
-		m.msg = m.t("msg.debug_panel_opened")
-	}
-	return nil
 }
 
 // expandedToRawCol converts an expanded (tab-expanded) column back to a raw

@@ -42,10 +42,6 @@ func TestRUChordsFire(t *testing.T) {
 			func(*testing.T) Model { return New(dir) },
 			tea.KeyPressMsg{Code: 'з', Mod: tea.ModCtrl | tea.ModShift},
 			func(m Model) bool { return m.paletteOpen }},
-		{"alt+a opens chat",
-			func(*testing.T) Model { return New(dir) },
-			tea.KeyPressMsg{Code: 'ф', Mod: tea.ModAlt},
-			func(m Model) bool { return m.chatOpen }},
 		{"ctrl+s saves a dirty buffer",
 			func(*testing.T) Model {
 				m := New(dir + "/a.txt")

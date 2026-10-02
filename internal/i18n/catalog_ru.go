@@ -9,16 +9,18 @@ var catalog = map[Lang]map[string]string{
 	Russian: {
 		// Command palette descriptions.
 		"choose a provider (free, no key needed)": "выбрать провайдера (бесплатно, без ключа)",
-		"list models":                        "список моделей",
-		"copy the agent's reply (ctrl+y)":    "скопировать ответ агента (ctrl+y)",
-		"toggle the sidebar (ctrl+b)":        "боковая панель (ctrl+b)",
-		"start a new session":                "новая сессия",
-		"clear the screen":                   "очистить экран",
-		"recent prompts (up/down to recall)": "последние промпты (↑/↓ — вызвать)",
-		"show the hotkeys":                   "подсказки",
-		"list the available tools":           "список инструментов",
-		"interface language":                 "язык интерфейса",
-		"quit":                               "выход",
+		"list models":                                        "список моделей",
+		"copy the agent's reply (ctrl+y)":                    "скопировать ответ агента (ctrl+y)",
+		"toggle the sidebar (ctrl+b)":                        "боковая панель (ctrl+b)",
+		"start a new session":                                "новая сессия",
+		"clear the screen":                                   "очистить экран",
+		"recent prompts (up/down to recall)":                 "последние промпты (↑/↓ — вызвать)",
+		"show the hotkeys":                                   "подсказки",
+		"list the available tools":                           "список инструментов",
+		"interface language":                                 "язык интерфейса",
+		"open the code editor: tree, git, terminal (ctrl+e)": "редактор кода: дерево, git, терминал (ctrl+e)",
+		"editor closed — back to the chat":                   "редактор закрыт — возврат в чат",
+		"quit":                                               "выход",
 
 		// Help and status line.
 		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session": "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ · ctrl+l — очистить · ctrl+n — новая сессия",

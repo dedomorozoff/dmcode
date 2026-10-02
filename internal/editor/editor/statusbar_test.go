@@ -47,7 +47,9 @@ func TestStatusIconClickTogglesPanels(t *testing.T) {
 	a := writeTemp(t, dir, "a.txt", "alpha\n")
 	m := New(a)
 	m.width, m.height = 100, 24
-	m.chatModel = "test-model" // avoid probing the network in toggleChat
+	// The terminal icon spawns a shell sitting in the temp dir; without a
+	// shutdown its process keeps Windows from removing the directory.
+	t.Cleanup(func() { m.Shutdown() })
 
 	click := func(act statusAction) {
 		t.Helper()
@@ -64,17 +66,11 @@ func TestStatusIconClickTogglesPanels(t *testing.T) {
 		t.Fatal("second git icon click must close the git panel")
 	}
 
-	// Debug opens the panel and closes the terminal.
-	m.termOpen = true
-	click(actDebug)
-	if !m.dapOpen || m.termOpen {
-		t.Fatalf("debug icon: dapOpen=%v termOpen=%v, want true/false", m.dapOpen, m.termOpen)
-	}
-
-	// AI chat rail.
-	click(actChat)
-	if !m.chatOpen {
-		t.Fatal("chat icon must open the AI chat")
+	// Terminal opens on its icon.
+	m.termOpen = false
+	click(actTerm)
+	if !m.termOpen {
+		t.Fatal("term icon must open the terminal")
 	}
 
 	// Tree: force focused-visible so the click closes it.
@@ -124,7 +120,6 @@ func TestDockedPanelsHaveLeadingDivider(t *testing.T) {
 		{"language", func(m *Model) { m.langChooserOpen = true }, m.withDivider(m.langChooserPanel()), Model.langChooserExtraRows},
 		{"plugin store", func(m *Model) { m.pluginStoreOpen = true }, m.withDivider(m.pluginStorePanel()), Model.pluginStoreExtraRows},
 		{"terminal", func(m *Model) { m.termOpen = true }, m.withDivider(m.terminalPanel()), Model.termExtraRows},
-		{"debug", func(m *Model) { m.dapOpen = true }, m.withDivider(m.debugPanel()), Model.debugExtraRows},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -161,7 +156,6 @@ func TestStatusBarRemainsLastWithBottomPanels(t *testing.T) {
 			m.gitMode = gitModeStatus
 			m.termOpen = true
 		}},
-		{"debug and terminal", func(m *Model) { m.dapOpen = true; m.termOpen = true }},
 		{"finder and terminal", func(m *Model) { m.finderOpen = true; m.finderHits = []string{"a"}; m.termOpen = true }},
 	}
 	for _, tt := range tests {

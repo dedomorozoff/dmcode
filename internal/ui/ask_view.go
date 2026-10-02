@@ -165,7 +165,7 @@ func (m *uiModel) askKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		// The turn is not cancelled here: escape already reaches the tool through
 		// the turn's context, and quitting is the one thing that must always work.
-		return m, tea.Quit
+		return m, m.quitCmd()
 	case "esc":
 		if m.ask.customOpen {
 			// Escape backs out of the text field first: a user who opened it by

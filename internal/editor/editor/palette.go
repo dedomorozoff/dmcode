@@ -36,7 +36,6 @@ func (m *Model) getPaletteCommands() []commandItem {
 		{id: "move_line_down", title: "cmd.move_line_down_t", desc: "cmd.move_line_down_d", action: func(m *Model) tea.Cmd { m.cur().buf.MoveLineDown(); return nil }},
 		{id: "toggle_comment", title: "cmd.toggle_comment_t", desc: "cmd.toggle_comment_d", action: func(m *Model) tea.Cmd { m.toggleComment(); return nil }},
 		{id: "toggle_bookmark", title: "cmd.toggle_bookmark_t", desc: "cmd.toggle_bookmark_d", action: func(m *Model) tea.Cmd { m.toggleBookmarkAt(m.cur().buf.CurLine()); return nil }},
-		{id: "toggle_breakpoint", title: "cmd.toggle_breakpoint_t", desc: "cmd.toggle_breakpoint_d", action: func(m *Model) tea.Cmd { return m.toggleDebugBreakpoint() }},
 		{id: "goto_definition", title: "cmd.goto_definition_t", desc: "cmd.goto_definition_d", action: func(m *Model) tea.Cmd { return m.gotoDefinition() }},
 		{id: "git_commit", title: "cmd.git_commit_t", desc: "cmd.git_commit_d", action: func(m *Model) tea.Cmd { m.openGitPanel(); return nil }},
 		{id: "git_diff", title: "cmd.git_diff_t", desc: "cmd.git_diff_d", action: func(m *Model) tea.Cmd { m.openDiffView(); return nil }},
@@ -75,14 +74,6 @@ func (m *Model) getPaletteCommands() []commandItem {
 			return nil
 		}},
 		{id: "terminal", title: "cmd.terminal_t", desc: "cmd.terminal_d", action: func(m *Model) tea.Cmd { return m.toggleTerminal() }},
-		{id: "debug", title: "cmd.debug_t", desc: "cmd.debug_d", action: func(m *Model) tea.Cmd {
-			m.dapOpen = !m.dapOpen
-			if m.dapOpen {
-				m.termOpen = false
-			}
-			return nil
-		}},
-		{id: "dap_settings", title: "cmd.dap_settings_t", desc: "cmd.dap_settings_d", action: func(m *Model) tea.Cmd { m.startDAPCfg(); return nil }},
 		{id: "settings", title: "cmd.settings_t", desc: "cmd.settings_d", action: func(m *Model) tea.Cmd { m.openConfigFile(); return nil }},
 		{id: "help", title: "cmd.help_t", desc: "cmd.help_d", action: func(m *Model) tea.Cmd { m.helpOpen = true; m.helpScroll = 0; return nil }},
 		{id: "quit", title: "cmd.quit_t", desc: "cmd.quit_d", action: func(m *Model) tea.Cmd { return m.requestQuit() }},

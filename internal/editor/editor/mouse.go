@@ -27,11 +27,6 @@ func (m Model) tabAtX(x int) int {
 	return -1
 }
 
-// Bottom panels are stacked above the fixed final status row, in the same
-// order as View renders them. The docked debug panel sits directly above the
-// first bottom overlay.
-func (m Model) dapPanelStartRow() int { return m.viewHeight() + 2 } // leading divider
-
 // statusBarRow is the fixed final row. Bottom panels are rendered above it.
 func (m Model) statusBarRow() int {
 	if m.height < 1 {
@@ -41,7 +36,7 @@ func (m Model) statusBarRow() int {
 }
 
 func (m Model) bottomOverlayStartRow() int {
-	return m.viewHeight() + 1 + m.debugExtraRows() + m.contextBottomExtraRows()
+	return m.viewHeight() + 1 + m.contextBottomExtraRows()
 }
 
 func (m Model) finderStartRow() int {
@@ -144,9 +139,6 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		}
 		return nil
 	}
-	if handled, cmd := m.clickDebugPanel(x, y, dbl); handled {
-		return cmd
-	}
 
 	// Panels stacked above the editor.
 	if handled, cmd := m.clickOverlay(y, dbl); handled {
@@ -160,9 +152,16 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 
 	// Left sidebar rail: git panel, project tree.
 	if x < m.leftRailWidth() {
+		before := m.cur().path
 		cmd := m.clickLeftRail(x, y)
 		if dbl {
 			m.activatePanelItem()
+		}
+		// Chat mode: opening a file from the tree enters the editor, the way
+		// clicking a file in any IDE leaves the welcome screen behind.
+		if m.Chat && m.cur().path != "" && m.cur().path != before {
+			m.Chat = false
+			m.msg = ""
 		}
 		return cmd
 	}
@@ -179,6 +178,13 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 		return nil
 	}
 
+	// Chat mode: the main area belongs to the host; the chrome above is ours.
+	if m.Chat {
+		if m.Host != nil && m.Host.Click != nil {
+			return m.Host.Click(msg)
+		}
+		return nil
+	}
 	return m.clickBuffer(x, y, msg.Button, msg.Mod)
 }
 
@@ -305,43 +311,6 @@ func (m *Model) clickOverlay(y int, dbl bool) (bool, tea.Cmd) {
 	return false, nil
 }
 
-// clickDebugPanel routes a click inside the docked debug panel. The column
-// under the pointer picks the list exactly like Tab does, the row picks the
-// entry like the arrow keys (reloading the columns derived from it), and a
-// double click on a ▸ variable expands it the way Enter does.
-func (m *Model) clickDebugPanel(x, y int, dbl bool) (bool, tea.Cmd) {
-	if !m.dapOpen {
-		return false, nil
-	}
-	top := m.dapPanelStartRow()
-	if y < top || y >= top+m.debugPanelHeight() {
-		return false, nil
-	}
-	row := y - top
-	if row <= 0 {
-		return true, nil // header row
-	}
-	// Row 1 of the panel carries the column titles; the lists start below it.
-	screen := row - 1
-	if screen < 0 {
-		return true, nil
-	}
-	n := m.dapListRows()
-	threadW, frameW, varW := m.dapColumnWidths(m.width)
-	switch {
-	case x < threadW:
-		if m.dapConsolePeek {
-			return true, nil // the console has no selectable rows
-		}
-		return true, m.dapSelectThread(m.dapThreadWindow(n) + screen)
-	case x < threadW+1+frameW:
-		return true, m.dapSelectFrame(m.dapFrameWindow(n) + screen)
-	case x < threadW+1+frameW+1+varW:
-		return true, m.dapSelectVar(m.dapVarWindow(n)+screen, dbl)
-	}
-	return true, nil
-}
-
 // clickLeftRail selects an item under the pointer in the git panel or the
 // project tree.
 func (m *Model) clickLeftRail(x, y int) tea.Cmd {
@@ -436,9 +405,9 @@ func (m *Model) clickBuffer(x, y int, btn tea.MouseButton, mod tea.KeyMod) tea.C
 	p := m.curPane()
 	t := &m.tabs[p.tabIdx]
 
-	// A click in the gutter toggles markers without moving the cursor. One
-	// shared column: left click flips a breakpoint, middle click (the wheel
-	// button) flips a bookmark.
+	// A click in the gutter toggles markers without moving the cursor. The
+	// middle button (the wheel button) flips a bookmark; the left click moves
+	// on to the cursor placement below.
 	gw := m.gutterWidthForTab(t)
 	if gx := x - leftW; gx >= 0 && gx < gw {
 		ln, _ := m.clickPosToLineCol(m.activePane, editorRow, x)
@@ -447,7 +416,6 @@ func (m *Model) clickBuffer(x, y int, btn tea.MouseButton, mod tea.KeyMod) tea.C
 			m.toggleBookmarkAt(ln)
 			return nil
 		}
-		return m.toggleBreakpointAt(ln)
 	}
 
 	ln, rawCol := m.clickPosToLineCol(m.activePane, editorRow, x)
@@ -581,14 +549,6 @@ func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		}
 	}
 
-	// Docked debug panel: the wheel walks the focused column's selection and
-	// follows the console backlog while it peeks.
-	if m.dapOpen {
-		if top := m.dapPanelStartRow(); y >= top && y < top+m.debugPanelHeight() {
-			return m.dapWheel(dir, x)
-		}
-	}
-
 	if y < 1 || y > h {
 		return nil
 	}
@@ -628,6 +588,14 @@ func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		return m.wheelLeftRail(dir)
 	}
 
+	// Chat mode: the transcript scrolls, not the buffer.
+	if m.Chat {
+		if m.Host != nil && m.Host.Wheel != nil {
+			return m.Host.Wheel(msg)
+		}
+		return nil
+	}
+
 	// Buffer scroll.
 	p := m.curPane()
 	t := &m.tabs[p.tabIdx]
@@ -651,28 +619,6 @@ func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 		}
 	}
 	return nil
-}
-
-// dapWheel moves the debug panel selection with the wheel. The column under
-// the pointer takes focus first so the wheel acts on what the user points at;
-// the console peek has no selection, so it scrolls its backlog instead.
-func (m *Model) dapWheel(dir, x int) tea.Cmd {
-	threadW, frameW, _ := m.dapColumnWidths(m.width)
-	switch {
-	case x < threadW:
-		if m.dapConsolePeek {
-			// A wheel-up notch is dir == -1; the backlog walks towards older
-			// output, which dapScrollConsole counts as positive.
-			m.dapScrollConsole(-dir)
-			return nil
-		}
-		m.dapFocus = 0
-	case x < threadW+1+frameW:
-		m.dapFocus = 1
-	default:
-		m.dapFocus = 2
-	}
-	return m.dapMoveSelCmd(dir)
 }
 
 // wheelLeftRail moves the selection within the left-rail lists, keeping the

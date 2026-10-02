@@ -12,54 +12,9 @@ import (
 // Config holds all editor configuration.
 type Config struct {
 	Editor  EditorConfig
-	AI      AIConfig
-	Agent   AgentConfig
 	UI      UIConfig
 	Plugins PluginsConfig
-	Debug   DebugConfig
 	LSP     LSPConfig
-}
-
-// DebugConfig holds DAP debugger settings (M7). Go/Delve is the default
-// adapter; any other DAP adapter (debugpy, lldb-dap, node, ...) can be wired
-// in through the Adapter*/Launch* fields.
-type DebugConfig struct {
-	// Mode is the DAP launch mode passed through to the adapter ("debug" for
-	// Delve: build+run, "test": go test, "exec": run a prebuilt binary).
-	Mode string
-	// Program is the package directory, test package, executable or module
-	// entrypoint to debug. Empty derives it from the active file's directory.
-	Program string
-	// Args are whitespace-separated arguments passed to the debuggee.
-	Args string
-	// StopOnEntry pauses at the first instruction after launch.
-	StopOnEntry bool
-
-	// AdapterCmd is the DAP adapter executable ("dlv", "debugpy-adapter",
-	// "node", ...). Defaults to "dlv"; the legacy `dlv_path` key is an alias.
-	AdapterCmd string
-	// AdapterMode is how the adapter transports the session: "reverse" (the
-	// adapter dials us back, Delve-style), "stdio" (the adapter speaks DAP on
-	// stdin/stdout — the common layout for debugpy, lldb-dap, etc.), "connect"
-	// (we dial a listening DAP endpoint) or "dbgp" (we spawn the interpreter and
-	// serve it over the DBGp protocol — PHP with Xdebug, which has no DAP).
-	AdapterMode string
-	// AdapterArgs are extra whitespace-separated CLI arguments for the
-	// adapter process itself (e.g. `--host 127.0.0.1`).
-	AdapterArgs string
-
-	// LaunchType is the launch request "type" field (default "go").
-	LaunchType string
-	// LaunchRequest is the launch request kind: "launch" (default) or "attach".
-	LaunchRequest string
-	// LaunchJSON is an optional raw JSON object merged into the launch/attach
-	// arguments; adapter-specific keys override the built-in ones.
-	LaunchJSON string
-
-	// AutoDetect picks the DAP adapter/mode from the active file's language
-	// when the [debug] section still carries dmed's built-in defaults. Explicit
-	// settings always win; set auto_detect = false to disable entirely.
-	AutoDetect bool
 }
 
 // LSPConfig holds language-server integration settings.
@@ -73,22 +28,6 @@ type LSPConfig struct {
 	Disabled map[string]bool // language id => LSP switched off for it
 }
 
-// AgentConfig holds settings for background agent tasks (M4).
-type AgentConfig struct {
-	// SystemPrompt overrides the default instruction the agent follows when
-	// producing file edits. Empty uses the built-in prompt.
-	SystemPrompt string
-	// ContextMax is the total size budget (bytes) of file context gathered
-	// from the project and sent to the agent.
-	ContextMax int
-	// SubagentPrompt overrides the instruction a delegated sub-agent follows.
-	// Empty uses the built-in one.
-	SubagentPrompt string
-	// SubagentRounds caps the tool loop of one delegated task; 0 means the
-	// built-in cap (6).
-	SubagentRounds int
-}
-
 // EditorConfig holds editor-related settings.
 type EditorConfig struct {
 	TabWidth    int
@@ -98,95 +37,10 @@ type EditorConfig struct {
 	SkippedDirs []string
 }
 
-// AIConfig holds AI-related settings.
-// Mode is how much freedom the model has: plan reads and plans, act may edit.
-type Mode string
-
-const (
-	// ModeAct lets the model use every tool; edits still go through review.
-	ModeAct Mode = "act"
-	// ModePlan exposes read-only tools only, so the model can investigate and
-	// plan but cannot touch a file.
-	ModePlan Mode = "plan"
-)
-
-type AIConfig struct {
-	Provider     string // ollama | openai
-	Model        string
-	OllamaURL    string
-	APIKey       string
-	SystemPrompt string
-	ContextMax   int
-	// Temperature is in tenths (7 => 0.7); 0 uses the provider default.
-	Temperature int
-	// NumCtx is the model context window in tokens (ollama `num_ctx`); 0 = default.
-	NumCtx int
-	// NumPredict is the max output tokens; 0 = provider default.
-	NumPredict int
-	// ToolRounds caps the chat tool-calling loop depth; 0 uses the built-in cap (6).
-	ToolRounds int
-	// AllowRun: "always" runs the model's commands, "never" blocks them, and
-	// "ask" pauses for explicit per-command confirmation.
-	AllowRun string
-	// RestrictToRoot bounds READ/EDIT/REPLACE paths to the project root when true.
-	RestrictToRoot bool
-	// ToolsEnabled, when non-empty, is a whitelist of the tool names the chat
-	// exposes to the model (comma separated, case-insensitive). Empty means
-	// "everything available"; a longer list still shrinks the prompt, which is
-	// what small local models need to pick the right tool.
-	ToolsEnabled []string
-	// ToolsDisabled removes tool names from the list after ToolsEnabled is
-	// applied, so a curated whitelist can still be trimmed.
-	ToolsDisabled []string
-	// WebSearch enables the WEB_SEARCH tool, the only tool that reaches outside
-	// the workspace. It is off by default.
-	WebSearch bool
-	// WebSearchBudget caps how many web queries one session may make, so a
-	// model cannot burn the free tier (or the user's patience) in a loop.
-	WebSearchBudget int
-	// FreeFallback lets the editor use a keyless provider (Pollinations) when
-	// nothing is configured and the configured provider does not answer. It is
-	// on by default because a dead AI with no explanation is a worse first run;
-	// set it to false to keep every request on the machine.
-	FreeFallback bool
-	// APIPath / ModelsPath override the OpenAI-compatible endpoint paths, for
-	// providers that speak the protocol somewhere other than /v1.
-	APIPath    string
-	ModelsPath string
-	// Mode_ is the agent mode ("plan" | "act"). The trailing underscore avoids
-	// colliding with the Mode() accessor.
-	Mode_ string
-}
-
-// AgentMode returns the configured agent mode, defaulting to act. An unknown
-// value is treated as act: a typo must not silently turn the model into a
-// reader, and the status bar always shows which mode is in effect.
-func (a AIConfig) AgentMode() Mode {
-	if Mode(strings.ToLower(strings.TrimSpace(a.Mode_))) == ModePlan {
-		return ModePlan
-	}
-	return ModeAct
-}
-
-// Unconfigured reports whether the user never set anything up: no model, no key,
-// and every value still at its default. It is the only case in which the editor
-// may fall back to a keyless provider — hijacking a user who deliberately
-// pointed dmed at their own server would be worse than not helping.
-func (a AIConfig) Unconfigured() bool {
-	d := Defaults().AI
-	return strings.TrimSpace(a.Model) == "" &&
-		strings.TrimSpace(a.APIKey) == "" &&
-		a.Provider == d.Provider &&
-		a.OllamaURL == d.OllamaURL &&
-		a.APIPath == d.APIPath &&
-		a.ModelsPath == d.ModelsPath
-}
-
 // UIConfig holds UI-related settings.
 type UIConfig struct {
-	TreeWidth    int
-	ChatWidthPct int
-	Lang         string
+	TreeWidth int
+	Lang      string
 	// Ascii controls glyph rendering on terminals that cannot display the
 	// Unicode UI safely: "auto" (default) detects, "on" forces ASCII,
 	// "off" forces Unicode.
@@ -203,10 +57,6 @@ type PluginsConfig struct {
 
 // Defaults returns the default configuration.
 func Defaults() Config {
-	// Pollinations is the out-of-the-box provider: no account, no key, so a
-	// fresh install has a working AI before any configuration. Ollama stays
-	// one pick away in the wizard for people who prefer everything local.
-	free := PollinationsPreset()
 	return Config{
 		Editor: EditorConfig{
 			TabWidth:    4,
@@ -215,65 +65,15 @@ func Defaults() Config {
 			WordWrap:    false,
 			SkippedDirs: []string{".git", "node_modules"},
 		},
-		AI: AIConfig{
-			Provider:   free.Name,
-			Model:      "",
-			OllamaURL:  free.BaseURL,
-			APIPath:    free.APIPath,
-			ModelsPath: free.ModelsPath,
-			ContextMax: 6000,
-			Temperature: 0,
-			NumCtx:      0,
-			NumPredict:  0,
-			ToolRounds:  0,
-			// Safe by default: the model may propose a shell command, but a
-			// human confirms each one. Set allow_run = always to opt out.
-			AllowRun: "ask",
-			// Safe by default: READ/EDIT/REPLACE stay inside the project root.
-			// Set restrict_to_root = false to opt out.
-			RestrictToRoot: true,
-			// The web tool reaches outside the workspace, so it is opt-in.
-			WebSearch:       false,
-			WebSearchBudget: 20,
-			// Nothing configured yet: allow the keyless fallback so a fresh
-			// install still has a working AI, and say so in the chat.
-			FreeFallback: true,
-			Mode_:        string(ModeAct),
-			SystemPrompt: "You are a helpful coding assistant inside the dmed editor. " +
-				"Answer concisely. You have tools: EDIT creates or rewrites a whole file, " +
-				"READ reads a file, SEARCH finds text, LIST_DIR and GLOB navigate the project, " +
-				"RUN executes a shell command, TODO_WRITE/TODO_SET keep a visible plan, and " +
-				"ASK_USER asks the user when a decision is theirs. " +
-				"When the user asks to create, change or fix files, you MUST call EDIT " +
-				"(after READ for existing files) instead of printing code in the reply.",
-		},
-		Agent: AgentConfig{
-			SystemPrompt: "",
-			ContextMax:   256 * 1024,
-		},
 		UI: UIConfig{
-			TreeWidth:    25,
-			ChatWidthPct: 40,
-			Lang:         "en",
-			Ascii:        "auto",
+			TreeWidth: 25,
+			Lang:      "en",
+			Ascii:     "auto",
 		},
 		Plugins: PluginsConfig{
 			Repo:   "dedomorozoff/dmed",
 			Dir:    "plugins",
 			Branch: "main",
-		},
-		Debug: DebugConfig{
-			Mode:          "debug",
-			Program:       "",
-			Args:          "",
-			StopOnEntry:   false,
-			AdapterCmd:    "dlv",
-			AdapterMode:   "reverse",
-			AdapterArgs:   "",
-			LaunchType:    "go",
-			LaunchRequest: "launch",
-			LaunchJSON:    "",
-			AutoDetect:    true,
 		},
 		LSP: LSPConfig{
 			Enabled:  true,
@@ -284,71 +84,54 @@ func Defaults() Config {
 
 // Load reads configuration from disk and applies environment variable overrides.
 // Priority: defaults < global config < project config < env vars.
+//
+// The legacy dmed names (~/.dmed.conf, .dmed.conf) are honored when the dmcode
+// file is absent, so an existing setup survives the merge without a rewrite.
 func Load(projectRoot string) Config {
 	cfg := Defaults()
 
 	// Load global config
 	if home, err := os.UserHomeDir(); err == nil {
-		globalPath := filepath.Join(home, ".dmed.conf")
+		globalPath := filepath.Join(home, ".dmcode", "editor.conf")
+		if _, err := os.Stat(globalPath); err != nil {
+			globalPath = filepath.Join(home, ".dmed.conf")
+		}
 		loadFile(globalPath, &cfg)
 	}
 
 	// Load project config (overrides global)
 	if projectRoot != "" {
-		projectPath := filepath.Join(projectRoot, ".dmed.conf")
+		projectPath := filepath.Join(projectRoot, ".dmcode.conf")
+		if _, err := os.Stat(projectPath); err != nil {
+			projectPath = filepath.Join(projectRoot, ".dmed.conf")
+		}
 		loadFile(projectPath, &cfg)
 	}
 
-	// Environment variable overrides
-	if v := os.Getenv("DMED_PROVIDER"); v != "" {
-		cfg.AI.Provider = v
-	}
-	if v := os.Getenv("DMED_MODEL"); v != "" {
-		cfg.AI.Model = v
-	}
-	if v := os.Getenv("DMED_OLLAMA_URL"); v != "" {
-		cfg.AI.OllamaURL = v
-	}
-	if v := os.Getenv("DMED_API_KEY"); v != "" {
-		cfg.AI.APIKey = v
-	}
-	if v := os.Getenv("DMED_SHELL"); v != "" {
+	// Environment variable overrides. The DMCODE_ names are the merged
+	// project's; the DMED_ ones are the dmed spellings, still honored.
+	if v := firstEnv("DMCODE_SHELL", "DMED_SHELL"); v != "" {
 		// Shell is not in Config struct but stored separately in the editor.
 		// This override is handled by the editor.
 	}
-	if v := os.Getenv("DMED_LANG"); v != "" {
+	if v := firstEnv("DMCODE_LANG", "DMED_LANG"); v != "" {
 		cfg.UI.Lang = v
 	}
-	if v := os.Getenv("DMED_PLUGIN_REPO"); v != "" {
+	if v := firstEnv("DMCODE_PLUGIN_REPO", "DMED_PLUGIN_REPO"); v != "" {
 		cfg.Plugins.Repo = v
-	}
-	if v := os.Getenv("DMED_TEMPERATURE"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			cfg.AI.Temperature = n
-		}
-	}
-	if v := os.Getenv("DMED_NUM_CTX"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.AI.NumCtx = n
-		}
-	}
-	if v := os.Getenv("DMED_NUM_PREDICT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.AI.NumPredict = n
-		}
-	}
-	if v := os.Getenv("DMED_TOOL_ROUNDS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.AI.ToolRounds = n
-		}
-	}
-	if v := os.Getenv("DMED_ALLOW_RUN"); v != "" {
-		if v == "always" || v == "never" || v == "ask" {
-			cfg.AI.AllowRun = v
-		}
 	}
 
 	return cfg
+}
+
+// firstEnv returns the value of the first set variable, or the empty string.
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // WriteLang sets the `[ui] lang` value in the INI file at path, preserving all
@@ -405,18 +188,19 @@ func WriteLang(path, lang string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
-// ConfigPath returns the path to the global config file.
+// ConfigPath returns the path to the global config file, under dmcode's own
+// directory.
 func ConfigPath() string {
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".dmed.conf")
+		return filepath.Join(home, ".dmcode", "editor.conf")
 	}
-	return ".dmed.conf"
+	return "editor.conf"
 }
 
 // ProjectConfigPath returns the path to the project-level config file.
 func ProjectConfigPath(root string) string {
 	if root != "" {
-		return filepath.Join(root, ".dmed.conf")
+		return filepath.Join(root, ".dmcode.conf")
 	}
 	return ""
 }
@@ -451,116 +235,11 @@ func loadFile(path string, cfg *Config) {
 		}
 	}
 
-	// [ai]
-	if s, ok := sections["ai"]; ok {
-		if v, ok := s["provider"]; ok {
-			cfg.AI.Provider = v
-		}
-		if v, ok := s["model"]; ok {
-			cfg.AI.Model = v
-		}
-		if v, ok := s["ollama_url"]; ok {
-			cfg.AI.OllamaURL = v
-		}
-		if v, ok := s["api_key"]; ok {
-			cfg.AI.APIKey = v
-		}
-		if v, ok := s["system_prompt"]; ok {
-			cfg.AI.SystemPrompt = v
-		}
-		if v, ok := s["context_max"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.AI.ContextMax = n
-			}
-		}
-		if v, ok := s["temperature"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				cfg.AI.Temperature = n
-			}
-		}
-		if v, ok := s["num_ctx"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.AI.NumCtx = n
-			}
-		}
-		if v, ok := s["num_predict"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.AI.NumPredict = n
-			}
-		}
-		if v, ok := s["tool_rounds"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.AI.ToolRounds = n
-			}
-		}
-		if v, ok := s["allow_run"]; ok {
-			if v == "always" || v == "never" || v == "ask" {
-				cfg.AI.AllowRun = v
-			}
-		}
-		if v, ok := s["restrict_to_root"]; ok {
-			cfg.AI.RestrictToRoot = parseBool(v)
-		}
-		if v, ok := s["tools_enabled"]; ok {
-			cfg.AI.ToolsEnabled = parseList(v)
-		}
-		if v, ok := s["tools_disabled"]; ok {
-			cfg.AI.ToolsDisabled = parseList(v)
-		}
-		if v, ok := s["web_search"]; ok {
-			cfg.AI.WebSearch = parseBool(v)
-		}
-		if v, ok := s["web_search_budget"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.AI.WebSearchBudget = n
-			}
-		}
-		if v, ok := s["free_fallback"]; ok {
-			cfg.AI.FreeFallback = parseBool(v)
-		}
-		if v, ok := s["api_path"]; ok {
-			cfg.AI.APIPath = v
-		}
-		if v, ok := s["models_path"]; ok {
-			cfg.AI.ModelsPath = v
-		}
-		if v, ok := s["mode"]; ok {
-			if m := Mode(strings.ToLower(strings.TrimSpace(v))); m == ModePlan || m == ModeAct {
-				cfg.AI.Mode_ = string(m)
-			}
-		}
-	}
-
-	// [agent]
-	if s, ok := sections["agent"]; ok {
-		if v, ok := s["system_prompt"]; ok {
-			cfg.Agent.SystemPrompt = v
-		}
-		if v, ok := s["context_max"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.Agent.ContextMax = n
-			}
-		}
-		if v, ok := s["subagent_prompt"]; ok {
-			cfg.Agent.SubagentPrompt = v
-		}
-		if v, ok := s["subagent_rounds"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				cfg.Agent.SubagentRounds = n
-			}
-		}
-	}
-
 	// [ui]
 	if s, ok := sections["ui"]; ok {
 		if v, ok := s["tree_width"]; ok {
 			if n, err := strconv.Atoi(v); err == nil && n > 0 {
 				cfg.UI.TreeWidth = n
-			}
-		}
-		if v, ok := s["chat_width_pct"]; ok {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 80 {
-				cfg.UI.ChatWidthPct = n
 			}
 		}
 		if v, ok := s["lang"]; ok {
@@ -588,50 +267,6 @@ func loadFile(path string, cfg *Config) {
 		}
 		if v, ok := s["branch"]; ok {
 			cfg.Plugins.Branch = v
-		}
-	}
-
-	// [debug]
-	if s, ok := sections["debug"]; ok {
-		if v, ok := s["mode"]; ok && v != "" {
-			cfg.Debug.Mode = v
-		}
-		if v, ok := s["program"]; ok {
-			cfg.Debug.Program = v
-		}
-		if v, ok := s["args"]; ok {
-			cfg.Debug.Args = v
-		}
-		if v, ok := s["stop_on_entry"]; ok {
-			cfg.Debug.StopOnEntry = parseBool(v)
-		}
-		// `dlv_path` is the legacy alias for `adapter_cmd`.
-		if v, ok := s["adapter_cmd"]; ok {
-			cfg.Debug.AdapterCmd = v
-		} else if v, ok := s["dlv_path"]; ok {
-			cfg.Debug.AdapterCmd = v
-		}
-		if v, ok := s["adapter_mode"]; ok {
-			if v == "reverse" || v == "stdio" || v == "connect" || v == "dbgp" {
-				cfg.Debug.AdapterMode = v
-			}
-		}
-		if v, ok := s["adapter_args"]; ok {
-			cfg.Debug.AdapterArgs = v
-		}
-		if v, ok := s["launch_type"]; ok {
-			cfg.Debug.LaunchType = v
-		}
-		if v, ok := s["launch_request"]; ok {
-			if v == "launch" || v == "attach" {
-				cfg.Debug.LaunchRequest = v
-			}
-		}
-		if v, ok := s["launch_json"]; ok {
-			cfg.Debug.LaunchJSON = v
-		}
-		if v, ok := s["auto_detect"]; ok {
-			cfg.Debug.AutoDetect = parseBool(v)
 		}
 	}
 
@@ -708,109 +343,6 @@ func parseList(v string) []string {
 	return out
 }
 
-// WriteAI merges the AI settings into the INI file at path, updating the
-// [ai] section in place and preserving all other sections, keys, and comments.
-// If the file or the [ai] section is missing it is appended. Returns the
-// number of keys written.
-func WriteAI(path string, ai AIConfig) (int, error) {
-	known := []struct{ key, val string }{
-		{"provider", ai.Provider},
-		{"model", ai.Model},
-		{"ollama_url", ai.OllamaURL},
-		{"api_key", ai.APIKey},
-		{"context_max", strconv.Itoa(ai.ContextMax)},
-		{"temperature", strconv.Itoa(ai.Temperature)},
-		{"num_ctx", strconv.Itoa(ai.NumCtx)},
-		{"num_predict", strconv.Itoa(ai.NumPredict)},
-		{"tool_rounds", strconv.Itoa(ai.ToolRounds)},
-		{"allow_run", ai.AllowRun},
-		{"api_path", ai.APIPath},
-		{"models_path", ai.ModelsPath},
-	}
-	// tools_enabled / tools_disabled are deliberately absent: they are a
-	// curated, hand-edited whitelist, and the wizard must not clobber it when
-	// it rewrites the [ai] section.
-
-	data, err := os.ReadFile(path)
-	var lines []string
-	if err != nil && !os.IsNotExist(err) {
-		return 0, err
-	}
-	if err == nil {
-		lines = strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-	}
-
-	var out []string
-	inAI := false
-	aiPresent := false
-	replaced := make(map[string]bool, len(known))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			name := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-			inAI = strings.EqualFold(name, "ai")
-			if inAI {
-				aiPresent = true
-			}
-		}
-		if inAI {
-			if idx := strings.IndexByte(line, '='); idx > 0 {
-				key := strings.ToLower(strings.TrimSpace(line[:idx]))
-				matched := false
-				for _, k := range known {
-					if k.key == key {
-						out = append(out, key+" = "+k.val)
-						replaced[key] = true
-						matched = true
-						break
-					}
-				}
-				if matched {
-					continue
-				}
-			}
-		}
-		out = append(out, line)
-	}
-
-	var missing []string
-	for _, k := range known {
-		if !replaced[k.key] {
-			missing = append(missing, k.key+" = "+k.val)
-		}
-	}
-	if !aiPresent {
-		if len(out) > 0 && out[len(out)-1] != "" {
-			out = append(out, "")
-		}
-		out = append(out, "[ai]")
-		out = append(out, missing...)
-	} else if len(missing) > 0 {
-		for i := len(out) - 1; i >= 0; i-- {
-			t := strings.TrimSpace(out[i])
-			if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") &&
-				strings.EqualFold(strings.TrimSpace(t[1:len(t)-1]), "ai") {
-				tail := append([]string{}, out[i+1:]...)
-				out = append(append(out[:i+1], missing...), tail...)
-				break
-			}
-		}
-	}
-
-	content := strings.Join(out, "\n") + "\n"
-	if len(content) == 1 {
-		content = ""
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return 0, err
-	}
-	return len(replaced) + len(missing), nil
-}
-
-// writeSection merges the given key/value pairs into the INI section at path,
-// preserving all other sections, keys and comments. A missing section or file
-// is appended. It returns the number of keys written. This is the shared
-// engine behind WriteAI, WriteDebug and WriteLSP.
 func writeSection(path, section string, known [][2]string) (int, error) {
 	data, err := os.ReadFile(path)
 	var lines []string
@@ -888,25 +420,6 @@ func writeSection(path, section string, known [][2]string) (int, error) {
 	return len(replaced) + len(missing), nil
 }
 
-// WriteDebug merges the DAP/[debug] settings into the INI file at path,
-// updating the [debug] section in place and preserving everything else.
-func WriteDebug(path string, d DebugConfig) (int, error) {
-	known := [][2]string{
-		{"adapter_cmd", d.AdapterCmd},
-		{"adapter_mode", d.AdapterMode},
-		{"adapter_args", d.AdapterArgs},
-		{"launch_type", d.LaunchType},
-		{"launch_request", d.LaunchRequest},
-		{"mode", d.Mode},
-		{"program", d.Program},
-		{"args", d.Args},
-		{"stop_on_entry", boolStr(d.StopOnEntry)},
-		{"launch_json", d.LaunchJSON},
-		{"auto_detect", boolStr(d.AutoDetect)},
-	}
-	return writeSection(path, "debug", known)
-}
-
 // WriteLSP merges the LSP settings into the INI file at path, updating the
 // [lsp] section in place. Every known language id is written so a toggled-off
 // server stays off across edits; unknown ids already present are kept.
@@ -948,86 +461,4 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
-}
-
-// AIPreset describes one built-in "just works" provider entry a beginner can
-// pick without reading docs: choosing it fills the base URL (and a sensible
-// default model when the provider exposes a stable one) so only the API key
-// is left to type. The base URL is the origin only — internal/ai appends the
-// API paths itself (/v1/chat/completions by default).
-type AIPreset struct {
-	Name    string // display name shown in the wizard
-	Kind    string // wire protocol: "ollama" | "openai"
-	BaseURL string // origin, no path suffix ("" = keep the current URL)
-	Model   string // optional suggested model ("" = resolved from the server)
-	APIKey  bool   // whether this provider needs an API key
-	// APIPath overrides the OpenAI-compatible endpoint prefix ("/v1" is the
-	// default). Pollinations serves the same protocol under "/openai".
-	APIPath string
-	// ModelsPath overrides the model-list path when it is not APIPath+"/models".
-	ModelsPath string
-	// Free marks a provider that needs no account at all — the only kind the
-	// editor may fall back to on its own (see AIConfig.FreeFallback).
-	Free bool
-}
-
-// DefaultOllamaURL is the address a stock local Ollama install listens on.
-// Exported so the wizard test button and the CLI setup can share the hint.
-const DefaultOllamaURL = "http://localhost:11434"
-
-// PollinationsPreset is the no-signup provider: a public OpenAI-compatible
-// endpoint that answers without a key. The anonymous tier is rate-limited to
-// roughly one request per 15 seconds, which is fine for a human-driven chat and
-// useless for a batch job — that is why it is offered as a fallback, not as the
-// default.
-func PollinationsPreset() AIPreset {
-	return AIPreset{
-		Name:  "Pollinations (free, no key)",
-		Kind:  "openai",
-		Model: "openai-fast",
-		// The documented model name is the alias "openai", but the anonymous tier
-		// publishes "openai-fast" as the real entry, and the wizard's list comes
-		// from the server — a name the server never reports would look like a
-		// mistake on the Model row.
-		BaseURL:    "https://text.pollinations.ai",
-		APIPath:    "/openai",
-		ModelsPath: "/models",
-		Free:       true,
-	}
-}
-
-// AIPresets lists the built-in providers in wizard cycle order. Pollinations
-// comes first: it is the default out of the box and needs no account. Ollama
-// follows as the free local option for people who prefer nothing to leave the
-// machine. The last entry is Custom — it keeps whatever URL/model the user
-// already had.
-func AIPresets() []AIPreset {
-	return []AIPreset{
-		PollinationsPreset(),
-		{Name: "Ollama (local)", Kind: "ollama", BaseURL: DefaultOllamaURL},
-		{Name: "OpenAI", Kind: "openai", BaseURL: "https://api.openai.com", Model: "gpt-4o-mini", APIKey: true},
-		{Name: "DeepSeek", Kind: "openai", BaseURL: "https://api.deepseek.com", Model: "deepseek-chat", APIKey: true},
-		{Name: "Groq", Kind: "openai", BaseURL: "https://api.groq.com", Model: "llama-3.3-70b-versatile", APIKey: true},
-		{Name: "LM Studio (local)", Kind: "openai", BaseURL: "http://localhost:1234"},
-		{Name: "vLLM (local)", Kind: "openai", BaseURL: "http://localhost:8000"},
-		{Name: "Unsloth (local)", Kind: "openai", BaseURL: "http://localhost:8000", APIKey: true},
-		{Name: "Custom", Kind: "openai", BaseURL: ""},
-	}
-}
-
-// ResolvePreset returns the preset matching a stored provider label, falling
-// back to the default provider for unknown/empty values so a hand-edited config
-// never leaves the wizard stuck on a name it cannot cycle from. Bare protocol
-// names from older configs ("ollama") map onto their display preset explicitly.
-func ResolvePreset(name string) AIPreset {
-	for _, p := range AIPresets() {
-		if strings.EqualFold(p.Name, name) {
-			return p
-		}
-	}
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "ollama":
-		return ResolvePreset("Ollama (local)")
-	}
-	return AIPresets()[0]
 }

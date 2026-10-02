@@ -124,7 +124,7 @@ end)
 
 func TestPluginStoreInstallUninstall(t *testing.T) {
 	plugdir := t.TempDir()
-	t.Setenv("DMED_PLUGIN_DIR", plugdir)
+	t.Setenv("DMCODE_PLUGIN_DIR", plugdir)
 	m := New()
 	m.width, m.height = 80, 24
 	m.loadPlugins()

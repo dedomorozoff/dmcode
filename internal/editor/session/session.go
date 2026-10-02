@@ -25,13 +25,24 @@ type SessionState struct {
 // DefaultPath returns the default session file path for a project root or user home.
 func DefaultPath(root string) string {
 	if root != "" {
-		return filepath.Join(root, ".dmed_session.json")
+		return filepath.Join(root, ".dmcode-editor-session.json")
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ".dmed_session.json"
+		return ".dmcode-editor-session.json"
 	}
-	return filepath.Join(home, ".dmed_session.json")
+	return filepath.Join(home, ".dmcode-editor-session.json")
+}
+
+// LegacyPath returns the pre-merge dmed session file, so an existing setup
+// keeps its open tabs across the rename. The path is empty when there is none.
+func LegacyPath(root string) string {
+	p := DefaultPath(root)
+	legacy := filepath.Join(filepath.Dir(p), ".dmed_session.json")
+	if _, err := os.Stat(legacy); err != nil {
+		return ""
+	}
+	return legacy
 }
 
 // Save writes the session state to path.

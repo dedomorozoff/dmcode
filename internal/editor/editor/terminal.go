@@ -53,6 +53,9 @@ func waitForTermExit(ch <-chan terminalExitMsg) tea.Cmd {
 }
 
 func (m *Model) shellCommand() string {
+	if s := os.Getenv("DMCODE_SHELL"); s != "" {
+		return s
+	}
 	if s := os.Getenv("DMED_SHELL"); s != "" {
 		return s
 	}
@@ -147,13 +150,24 @@ func (m *Model) toggleTerminal() tea.Cmd {
 		m.msg = ""
 		return nil
 	}
+	cmd := m.StartTerminal()
+	m.termFocus = m.termOpen
+	m.msg = ""
+	return cmd
+}
+
+// StartTerminal opens the terminal panel without taking the focus — what an
+// embedded startup needs: the panel is part of the first frame, but the keys
+// belong to the main area (the chat) until the user clicks into the panel.
+func (m *Model) StartTerminal() tea.Cmd {
+	if m.termOpen {
+		return nil
+	}
 	m.ensureShell()
 	if m.termSession == nil {
 		return nil
 	}
 	m.termOpen = true
-	m.termFocus = true
-	m.msg = ""
 	return tea.Batch(waitForTermOutput(m.termCh), waitForTermExit(m.termExitCh))
 }
 

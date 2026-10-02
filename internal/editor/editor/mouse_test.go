@@ -97,44 +97,6 @@ func TestFinderItemClickOpensFile(t *testing.T) {
 	}
 }
 
-func TestChatRailClickFocusesChat(t *testing.T) {
-	m := New()
-	m.width, m.height = 80, 24
-	m.chatOpen = true
-	m.chatFocus = false
-
-	_ = m.handleMouseClick(tea.MouseClickMsg{X: 60, Y: 5})
-	if !m.chatFocus {
-		t.Fatal("click on the chat rail must focus the chat panel")
-	}
-
-	// Clicking the buffer area must not grab focus to the chat.
-	m.chatFocus = false
-	_ = m.handleMouseClick(tea.MouseClickMsg{X: 5, Y: 5})
-	if m.chatFocus {
-		t.Fatal("buffer click must not focus the chat rail")
-	}
-}
-
-func TestWheelOverChatScrolls(t *testing.T) {
-	m := New()
-	m.width, m.height = 80, 24
-	m.chatOpen = true
-	for i := 0; i < 25; i++ {
-		m.chatRows = append(m.chatRows, chatRow{kind: "ai", text: "row"})
-	}
-
-	_ = m.handleMouseWheel(tea.MouseWheelMsg{Button: tea.MouseWheelUp, X: 60, Y: 5})
-	if m.chatScroll <= 0 {
-		t.Fatalf("wheel up over chat must scroll back into history, got %d", m.chatScroll)
-	}
-	prev := m.chatScroll
-	_ = m.handleMouseWheel(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 60, Y: 5})
-	if m.chatScroll >= prev {
-		t.Fatalf("wheel down over chat must scroll toward bottom, got %d (was %d)", m.chatScroll, prev)
-	}
-}
-
 func TestWheelOverTerminalDoesNotStealInput(t *testing.T) {
 	m := New()
 	m.width, m.height = 80, 24
@@ -210,20 +172,7 @@ func TestGitRailClickSelects(t *testing.T) {
 		t.Fatal("clicking the rail must unfocus the diff")
 	}
 
-	// Clicking the AI chat rail while git is open transfers focus to the chat
-	// and releases git focus.
-	m.chatOpen = true
-	_ = m.handleMouseClick(tea.MouseClickMsg{X: 60, Y: 5})
-	if !m.chatFocus {
-		t.Fatal("chat rail click must focus the chat panel")
-	}
-	if m.gitFocus {
-		t.Fatal("chat rail click must release git focus")
-	}
-
-	// Re-click the rail to refocus the git panel.
-	m.chatOpen = false
-	m.chatFocus = false
+	// Clicking the buffer area keeps focus on the git panel.
 	_ = m.handleMouseClick(tea.MouseClickMsg{X: 5, Y: 1})
 	if !m.gitFocus {
 		t.Fatal("rail click must refocus the git panel")

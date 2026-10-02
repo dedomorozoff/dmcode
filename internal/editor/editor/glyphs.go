@@ -20,8 +20,6 @@ type glyphSet struct {
 	expand     string // ▸         collapsed folder / variable
 	collapse   string // ▾         expanded folder
 	stop       string // ▶         execution point / reviewing task
-	breakpt    string // ●         verified breakpoint / current branch
-	breakptO   string // ○         rejected breakpoint
 	bookmark   string // ◆         bookmark marker
 	diagInfo   string // •         info-severity gutter marker
 	check      string // ✓         done / connected
@@ -32,16 +30,10 @@ type glyphSet struct {
 	progEmpty  string // ·         progress bar empty cell
 	iconTree   string // ▤         status-bar tree toggle
 	iconGit    string // ⎇         status-bar git toggle
-	iconChat   string // ✦         status-bar chat toggle
-	iconDebug  string // ◉         status-bar debug toggle
 	iconTerm   string // ❯         status-bar terminal toggle
 	iconSplitV string // ◫ / V    tab-bar vertical-split toggle
 	iconSplitH string // ▤ / H    tab-bar horizontal-split toggle
 	mask       string // • / *     obscured secret (API key fields)
-	iconTool   string // ⛏ / >     tool-call card marker in chat
-	btnNew     string // ✚ / +     chat: new-thread button
-	btnCopy    string // ⎘ / c     chat: copy-reply button
-	btnClear   string // ⌫ / d     chat: clear-history button
 }
 
 var unicodeGlyphs = glyphSet{
@@ -52,8 +44,6 @@ var unicodeGlyphs = glyphSet{
 	expand:     "▸",
 	collapse:   "▾",
 	stop:       "▶",
-	breakpt:    "●",
-	breakptO:   "○",
 	bookmark:   "◆",
 	diagInfo:   "•",
 	check:      "✓",
@@ -64,16 +54,10 @@ var unicodeGlyphs = glyphSet{
 	progEmpty:  "·",
 	iconTree:   "▤",
 	iconGit:    "⎇",
-	iconChat:   "✦",
-	iconDebug:  "◉",
 	iconTerm:   "❯",
 	iconSplitV: "◫",
 	iconSplitH: "▤",
 	mask:       "•",
-	iconTool:   "⛏",
-	btnNew:     "✚",
-	btnCopy:    "⎘",
-	btnClear:   "⌫",
 }
 
 var asciiGlyphs = glyphSet{
@@ -84,8 +68,6 @@ var asciiGlyphs = glyphSet{
 	expand:     ">",
 	collapse:   "v",
 	stop:       ">",
-	breakpt:    "*",
-	breakptO:   "o",
 	bookmark:   "*",
 	diagInfo:   ".",
 	check:      "v",
@@ -96,16 +78,10 @@ var asciiGlyphs = glyphSet{
 	progEmpty:  ".",
 	iconTree:   "T",
 	iconGit:    "G",
-	iconChat:   "C",
-	iconDebug:  "D",
 	iconTerm:   ">",
 	iconSplitV: "V",
 	iconSplitH: "H",
 	mask:       "*",
-	iconTool:   ">",
-	btnNew:     "+",
-	btnCopy:    "c",
-	btnClear:   "d",
 }
 
 // ApplyTerminalCompat switches the render glyph set to ASCII when the running
@@ -126,8 +102,6 @@ func (g glyphSet) icon(a statusAction) string {
 		return g.iconTree
 	case actGit:
 		return g.iconGit
-	case actDebug:
-		return g.iconDebug
 	case actTerm:
 		return g.iconTerm
 	}

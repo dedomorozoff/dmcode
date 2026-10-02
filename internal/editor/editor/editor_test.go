@@ -13,7 +13,7 @@ import (
 
 // The editor test suite asserts English UI strings, so pin the language to
 // English regardless of any lang the developer set in their global config.
-func init() { _ = os.Setenv("DMED_LANG", "en") }
+func init() { _ = os.Setenv("DMCODE_LANG", "en") }
 
 func press(m Model, k tea.KeyPressMsg) Model {
 	next, _ := m.Update(k)
@@ -34,6 +34,18 @@ func writeTemp(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// mustWrite writes a path creating its parent directories, for tests that
+// lay out nested trees.
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTabsOpenSwitchClose(t *testing.T) {
@@ -410,22 +422,6 @@ func TestPasteCRLFNormalized(t *testing.T) {
 	}
 	if strings.ContainsRune(m.cur().buf.Text(), '\r') {
 		t.Fatal("ctrl+v CRLF: stray \\r leaked into buffer")
-	}
-}
-
-func TestPasteIntoChatInput(t *testing.T) {
-	m := New()
-	before := m.cur().buf.Text()
-	m.chatOpen = true
-	m.chatFocus = true
-
-	next, _ := m.Update(tea.PasteMsg{Content: "explain this"})
-	m = next.(Model)
-	if string(m.chatIn) != "explain this" {
-		t.Fatalf("chat input = %q, want pasted text", string(m.chatIn))
-	}
-	if m.cur().buf.Text() != before {
-		t.Fatalf("paste must not leak into the buffer, changed %q -> %q", before, m.cur().buf.Text())
 	}
 }
 

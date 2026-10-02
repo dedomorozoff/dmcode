@@ -22,8 +22,6 @@ func TestGlyphSetsSingleWidth(t *testing.T) {
 			"expand":     g.expand,
 			"collapse":   g.collapse,
 			"stop":       g.stop,
-			"breakpt":    g.breakpt,
-			"breakptO":   g.breakptO,
 			"bookmark":   g.bookmark,
 			"diagInfo":   g.diagInfo,
 			"check":      g.check,
@@ -34,13 +32,10 @@ func TestGlyphSetsSingleWidth(t *testing.T) {
 			"progEmpty":  g.progEmpty,
 			"iconTree":   g.iconTree,
 			"iconGit":    g.iconGit,
-			"iconChat":   g.iconChat,
-			"iconDebug":  g.iconDebug,
 			"iconTerm":   g.iconTerm,
 			"iconSplitV": g.iconSplitV,
 			"iconSplitH": g.iconSplitH,
 			"mask":       g.mask,
-			"iconTool":   g.iconTool,
 		} {
 			w := lipgloss.Width(glyph)
 			if w != 1 {

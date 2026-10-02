@@ -6,10 +6,10 @@ import (
 	"github.com/atotto/clipboard"
 )
 
-// Text selection for the two read-only panels: the AI chat transcript and the
-// terminal output. Both store their content as fixed rows, so a selection is
-// a (row, visible column) span; on mouse release the covered text goes to the
-// system clipboard, the same behavior as selecting in a browser.
+// Text selection for the terminal output. It stores its content as fixed
+// rows, so a selection is a (row, visible column) span; on mouse release the
+// covered text goes to the system clipboard, the same behavior as selecting
+// in a browser.
 
 type selPos struct {
 	row int
@@ -32,7 +32,6 @@ func (m *Model) copyToClipboard(text string) {
 	}
 	m.msg = m.t("msg.copied")
 }
-
 
 func (m *Model) startTermSelection(row, col int) {
 	m.termSelAnchor = selPos{row, col}

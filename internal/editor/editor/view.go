@@ -33,18 +33,13 @@ var (
 	diagErrStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 	diagWarnStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
 	diagInfoStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("111"))
-	bpStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	bpDimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	bmStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
-	stopStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-	dapLineStyle    = lipgloss.NewStyle().Background(lipgloss.Color("236"))
 	okTestStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("114"))
 	errTestStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	diffAddBg       = lipgloss.NewStyle().Background(lipgloss.Color("22"))
 	diffDelBg       = lipgloss.NewStyle().Background(lipgloss.Color("52"))
 	diffModBg       = lipgloss.NewStyle().Background(lipgloss.Color("58"))
 	selectionStyle  = lipgloss.NewStyle().Background(lipgloss.Color("60")).Foreground(lipgloss.Color("255"))
-	ghostStyle      = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("243"))
 	blameStyle      = lipgloss.NewStyle().Faint(true).Foreground(lipgloss.Color("244"))
 )
 
@@ -66,20 +61,13 @@ var helpEntries = []helpEntry{
 	{"Alt+Z", "help.word_wrap"},
 	{"Alt+B", "help.blame"},
 	{"Ctrl+G", "help.git_panel"},
-	{"Ctrl+Alt+D", "help.debug"},
-	{"F4 / F5 / F6 / F7 / S+F5 / S+F7", "help.debug_keys"},
-	{"↑↓/PgUp/PgDn/Home/End, +/-", "help.debug_panel"},
-	{"F12 / Ctrl+Click", "help.goto_def"},
+	{"D (in Git panel)", "help.git_diff"},
 	{"D (in Git panel)", "help.git_diff"},
 	{"Alt+[ / Alt+]", "help.hunk"},
 	{"Alt+M / Alt+N / S+Alt+N", "help.bookmark"},
 	{"Ctrl+O", "help.finder"},
 	{"Ctrl+T", "help.open"},
 	{"Alt+T", "help.terminal"},
-	{"Alt+A", "help.chat"},
-	{"Alt+I", "help.inline"},
-	{"Alt+G", "help.ghost"},
-	{"Alt+L", "help.agent"},
 	{"Ctrl+B / F9", "help.tree"},
 	{"↑↓/Enter/←→ in tree", "help.tree_nav"},
 	{"n / N / r / d / Del / t in tree", "help.tree_ops"},
@@ -183,57 +171,6 @@ func (m Model) termExtraRows() int {
 	return m.termPanelHeight() + 1 // leading divider
 }
 
-// dapPanelMinRows is the smallest usable debug panel: header, column titles
-// and a few entries. dapPanelAutoMax caps the height derived from the terminal;
-// a height the user picked with +/- is only bounded by the terminal itself.
-const (
-	dapPanelMinRows = 6
-	dapPanelAutoMax = 14
-)
-
-// debugPanelHeight is the height of the docked debug panel: a quarter of the
-// terminal by default, or the height the user resized it to with +/-.
-func (m Model) debugPanelHeight() int {
-	if m.dapPanelRows > 0 {
-		return m.clampDapPanelRows(m.dapPanelRows)
-	}
-	h := m.height / 4
-	if h < dapPanelMinRows {
-		h = dapPanelMinRows
-	}
-	if h > dapPanelAutoMax {
-		h = dapPanelAutoMax
-	}
-	return h
-}
-
-// clampDapPanelRows keeps a requested panel height usable for the current
-// terminal: at least dapPanelMinRows, at most the terminal minus those same
-// rows, so the buffer and the status bar stay on screen.
-func (m Model) clampDapPanelRows(h int) int {
-	if max := m.height - dapPanelMinRows; h > max {
-		h = max
-	}
-	if h < dapPanelMinRows {
-		h = dapPanelMinRows
-	}
-	return h
-}
-
-// growDapPanel resizes the debug panel by d rows (positive grows). It starts
-// from the height currently in effect, so the first press never jumps on a
-// terminal whose automatic height differs from the default quarter.
-func (m *Model) growDapPanel(d int) {
-	m.dapPanelRows = m.clampDapPanelRows(m.debugPanelHeight() + d)
-}
-
-func (m Model) debugExtraRows() int {
-	if !m.dapOpen {
-		return 0
-	}
-	return m.debugPanelHeight() + 1 // leading divider
-}
-
 func (m Model) langChooserExtraRows() int {
 	if !m.langChooserOpen {
 		return 0
@@ -266,7 +203,7 @@ func (m Model) contextBottomExtraRows() int {
 }
 
 func (m Model) viewHeight() int {
-	h := m.height - 2 - m.contextBottomExtraRows() - m.finderExtraRows() - m.folderExtraRows() - m.paletteExtraRows() - m.langChooserExtraRows() - m.termExtraRows() - m.debugExtraRows() - m.pluginStoreExtraRows() - m.gitCommitExtraRows()
+	h := m.height - 2 - m.contextBottomExtraRows() - m.finderExtraRows() - m.folderExtraRows() - m.paletteExtraRows() - m.langChooserExtraRows() - m.termExtraRows() - m.pluginStoreExtraRows() - m.gitCommitExtraRows()
 	if h < 1 {
 		h = 1
 	}
@@ -327,8 +264,21 @@ func (m Model) paneContentWidth(paneIdx int) int {
 func (m Model) View() tea.View {
 	h := m.viewHeight()
 	rows := make([]string, 0, h+2)
-	rows = append(rows, m.tabBar())
-	if m.diffViewOpen {
+	if m.Chat {
+		// Chat mode keeps the geometry — every panel row, the status bar and
+		// the mouse math assume the tab bar row exists — but hides its
+		// content: the main area is the chat, tabs mean nothing there.
+		rows = append(rows, strings.Repeat(" ", maxInt(m.width, 0)))
+	} else {
+		rows = append(rows, m.tabBar())
+	}
+	if m.Chat && m.Host != nil && m.Host.View != nil {
+		// Chat mode: the main area is the host's transcript and input at the
+		// same geometry the editor panes would use, so the tree sidebar, the
+		// git panel, the terminal and the status bar compose around it the
+		// same way they compose around the buffers.
+		rows = append(rows, m.composeSidebar(m.Host.View(m.editorAreaWidth(), h))...)
+	} else if m.diffViewOpen {
 		rows = append(rows, m.diffViewRows(h)...)
 	} else if m.gitOpen && (m.gitMode == gitModeStatus || m.gitMode == gitModeLog) && len(m.diffRows) > 0 {
 		// Inline diff preview: show side-by-side diff of selected file/commit
@@ -337,16 +287,10 @@ func (m Model) View() tea.View {
 		rows = append(rows, m.composeSidebar(diffRows)...)
 	} else if m.conflictOpen && len(m.conflictRows) > 0 {
 		rows = append(rows, m.renderSideBySide(m.conflictLeftLines, m.conflictRightLines, m.conflictRows, m.conflictOffY, m.conflictOffX, m.width, h, nil, nil)...)
-	} else if m.dapCfgOpen {
-		rows = append(rows, m.dapCfgPanel(h)...)
 	} else if m.helpOpen {
 		rows = append(rows, m.helpPanel(h)...)
 	} else {
 		rows = append(rows, m.editorRows(h)...)
-	}
-	if m.dapOpen {
-		// The debug panel docks between the content and the bottom overlays.
-		rows = append(rows, m.withDivider(m.debugPanel())...)
 	}
 	// The bottom overlays keep the existing focused prompt/status line and
 	// input rows together. The application-wide status bar is appended last,
@@ -386,7 +330,7 @@ func (m Model) View() tea.View {
 	var v tea.View
 	v.SetContent(lipgloss.NewStyle().MaxWidth(m.width).Render(strings.Join(rows, "\n")))
 	v.AltScreen = true
-	v.WindowTitle = "dmed — " + m.activeTab().name(m.baseDir())
+	v.WindowTitle = "dmcode — " + m.activeTab().name(m.baseDir())
 	// All-motion mode is required so hover (no button held) reaches the app;
 	// this powers the status-bar icon callout. Terminals without any-event
 	// tracking simply never deliver hover.
@@ -496,10 +440,7 @@ func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 	diff := t.getDiff(m.repo)
 	diagPath, _ := filepath.Abs(t.path)
 	tabDiags := m.diags[diagPath]
-	bpSet := m.dapBreak[diagPath]
-	bpVerifSet := m.dapBPVerif[diagPath]
 	bmSet := m.bookmarks[diagPath]
-	dapStoppedHere := m.dapRunState == dapStopped && m.dapCurPath == diagPath
 
 	wrap := p.wordWrap && contentW > 0
 	var segs []wrapSeg
@@ -564,32 +505,14 @@ func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 			diagMark = " "
 		}
 
-		// One shared marker column: the current stop marker ▶ and breakpoints
-		// ● / ○ take precedence over a bookmark ◆ (their own columns used to
-		// make gutter clicks depend on which sub-column was hit).
+		// One shared marker column: the bookmark ◆ lives in the gutter's
+		// marker slot beside the diagnostics and git marks.
 		mark := " "
 		if bmSet[ln+1] {
 			mark = m.g.bookmark
 		}
-		if bpSet[ln+1] {
-			mark = m.g.breakpt
-			// The adapter explicitly rejected this line after a session ran:
-			// show it unverified instead of a solid breakpoint.
-			if v, ok := bpVerifSet[ln+1]; ok && !v {
-				mark = m.g.breakptO
-			}
-		}
-		if dapStoppedHere && m.dapCurLine == ln+1 {
-			mark = m.g.stop
-		}
 		markStyle := gutterStyle
 		switch mark {
-		case m.g.breakpt:
-			markStyle = bpStyle
-		case m.g.breakptO:
-			markStyle = bpDimStyle
-		case m.g.stop:
-			markStyle = stopStyle
 		case m.g.bookmark:
 			markStyle = bmStyle
 		}
@@ -601,11 +524,6 @@ func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 		numStr := strings.Repeat(" ", numPad) + num
 		gutStr := numStr
 		if active && ln == cur && ln < t.buf.LineCount() {
-			gutStr = curGutterStyle.Render(numStr)
-		} else if dapStoppedHere && m.dapCurLine == ln+1 {
-			// The debuggee is stopped on this line: render its number like the
-			// cursor line so the execution point stays easy to spot while
-			// stepping through code far from the editing cursor.
 			gutStr = curGutterStyle.Render(numStr)
 		} else {
 			gutStr = gutterStyle.Render(numStr)
@@ -834,11 +752,10 @@ func (m Model) treePanel(h int) []string {
 		} else {
 			cell = strings.Repeat(" ", inner)
 		}
-	rows = append(rows, cell+" ")
+		rows = append(rows, cell+" ")
+	}
+	return rows
 }
-return rows
-}
-
 
 func maxInt(a, b int) int {
 	if a > b {
@@ -1388,8 +1305,7 @@ func (m Model) terminalPanel() []string {
 	return rows
 }
 
-// chatPanel renders the right-side AI chat rail: header with the model
-// name, scrolling transcript, key hint and input line at the bottom.
+// conflictLine renders the merge-conflict banner row.
 func (m Model) conflictLine() string {
 	fname := filepath.Base(m.conflictPath)
 	line := statusHiStyle.Render(m.t("conflict.label")) + statusStyle.Render(fmt.Sprintf(m.t("conflict.msg"), fname))
@@ -1558,11 +1474,6 @@ func (m Model) renderLine(p *pane, t *tab, ln, w int, activePane bool, syntaxLin
 		rawStyles = syntaxLines[ln]
 	}
 
-	// Highlight the line the debuggee is stopped on, so the execution point is
-	// visible at a glance (not just the ▶ gutter mark). dapCurLine is 1-based.
-	isDebugLine := activePane && m.dapRunState == dapStopped && m.dapCurPath != "" &&
-		m.dapCurPath == t.path && m.dapCurLine > 0 && ln == m.dapCurLine-1
-
 	// Expand tabs
 	exp := make([]rune, 0, len(raw))
 	expStyles := make([]lipgloss.Style, 0, len(raw))
@@ -1585,14 +1496,6 @@ func (m Model) renderLine(p *pane, t *tab, ln, w int, activePane bool, syntaxLin
 		}
 	}
 	rawToExp[len(raw)] = len(exp)
-
-	// Apply the execution-point line highlight under the existing syntax
-	// foreground so the stopped line glows without muting its colors.
-	if isDebugLine {
-		for i := range expStyles {
-			expStyles[i] = dapLineStyle.Inherit(expStyles[i])
-		}
-	}
 
 	// Search match highlighting
 	type matchInfo struct {
@@ -1722,15 +1625,7 @@ func (m Model) renderLine(p *pane, t *tab, ln, w int, activePane bool, syntaxLin
 		}
 	}
 
-	// Extend the execution-point highlight to the full row width so the glow
-	// isn't clipped on short lines; search/selection/cursor overrides still win
-	// for their respective cells above.
-	if isDebugLine && w > 0 {
-		written := end - start
-		if written < w {
-			out.WriteString(dapLineStyle.Render(strings.Repeat(" ", w-written)))
-		}
-	}
+	// (search/selection/cursor overrides already won for their cells above.)
 
 	return out.String()
 }
@@ -1855,7 +1750,7 @@ func (m Model) statusBar() string {
 		}
 	}
 	hint := ""
-	if !m.promptOpen && !m.promptSave && !m.quitConfirm && !m.finderOpen && !m.searchOpen && !m.gotoOpen && !m.gitOpen && !m.conflictOpen && !m.diffViewOpen && !m.termOpen  && !m.helpOpen {
+	if !m.promptOpen && !m.promptSave && !m.quitConfirm && !m.finderOpen && !m.searchOpen && !m.gotoOpen && !m.gitOpen && !m.conflictOpen && !m.diffViewOpen && !m.termOpen && !m.helpOpen {
 		hint = m.t("status.f1_help")
 		if m.layout != splitNone {
 			hint += m.t("status.f8_pane")

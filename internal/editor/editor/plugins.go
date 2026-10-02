@@ -26,16 +26,21 @@ func (m *Model) Status(msg string)  { m.msg = msg }
 func (m *Model) Save()              { m.saveActive() }
 
 // pluginDirs returns the plugin directories to search, in load order:
-// global ~/.dmed/plugins first (or $DMED_PLUGIN_DIR for tests), then the
-// project .dmed/plugins.
+// global ~/.dmcode/plugins first (or $DMCODE_PLUGIN_DIR, legacy $DMED_PLUGIN_DIR,
+// for tests), then the project .dmcode/plugins; the legacy dmed spellings are
+// still searched so an installed set survives the merge.
 func (m Model) pluginDirs() []string {
 	var dirs []string
-	if pd := os.Getenv("DMED_PLUGIN_DIR"); pd != "" {
+	if pd := os.Getenv("DMCODE_PLUGIN_DIR"); pd != "" {
+		dirs = append(dirs, pd)
+	} else if pd := os.Getenv("DMED_PLUGIN_DIR"); pd != "" {
 		dirs = append(dirs, pd)
 	} else if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".dmcode", "plugins"))
 		dirs = append(dirs, filepath.Join(home, ".dmed", "plugins"))
 	}
 	if m.root != "" {
+		dirs = append(dirs, filepath.Join(m.root, ".dmcode", "plugins"))
 		dirs = append(dirs, filepath.Join(m.root, ".dmed", "plugins"))
 	}
 	return dirs

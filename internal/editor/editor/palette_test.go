@@ -183,16 +183,17 @@ func TestPaletteScrollKeepsSelectionVisible(t *testing.T) {
 	}
 }
 
-// TestPaletteFilterBringsAISettings verifies the AI settings command surfaces
-// through the query filter even though it sits beyond the visible window.
-func TestPaletteFilterBringsAISettings(t *testing.T) {
+// TestPaletteFilterBringsLateCommand verifies a command near the end of the
+// list surfaces through the query filter even though it sits beyond the
+// visible window.
+func TestPaletteFilterBringsLateCommand(t *testing.T) {
 	m := New()
 	m.startPalette()
 
-	m = typeStr(m, "preferences")
+	m = typeStr(m, "terminal")
 	hits := m.filterPalette()
-	if len(hits) != 1 || hits[0].id != "ai_settings" {
-		t.Fatalf("expected single 'ai_settings' hit, got: %+v", hits)
+	if len(hits) != 1 || hits[0].id != "terminal" {
+		t.Fatalf("expected single 'terminal' hit, got: %+v", hits)
 	}
 }
 
@@ -230,7 +231,7 @@ func TestPaletteSwitchLanguage(t *testing.T) {
 		t.Fatalf("translator lang=%q, want ru", got)
 	}
 	// The choice must persist to the project config.
-	data, err := os.ReadFile(filepath.Join(dir, ".dmed.conf"))
+	data, err := os.ReadFile(filepath.Join(dir, ".dmcode.conf"))
 	if err != nil {
 		t.Fatalf("config not written: %v", err)
 	}
