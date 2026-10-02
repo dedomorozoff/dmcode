@@ -1,0 +1,12 @@
+# github.com/dedomorozoff/dmcode/internal/editor/editor
+.\mouse.go:48:113: m.agentPromptExtraRows undefined (type Model has no field or method agentPromptExtraRows)
+.\mouse.go:602:9: m.aiReviewMode undefined (type *Model has no field or method aiReviewMode)
+.\mouse.go:603:5: m.aiReviewOffY undefined (type *Model has no field or method aiReviewOffY)
+.\mouse.go:604:8: m.aiReviewOffY undefined (type *Model has no field or method aiReviewOffY)
+.\mouse.go:605:6: m.aiReviewOffY undefined (type *Model has no field or method aiReviewOffY)
+.\mouse.go:607:22: m.aiReviewRows undefined (type *Model has no field or method aiReviewRows)
+.\mouse.go:607:43: m.aiReviewOffY undefined (type *Model has no field or method aiReviewOffY)
+.\mouse.go:608:6: m.aiReviewOffY undefined (type *Model has no field or method aiReviewOffY)
+.\mouse.go:623:9: m.aiCfgOpen undefined (type *Model has no field or method aiCfgOpen)
+.\palette.go:85:101: m.toggleChat undefined (type *Model has no field or method toggleChat)
+.\palette.go:85:101: too many errors

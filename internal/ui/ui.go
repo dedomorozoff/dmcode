@@ -691,8 +691,8 @@ var styleVersion = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 // solid-block style. Only ▀▄█ are used: the one-cell width of these three is
 // the one thing every terminal agrees on, and a logo whose width depends on
 // the terminal is not a logo.
-const miniLogo = `█▀█ ▄▄ ▄▄ ▄▄▄ ▄▄▄   █ ▄▄▄
-█ ▐ █ █ █ █   █ █ █▀█ █▄
+const miniLogo = `█▀█ ▄▄ ▄▄ ▄▄▄ ▄▄▄ ▄▄█ ▄▄▄
+█ ▐ █ █ █ █   █ █ █ █ █▄
 █▄█ █ █ █ █▄▄ █▄█ █▄█ █▄▄`
 
 func newSessionID() string {

@@ -1,0 +1,536 @@
+package buffer
+
+import "testing"
+
+func TestEmpty(t *testing.T) {
+	b := New()
+	if b.Text() != "\n" {
+		t.Fatalf("Text() = %q", b.Text())
+	}
+	if b.Dirty() {
+		t.Fatal("fresh buffer must not be dirty")
+	}
+}
+
+func TestLoadAndText(t *testing.T) {
+	b := Load("abc\ndef")
+	if b.Text() != "abc\ndef\n" {
+		t.Fatalf("Text() = %q", b.Text())
+	}
+	if b.LineCount() != 2 || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("cursor state: %d %d %d", b.LineCount(), b.CurLine(), b.Col())
+	}
+}
+
+func TestInsertBackspace(t *testing.T) {
+	b := New()
+	for _, r := range "hello" {
+		b.Insert(r)
+	}
+	if b.Text() != "hello\n" || b.Col() != 5 {
+		t.Fatalf("after insert: %q col=%d", b.Text(), b.Col())
+	}
+	b.Backspace()
+	if b.Text() != "hell\n" || b.Col() != 4 {
+		t.Fatalf("after backspace: %q col=%d", b.Text(), b.Col())
+	}
+}
+
+func TestEnterSplitAndJoin(t *testing.T) {
+	b := Load("abcd")
+	b.MoveRight()
+	b.MoveRight()
+	b.InsertNewline()
+	if b.Text() != "ab\ncd\n" || b.CurLine() != 1 || b.Col() != 0 {
+		t.Fatalf("after split: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+	b.Backspace()
+	if b.Text() != "abcd\n" || b.CurLine() != 0 || b.Col() != 2 {
+		t.Fatalf("after join: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+}
+
+func TestDeleteJoinsNextLine(t *testing.T) {
+	b := Load("ab\ncd")
+	b.LineEnd()
+	b.Delete()
+	if b.Text() != "abcd\n" {
+		t.Fatalf("Text() = %q", b.Text())
+	}
+}
+
+func TestBackspaceAtStartOfFirstLine(t *testing.T) {
+	b := Load("abc")
+	b.LineStart()
+	b.Backspace()
+	if b.Text() != "abc\n" || b.Col() != 0 {
+		t.Fatalf("no-op backspace changed buffer: %q", b.Text())
+	}
+}
+
+func TestUndoRedo(t *testing.T) {
+	b := New()
+	for _, r := range "ab" {
+		b.Insert(r)
+	}
+	if b.Text() != "ab\n" {
+		t.Fatalf("after typing: %q", b.Text())
+	}
+	b.InsertNewline()
+	b.Insert('c')
+	if b.Text() != "ab\nc\n" {
+		t.Fatalf("after split+type: %q", b.Text())
+	}
+	b.Undo()
+	if b.Text() != "ab\n\n" {
+		t.Fatalf("after undo (drop 'c'): %q", b.Text())
+	}
+	b.Undo()
+	if b.Text() != "ab\n" {
+		t.Fatalf("after undo (drop newline): %q", b.Text())
+	}
+	b.Redo()
+	if b.Text() != "ab\n\n" {
+		t.Fatalf("after redo (restore line): %q", b.Text())
+	}
+	b.Redo()
+	if b.Text() != "ab\nc\n" {
+		t.Fatalf("after redo (restore 'c'): %q", b.Text())
+	}
+	b.Redo()
+	if b.Text() != "ab\nc\n" {
+		t.Fatalf("redo must be exhausted: %q", b.Text())
+	}
+}
+
+func TestUndoRestoresCursor(t *testing.T) {
+	b := Load("one")
+	b.LineEnd()
+	for _, r := range " two" {
+		b.Insert(r)
+	}
+	b.Undo()
+	if b.Text() != "one\n" || b.Col() != 3 {
+		t.Fatalf("undo: %q col=%d", b.Text(), b.Col())
+	}
+}
+
+func TestInsertRunIsOneUndoStep(t *testing.T) {
+	b := Load("one")
+	b.LineEnd()
+	for _, r := range " two" {
+		b.Insert(r)
+	}
+	b.Undo()
+	if b.Text() != "one\n" || b.Col() != 3 {
+		t.Fatalf("undo: %q col=%d", b.Text(), b.Col())
+	}
+}
+
+func TestMoveBreaksInsertGroup(t *testing.T) {
+	b := New()
+	for _, r := range "ab" {
+		b.Insert(r)
+	}
+	b.MoveLeft()
+	b.Insert('X')
+	if b.Text() != "aXb\n" {
+		t.Fatalf("after insert: %q", b.Text())
+	}
+	b.Undo()
+	if b.Text() != "ab\n" {
+		t.Fatalf("undo: %q", b.Text())
+	}
+}
+
+func TestMoveUpDownClampWithGoalCol(t *testing.T) {
+	b := Load("abcdef\nx")
+	b.LineEnd()
+	b.MoveDown()
+	if b.CurLine() != 1 || b.Col() != 1 {
+		t.Fatalf("down: line=%d col=%d", b.CurLine(), b.Col())
+	}
+	b.MoveUp()
+	if b.Col() != 6 {
+		t.Fatalf("up restored col=%d, want 6", b.Col())
+	}
+}
+
+func TestDirtyMarkSaved(t *testing.T) {
+	b := Load("hi")
+	if b.Dirty() {
+		t.Fatal("loaded buffer must be clean")
+	}
+	b.Insert('!')
+	if !b.Dirty() {
+		t.Fatal("edited buffer must be dirty")
+	}
+	b.MarkSaved()
+	if b.Dirty() {
+		t.Fatal("saved buffer must be clean")
+	}
+}
+
+func TestSetCursor(t *testing.T) {
+	b := Load("hello\nworld")
+	b.SetCursor(1, 3)
+	if b.CurLine() != 1 || b.Col() != 3 {
+		t.Fatalf("SetCursor(1, 3): line=%d col=%d", b.CurLine(), b.Col())
+	}
+	b.SetCursor(-5, -2)
+	if b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("SetCursor(-5, -2): line=%d col=%d", b.CurLine(), b.Col())
+	}
+	b.SetCursor(100, 100)
+	if b.CurLine() != 1 || b.Col() != 5 {
+		t.Fatalf("SetCursor(100, 100): line=%d col=%d", b.CurLine(), b.Col())
+	}
+}
+
+func TestReplaceRange(t *testing.T) {
+	b := Load("hello world\nfoo bar")
+	ok := b.ReplaceRange(0, 6, 5, []rune("dmed"))
+	if !ok || b.Text() != "hello dmed\nfoo bar\n" {
+		t.Fatalf("ReplaceRange: ok=%v text=%q", ok, b.Text())
+	}
+	if b.CurLine() != 0 || b.Col() != 10 {
+		t.Fatalf("after replace: line=%d col=%d", b.CurLine(), b.Col())
+	}
+	b.Undo()
+	if b.Text() != "hello world\nfoo bar\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+	b.Redo()
+	if b.Text() != "hello dmed\nfoo bar\n" {
+		t.Fatalf("after redo: %q", b.Text())
+	}
+}
+
+func TestReplaceAll(t *testing.T) {
+	b := Load("banana apple banana\nbanana split")
+	count := b.ReplaceAll("banana", "orange")
+	if count != 3 || b.Text() != "orange apple orange\norange split\n" {
+		t.Fatalf("ReplaceAll: count=%d text=%q", count, b.Text())
+	}
+	b.Undo()
+	if b.Text() != "banana apple banana\nbanana split\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+	b.Redo()
+	if b.Text() != "orange apple orange\norange split\n" {
+		t.Fatalf("after redo: %q", b.Text())
+	}
+}
+
+func TestSelectionAndInsert(t *testing.T) {
+	b := Load("hello beautiful world\n")
+	b.SetCursor(0, 6)
+	for i := 0; i < 9; i++ {
+		b.MoveRightWithSelect()
+	}
+	if !b.HasSelection() {
+		t.Fatal("expected active selection")
+	}
+	if b.SelectedText() != "beautiful" {
+		t.Fatalf("expected 'beautiful', got %q", b.SelectedText())
+	}
+
+	// Insert replaces selection
+	b.InsertText("brave new")
+	if b.Text() != "hello brave new world\n" {
+		t.Fatalf("after insert: %q", b.Text())
+	}
+	if b.HasSelection() {
+		t.Fatal("selection should be cleared after insert")
+	}
+
+	b.Undo()
+	if b.Text() != "hello beautiful world\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+}
+
+func TestDeleteLineRemovesCurrentLine(t *testing.T) {
+	b := Load("line1\nline2\nline3\n")
+	b.DeleteLine()
+	if b.Text() != "line2\nline3\n" || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("delete line: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+}
+
+func TestDeleteLineLastLine(t *testing.T) {
+	b := Load("line1\nline2\n")
+	b.MoveDown()
+	b.DeleteLine()
+	if b.Text() != "line1\n" || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("delete last line: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+}
+
+func TestDeleteLineSingleLine(t *testing.T) {
+	b := Load("only")
+	b.DeleteLine()
+	if b.Text() != "\n" || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("delete single line: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+}
+
+func TestDeleteLineUndo(t *testing.T) {
+	b := Load("a\nb\nc\n")
+	b.DeleteLine()
+	if b.Text() != "b\nc\n" || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("after delete: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+	b.Undo()
+	if b.Text() != "a\nb\nc\n" || b.CurLine() != 0 || b.Col() != 0 {
+		t.Fatalf("after undo: %q line=%d col=%d", b.Text(), b.CurLine(), b.Col())
+	}
+}
+
+func TestSelectionDeleteUndo(t *testing.T) {
+	b := Load("line1\nline2\nline3\n")
+	b.SetCursor(0, 5)
+	b.MoveDownWithSelect()
+	b.LineEndWithSelect()
+
+	if b.SelectedText() != "\nline2" {
+		t.Fatalf("selected text: %q", b.SelectedText())
+	}
+
+	b.DeleteSelection()
+	if b.Text() != "line1\nline3\n" {
+		t.Fatalf("after delete selection: %q", b.Text())
+	}
+
+	b.Undo()
+	if b.Text() != "line1\nline2\nline3\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+}
+
+func TestMoveLineDown(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(0, 0)
+	b.MoveLineDown()
+	if b.Text() != "bbb\naaa\nccc\n" {
+		t.Fatalf("MoveLineDown: %q", b.Text())
+	}
+	if b.CurLine() != 1 {
+		t.Fatalf("cursor after move down: line=%d", b.CurLine())
+	}
+}
+
+func TestMoveLineUp(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(1, 0)
+	b.MoveLineUp()
+	if b.Text() != "bbb\naaa\nccc\n" {
+		t.Fatalf("MoveLineUp: %q", b.Text())
+	}
+	if b.CurLine() != 0 {
+		t.Fatalf("cursor after move up: line=%d", b.CurLine())
+	}
+}
+
+func TestMoveLineUpFirstLine(t *testing.T) {
+	b := Load("aaa\nbbb\n")
+	b.SetCursor(0, 0)
+	b.MoveLineUp() // no-op
+	if b.Text() != "aaa\nbbb\n" {
+		t.Fatalf("MoveLineUp first line: %q", b.Text())
+	}
+}
+
+func TestMoveLineDownLastLine(t *testing.T) {
+	b := Load("aaa\nbbb\n")
+	b.SetCursor(1, 0)
+	b.MoveLineDown() // no-op
+	if b.Text() != "aaa\nbbb\n" {
+		t.Fatalf("MoveLineDown last line: %q", b.Text())
+	}
+}
+
+func TestMoveLineSelection(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\nddd\n")
+	b.SetCursor(1, 0)
+	b.StartSelection()
+	b.MoveDownWithSelect() // select lines 1-2
+	b.MoveLineDown()
+	// selection moves: lines 1-2 (bbb,ccc) swap with ddd → aaa,ddd,bbb,ccc
+	if b.Text() != "aaa\nddd\nbbb\nccc\n" {
+		t.Fatalf("MoveLineDown selection: %q", b.Text())
+	}
+}
+
+func TestMoveLineUndo(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(0, 0)
+	b.MoveLineDown()
+	if b.Text() != "bbb\naaa\nccc\n" {
+		t.Fatalf("after move: %q", b.Text())
+	}
+	b.Undo()
+	if b.Text() != "aaa\nbbb\nccc\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+}
+
+func TestDuplicateLine(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(1, 0)
+	b.DuplicateLine()
+	if b.Text() != "aaa\nbbb\nbbb\nccc\n" {
+		t.Fatalf("DuplicateLine: %q", b.Text())
+	}
+	if b.CurLine() != 2 {
+		t.Fatalf("cursor after dup: line=%d", b.CurLine())
+	}
+}
+
+func TestDuplicateFirstLine(t *testing.T) {
+	b := Load("aaa\nbbb\n")
+	b.SetCursor(0, 0)
+	b.DuplicateLine()
+	if b.Text() != "aaa\naaa\nbbb\n" {
+		t.Fatalf("DuplicateFirstLine: %q", b.Text())
+	}
+}
+
+func TestDuplicateSelection(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(0, 0)
+	b.StartSelection()
+	b.MoveDownWithSelect() // select lines 0-1
+	b.DuplicateLine()
+	if b.Text() != "aaa\nbbb\naaa\nbbb\nccc\n" {
+		t.Fatalf("DuplicateSelection: %q", b.Text())
+	}
+}
+
+func TestDuplicateLineUndo(t *testing.T) {
+	b := Load("aaa\nbbb\n")
+	b.SetCursor(0, 0)
+	b.DuplicateLine()
+	if b.Text() != "aaa\naaa\nbbb\n" {
+		t.Fatalf("after dup: %q", b.Text())
+	}
+	b.Undo()
+	if b.Text() != "aaa\nbbb\n" {
+		t.Fatalf("after undo: %q", b.Text())
+	}
+}
+
+func TestDuplicateLineUp(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\n")
+	b.SetCursor(1, 0)
+	b.DuplicateLineUp()
+	if b.Text() != "aaa\nbbb\nbbb\nccc\n" {
+		t.Fatalf("DuplicateLineUp: %q", b.Text())
+	}
+	if b.CurLine() != 2 {
+		t.Fatalf("cursor after dup up: line=%d", b.CurLine())
+	}
+}
+
+func TestDuplicateLineUpSelection(t *testing.T) {
+	b := Load("aaa\nbbb\nccc\nddd\n")
+	b.SetCursor(1, 0)
+	b.StartSelection()
+	b.MoveDownWithSelect() // select lines 1-2
+	b.DuplicateLineUp()
+	if b.Text() != "aaa\nbbb\nccc\nbbb\nccc\nddd\n" {
+		t.Fatalf("DuplicateLineUpSelection: %q", b.Text())
+	}
+	if b.CurLine() != 3 {
+		t.Fatalf("cursor after dup up sel: line=%d", b.CurLine())
+	}
+}
+
+func TestToggleCommentSingleLine(t *testing.T) {
+	b := Load("hello world")
+	b.SetCursor(0, 5)
+	b.ToggleComment("//", "")
+	want := "// hello world\n"
+	if b.Text() != want {
+		t.Fatalf("comment: got %q want %q", b.Text(), want)
+	}
+	if b.Col() != 8 {
+		t.Fatalf("col after comment: got %d want 8", b.Col())
+	}
+	b.ToggleComment("//", "")
+	if b.Text() != "hello world\n" {
+		t.Fatalf("uncomment: got %q", b.Text())
+	}
+	if b.Col() != 5 {
+		t.Fatalf("col after uncomment: got %d want 5", b.Col())
+	}
+}
+
+func TestToggleCommentIndented(t *testing.T) {
+	b := Load("    code()")
+	b.SetCursor(0, 4)
+	b.ToggleComment("//", "")
+	want := "    // code()\n"
+	if b.Text() != want {
+		t.Fatalf("indented comment: got %q want %q", b.Text(), want)
+	}
+	if b.Col() != 7 {
+		t.Fatalf("col: got %d want 7", b.Col())
+	}
+	b.ToggleComment("//", "")
+	if b.Text() != "    code()\n" {
+		t.Fatalf("uncomment indented: got %q", b.Text())
+	}
+	if b.Col() != 4 {
+		t.Fatalf("col: got %d want 4", b.Col())
+	}
+}
+
+func TestToggleCommentSelection(t *testing.T) {
+	b := Load("aaa\nbbb\nccc")
+	b.SetCursor(0, 0)
+	b.StartSelection()
+	b.MoveDownWithSelect() // select lines 0-1
+	b.ToggleComment("//", "")
+	want := "// aaa\n// bbb\nccc\n"
+	if b.Text() != want {
+		t.Fatalf("comment selection: got %q want %q", b.Text(), want)
+	}
+}
+
+func TestToggleCommentBlock(t *testing.T) {
+	b := Load("text")
+	b.SetCursor(0, 0)
+	b.ToggleComment("<!--", "-->")
+	want := "<!-- text -->\n"
+	if b.Text() != want {
+		t.Fatalf("block comment: got %q want %q", b.Text(), want)
+	}
+	b.ToggleComment("<!--", "-->")
+	if b.Text() != "text\n" {
+		t.Fatalf("block uncomment: got %q", b.Text())
+	}
+}
+
+func TestToggleCommentNoop(t *testing.T) {
+	b := Load("foo")
+	b.SetCursor(0, 0)
+	b.ToggleComment("", "")
+	if b.Text() != "foo\n" {
+		t.Fatalf("noop comment changed text: %q", b.Text())
+	}
+}
+
+func TestToggleCommentColumns(t *testing.T) {
+	b := Load("aaa\nbbb\nccc")
+	b.SetCursor(2, 2)
+	b.ToggleComment("//", "")
+	if b.Col() != 5 {
+		t.Fatalf("col on line 2 after comment: got %d want 5", b.Col())
+	}
+	// verify content of line 2
+	b.ToggleComment("//", "")
+	if b.Col() != 2 {
+		t.Fatalf("col on line 2 after uncomment: got %d want 2", b.Col())
+	}
+}
