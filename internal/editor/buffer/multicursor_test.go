@@ -100,6 +100,52 @@ func TestMultiBackspace(t *testing.T) {
 	}
 }
 
+func TestMultiBackspaceJoinKeepsCursorsOnTheirLines(t *testing.T) {
+	// The field crash: a join removes a line, cursors below it are never
+	// shifted, and the next backspace slices an empty line past its end.
+	b := Load("aa\nmiddle\n012345678901234567890123456789012\n")
+	b.SetCursor(1, 0)
+	b.AddCursor(2, 33, 33, 33)
+	b.MultiBackspace()
+	b.MultiBackspace()
+	if b.Text() != "amiddle\n0123456789012345678901234567890\n" {
+		t.Fatalf("got %q", b.Text())
+	}
+}
+
+func TestMultiBackspaceJoinsInAnyOrder(t *testing.T) {
+	// Joins arrive in cursor order, not line order; processing them from the
+	// end of that list is not bottom-up and skips the higher join entirely.
+	b := Load("aa\nbb\ncc")
+	b.SetCursor(2, 0)
+	b.AddCursor(1, 0, 0, 0)
+	b.MultiBackspace()
+	if b.Text() != "aabbcc\n" {
+		t.Fatalf("got %q", b.Text())
+	}
+}
+
+func TestMultiDeleteJoinKeepsCursorsOnTheirLines(t *testing.T) {
+	b := Load("aa\nmiddle\n012345678901234567890123456789012\n")
+	b.SetCursor(0, 2)
+	b.AddCursor(2, 0, 0, 0)
+	b.MultiDelete()
+	b.MultiDelete()
+	if b.Text() != "aaiddle\n2345678901234567890123456789012\n" {
+		t.Fatalf("got %q", b.Text())
+	}
+}
+
+func TestMultiDeleteJoinsInAnyOrder(t *testing.T) {
+	b := Load("aa\nbb\ncc")
+	b.SetCursor(0, 2)
+	b.AddCursor(1, 2, 2, 2)
+	b.MultiDelete()
+	if b.Text() != "aabbcc\n" {
+		t.Fatalf("got %q", b.Text())
+	}
+}
+
 func TestMultiDelete(t *testing.T) {
 	b := Load("abc\ndef\nghi")
 	b.SetCursor(0, 0)

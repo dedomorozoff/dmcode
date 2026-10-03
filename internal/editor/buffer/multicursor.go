@@ -246,6 +246,12 @@ func applyNoSplit(mat [][]rune, edits []cursorEdit) []Cursor {
 	for _, ln := range lines {
 		es := byLine[ln]
 		sort.SliceStable(es, func(i, j int) bool { return es[i].from < es[j].from })
+		// A stale cursor can name a line that no longer exists or a column
+		// past its end; clamping turns that into a no-op edit instead of a
+		// panic that takes the whole session down.
+		if ln < 0 || ln >= len(mat) {
+			continue
+		}
 		cur := mat[ln]
 		var out []rune
 		pos := 0
@@ -254,6 +260,12 @@ func applyNoSplit(mat [][]rune, edits []cursorEdit) []Cursor {
 			e := &es[i]
 			if e.from < pos {
 				e.from = pos
+			}
+			if e.from > len(cur) {
+				e.from = len(cur)
+			}
+			if e.to > len(cur) {
+				e.to = len(cur)
 			}
 			out = append(out, cur[pos:e.from]...)
 			for _, l := range e.ins {
@@ -271,6 +283,9 @@ func applyNoSplit(mat [][]rune, edits []cursorEdit) []Cursor {
 			delta -= e.to - e.from
 			shift += delta
 			pos = e.to
+		}
+		if pos > len(cur) {
+			pos = len(cur)
 		}
 		out = append(out, cur[pos:]...)
 		mat[ln] = out
@@ -376,10 +391,10 @@ func (b *Buffer) MultiBackspace() {
 	}
 
 	mat := b.linesCopy()
+	out := make([]Cursor, 0, len(pts))
 	if len(edits) > 0 {
 		res := applyNoSplit(mat, edits)
 		bi := 0
-		out := make([]Cursor, 0, len(pts))
 		for _, p := range pts {
 			if p.From != p.To || p.Col > 0 {
 				out = append(out, res[bi])
@@ -388,28 +403,33 @@ func (b *Buffer) MultiBackspace() {
 				out = append(out, Cursor{Line: p.Line, Col: 0})
 			}
 		}
-		for j := len(joins) - 1; j >= 0; j-- {
-			L := joins[j].Line
-			if L <= 0 || L >= len(mat) {
-				continue
-			}
-			merged := append(append([]rune(nil), mat[L-1]...), mat[L]...)
-			caretCol := len(mat[L-1])
-			mat[L-1] = merged
-			mat = append(mat[:L], mat[L+1:]...)
-			for k := range out {
-				if out[k].Line == L {
-					out[k] = Cursor{Line: L - 1, Col: caretCol}
-				}
+	} else {
+		out = append(out, pts...)
+	}
+	// Joins must run strictly bottom-up — the joins arrive in cursor order,
+	// not line order — and every cursor at or below the joined line moves
+	// with it, or the next edit slices through a line the cursor no longer
+	// points at.
+	sort.SliceStable(joins, func(i, j int) bool { return joins[i].Line > joins[j].Line })
+	for _, jc := range joins {
+		L := jc.Line
+		if L <= 0 || L >= len(mat) {
+			continue
+		}
+		joinAt := len(mat[L-1])
+		mat[L-1] = append(append([]rune(nil), mat[L-1]...), mat[L]...)
+		mat = append(mat[:L], mat[L+1:]...)
+		for k := range out {
+			switch {
+			case out[k].Line == L:
+				out[k] = Cursor{Line: L - 1, Col: joinAt + out[k].Col}
+			case out[k].Line > L:
+				out[k].Line--
 			}
 		}
-		b.setLines(mat)
-		b.setFromPoints(out)
-		return
 	}
-
 	b.setLines(mat)
-	b.setFromPoints(pts)
+	b.setFromPoints(out)
 }
 
 // MultiDelete removes the character (or selection) at every cursor.
@@ -436,10 +456,10 @@ func (b *Buffer) MultiDelete() {
 	}
 
 	mat := b.linesCopy()
+	out := make([]Cursor, 0, len(pts))
 	if len(edits) > 0 {
 		res := applyNoSplit(mat, edits)
 		bi := 0
-		out := make([]Cursor, 0, len(pts))
 		for _, p := range pts {
 			l := b.lineLen(p.Line)
 			if p.From != p.To || p.Col < l {
@@ -449,27 +469,29 @@ func (b *Buffer) MultiDelete() {
 				out = append(out, Cursor{Line: p.Line, Col: l})
 			}
 		}
-		for j := len(joins) - 1; j >= 0; j-- {
-			L := joins[j].Line
-			if L < 0 || L >= len(mat)-1 {
-				continue
-			}
-			next := mat[L+1]
-			merged := append(append([]rune(nil), mat[L]...), next...)
-			mat[L] = merged
-			mat = append(mat[:L+1], mat[L+2:]...)
-			for k := range out {
-				if out[k].Line == L {
-					out[k] = Cursor{Line: L, Col: out[k].Col}
-				}
+	} else {
+		out = append(out, pts...)
+	}
+	sort.SliceStable(joins, func(i, j int) bool { return joins[i].Line > joins[j].Line })
+	for _, jc := range joins {
+		L := jc.Line
+		if L < 0 || L >= len(mat)-1 {
+			continue
+		}
+		joinAt := len(mat[L])
+		mat[L] = append(append([]rune(nil), mat[L]...), mat[L+1]...)
+		mat = append(mat[:L+1], mat[L+2:]...)
+		for k := range out {
+			switch {
+			case out[k].Line == L+1:
+				out[k] = Cursor{Line: L, Col: joinAt + out[k].Col}
+			case out[k].Line > L+1:
+				out[k].Line--
 			}
 		}
-		b.setLines(mat)
-		b.setFromPoints(out)
-		return
 	}
 	b.setLines(mat)
-	b.setFromPoints(pts)
+	b.setFromPoints(out)
 }
 
 // MoveAllLeft moves every cursor one position left.
