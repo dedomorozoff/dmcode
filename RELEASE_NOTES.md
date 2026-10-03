@@ -80,6 +80,9 @@ Three fixes from the workspace's first days, no new surface:
 - The editor's status notes (config reloaded, terminal exited and friends)
   no longer surface on the chat screen; the open git panel keeps its
   context line.
+- `/new` and `/sessions` now close the workspace's clean tabs, so the
+  next `ctrl+e` starts from a bare editor rather than the previous
+  conversation's files. A tab with unsaved typing survives the reset.
 
 ## What's new since v0.1.7
 
