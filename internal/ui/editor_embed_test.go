@@ -1,12 +1,14 @@
 package ui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
+	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
 // TestEditorToggleKeepsTheWorkspace pins the two-mode contract: ctrl+e (the
@@ -135,6 +137,29 @@ func TestCtrlQQuitsFromTheChat(t *testing.T) {
 		if _, _ = m.Update(msg); !m.ed.Chat {
 			t.Fatal("ctrl+q in the editor must return to the chat")
 		}
+	}
+}
+
+// TestNewSessionDropsTheEditorsTabs pins what /new does to the workspace:
+// the tabs the previous session's edits opened do not come back on the next
+// ctrl+e — a new conversation does not start from the old one's files.
+func TestNewSessionDropsTheEditorsTabs(t *testing.T) {
+	m := newSessionModel(t)
+	m.workDir = t.TempDir()
+
+	// The agent changed a file; entering the editor opens a tab for it.
+	dmtools.RecordChange(filepath.Join(m.workDir, "a.txt"), "x\n", "y\n")
+	t.Cleanup(dmtools.ResetChanges)
+	_ = m.openEditor()
+	if v := m.View(); !strings.Contains(v.Content, "a.txt") {
+		t.Fatalf("the changed file must have a tab, got:\n%.200s", v.Content)
+	}
+
+	// A new session resets the tally and drops the tabs with it.
+	m.newSession("")
+	_ = m.openEditor()
+	if v := m.View(); strings.Contains(v.Content, "a.txt") {
+		t.Fatalf("the previous session's tabs must not survive /new, got:\n%.200s", v.Content)
 	}
 }
 

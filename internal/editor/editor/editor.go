@@ -1929,6 +1929,36 @@ func (m *Model) OpenChangedTabs() {
 	}
 }
 
+// CloseAllTabs drops every tab whose buffer is clean — the tabs a session of
+// agent edits accumulated, which a new conversation has no use for. A dirty
+// buffer is the user's own unsaved typing, and starting another session is
+// not a reason to lose it: those tabs stay open. A split collapses, because
+// the panes' tab indexes do not survive the renumbering.
+func (m *Model) CloseAllTabs() {
+	if len(m.tabs) == 0 {
+		return
+	}
+	kept := make([]tab, 0, len(m.tabs))
+	dropped := false
+	for i := range m.tabs {
+		if m.tabs[i].buf.Dirty() {
+			kept = append(kept, m.tabs[i])
+		} else {
+			dropped = true
+		}
+	}
+	if !dropped {
+		return
+	}
+	if len(kept) == 0 {
+		// Nothing survived: back to the bare editor New starts from.
+		kept = append(kept, tab{buf: buffer.New()})
+	}
+	m.tabs = kept
+	m.initPanes()
+	m.clampScroll()
+}
+
 // DropPanelFocus clears tree/git/terminal focus so the keys go back to the
 // main area — what the host needs when the workspace switches to chat mode
 // with a panel still focused from the last editor visit.

@@ -171,6 +171,14 @@ func (m *uiModel) newSession(title string) {
 	// numbers into a fresh session would report edits the new one never made,
 	// against files it has never opened.
 	dmtools.ResetChanges()
+	// The workspace's tabs belong to the session that opened them: a new
+	// conversation starting from the previous one's open files reads as the
+	// old session continuing. The change tally reset above is what makes the
+	// tabs stop coming back on the next ctrl+e; this is what clears the ones
+	// already open.
+	if m.ed != nil {
+		m.ed.CloseAllTabs()
+	}
 	if m.sessions != nil {
 		if id, err := m.sessions.Ensure(m.ctx, sessionApp, sessionUser, m.sessionID); err == nil {
 			m.sessionID = id
@@ -226,6 +234,11 @@ func (m *uiModel) switchSession(id string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.lastTool = ""
+	// The workspace's tabs belong to the conversation that opened them; a
+	// resumed one starts from its own files, not the previous session's.
+	if m.ed != nil {
+		m.ed.CloseAllTabs()
+	}
 	m.history = append(m.history, line{kindSys, i18n.T("switched session from ") + prev})
 	m.summariseSession(id)
 	m.statusText = i18n.T("session: ") + id
