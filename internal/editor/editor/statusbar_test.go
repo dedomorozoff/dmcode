@@ -205,6 +205,30 @@ func TestChatModeMotionTracksTheStatusIcons(t *testing.T) {
 	}
 }
 
+func TestEditorNotesWaitForTheEditor(t *testing.T) {
+	m := New()
+	m.width, m.height = 80, 24
+	m.msg = "config reloaded"
+
+	// Chat mode: the note means nothing on a screen that is the transcript.
+	m.Chat = true
+	if strings.Contains(m.statusBar(), "config reloaded") {
+		t.Fatal("the editor's note must not show in chat mode")
+	}
+	// The open git panel is the exception: its context line lives in the
+	// same slot and the panel works in both modes.
+	m.gitOpen = true
+	if !strings.Contains(m.statusBar(), "config reloaded") {
+		t.Fatal("with the git panel open the line is the panel's, chat or not")
+	}
+	m.gitOpen = false
+	// Editor mode: the note is back.
+	m.Chat = false
+	if !strings.Contains(m.statusBar(), "config reloaded") {
+		t.Fatal("the editor's note must show in editor mode")
+	}
+}
+
 func TestDockedPanelsHaveLeadingDivider(t *testing.T) {
 	m := New()
 	m.width, m.height = 80, 40

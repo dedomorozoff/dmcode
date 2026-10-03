@@ -1806,7 +1806,12 @@ func (m Model) statusBar() string {
 	}
 
 	mid := ""
-	if m.msg != "" {
+	// Chat mode shares this row with the editor but none of its business: a
+	// "config reloaded" or "terminal: process exited" means nothing on a
+	// screen that is the transcript, so the note waits for the editor. The
+	// open git panel is the exception — its context line lives in the same
+	// slot and the panel works in both modes.
+	if m.msg != "" && (!m.Chat || m.gitOpen) {
 		mid = statusStyle.Render("  " + m.msg)
 	}
 	right := ""
