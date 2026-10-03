@@ -68,6 +68,18 @@ Three fixes from the workspace's first days, no new surface:
   order — which also un-skips the higher of two joins — and shift every
   cursor at or below the joined line; a stale cursor is clamped instead of
   panicking.
+- Every `edit_file` and `write_file` now draws what it changed in the
+  transcript: a header naming the file, real line numbers from the old and
+  the new text in a gutter, and the code highlighted with the editor's
+  syntax theme over a dim green or red wash for the added and removed rows.
+- A `write_file` cut off by the model's output limit no longer loses the
+  turn when the model had narrated first: the re-ask goes ahead, preceded
+  by a blank line, with a concrete recipe for writing the file in chunks.
+  When the turn really cannot be saved, the error says what to ask for
+  next.
+- The editor's status notes (config reloaded, terminal exited and friends)
+  no longer surface on the chat screen; the open git panel keeps its
+  context line.
 
 ## What's new since v0.1.7
 
