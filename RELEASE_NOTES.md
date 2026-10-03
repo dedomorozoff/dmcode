@@ -1,4 +1,4 @@
-# dmCode v0.2.0
+# dmCode v0.2.1
 
 dmcode is a workspace now. The chat is still the agent you know; the same
 window also holds a real code editor — project tree, git, a terminal, splits,
@@ -42,6 +42,21 @@ Or with Go 1.26+:
 ```bash
 go install github.com/dedomorozoff/dmcode@latest
 ```
+
+## What's new since v0.2.0
+
+Three fixes from the workspace's first days, no new surface:
+
+- `ctrl+e` in the editor now returns to the chat — the key that opened the
+  editor toggles both ways. `ctrl+q` still works, `F1` keeps the help panel,
+  and the help table and the status hints name the new binding.
+- The project tree no longer opens itself when the editor is entered. It
+  answers `ctrl+b`, `F9` or its own status-bar icon, and otherwise stays
+  where the user last left it.
+- Status-icon tooltips no longer freeze over the transcript. Chat mode keeps
+  tracking the icon strip on mouse motion, so a callout left over from the
+  editor mode clears on the first move instead of sitting on the screen with
+  nothing to remove it.
 
 ## What's new since v0.1.7
 

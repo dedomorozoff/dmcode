@@ -312,7 +312,9 @@ PTY, LSP completions, splits and bookmarks, which is too much for a table here.
 
 ## The editor
 
-`ctrl+e` opens a code editor in the same workspace, and `ctrl+q` puts it back.
+`ctrl+e` opens a code editor in the same workspace, and pressing it again puts
+the chat back (`ctrl+q` does the same). The project tree waits for `ctrl+b`
+rather than opening itself.
 It is a real editor, not a viewer: syntax highlighting, a project tree, a git
 panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
 bookmarks, LSP completion and go-to-definition.
