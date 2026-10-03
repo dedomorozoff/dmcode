@@ -426,16 +426,20 @@ Already fixed, and worth not regressing:
   (`finish_reason=length` mid-JSON) ended the turn with `unexpected end of JSON
   input`, which reads as a bug in dmcode. `internal/llm/truncate.go` types that
   failure apart from a merely malformed one (`truncatedCallError`) and re-asks the
-  same endpoint once: the same conversation, a note saying the call was too big,
-  and — only where the endpoint reported its usage — a budget of twice what the
-  call had already used. Two rules keep it honest, and both are the ones the
-  failover pool already follows: nothing is re-asked once anything has been
-  yielded (the transcript cannot take back the first answer), and a request that
-  carries a budget of its own is left alone, which keeps the 64-token tool probe
-  in `verify.go` a single request. A second truncation is reported as the first
-  one, never as whatever the failed re-ask said. The cost is a second generation
-  on a local model, and it can still fail — a model that insists on one huge call
-  gets the truncation error, which is the honest answer.
+  same endpoint once: the same conversation, a note saying the call was too big
+  (with a concrete recipe for `write_file`: a short head, then appends anchored
+  on the last line), and — only where the endpoint reported its usage — a budget
+  of twice what the call had already used. Two rules keep it honest: a request
+  that carries a budget of its own is left alone, which keeps the 64-token tool
+  probe in `verify.go` a single request, and the re-ask happens once. Text the
+  first attempt already streamed stays on screen — the transcript cannot take it
+  back — but the re-ask goes ahead anyway: a duplicated sentence is cheaper than
+  a lost turn, and the second attempt is preceded by a blank-line delta so the
+  re-done narration lands on its own row instead of glued to the half-answer.
+  A second truncation is reported as the first one, never as whatever the failed
+  re-ask said. The cost is a second generation on a local model, and it can
+  still fail — a model that insists on one huge call gets the truncation error,
+  which now also tells the user what to ask for next.
 
 ---
 
