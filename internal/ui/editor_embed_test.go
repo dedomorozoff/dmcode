@@ -24,6 +24,11 @@ func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 	if !m.ed.Embed {
 		t.Fatal("the embedded editor must not be allowed to call tea.Quit")
 	}
+	// The tree is the user's to open: entering the editor shows the files the
+	// agent touched, not a navigator the user did not ask for.
+	if _, treeVisible, _ := m.ed.PanelState(); treeVisible {
+		t.Fatal("entering the editor must leave the project tree closed")
+	}
 	if v := m.View(); !strings.Contains(v.Content, "[untitled]") {
 		t.Fatalf("editor mode must show the tab bar, got:\n%.200s", v.Content)
 	}
@@ -73,6 +78,34 @@ func TestEditorQuitReturnsToChatMode(t *testing.T) {
 	// And the chat still renders through the chrome.
 	if v := m.View(); !strings.Contains(v.Content, "waiting for a task") {
 		t.Fatalf("after quitting the editor the chat must be the main area, got:\n%.200s", v.Content)
+	}
+}
+
+// TestEditorCtrlEReturnsToChatMode pins the toggle: the same ctrl+e that
+// opened the editor sends it back, no ctrl+q needed — the editor asks with
+// ToggleEditorMsg and the host flips the mode and folds the panels.
+func TestEditorCtrlEReturnsToChatMode(t *testing.T) {
+	m := newTurnModel(t)
+	m.workDir = t.TempDir()
+	_ = m.openEditor() // into editor mode
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+e in the editor must ask the host to toggle")
+	}
+	if msg, ok := cmd().(editor.ToggleEditorMsg); !ok {
+		t.Fatalf("ctrl+e yielded %T, want ToggleEditorMsg", msg)
+	} else {
+		if _, _ = m.Update(msg); !m.ed.Chat {
+			t.Fatal("ToggleEditorMsg must return the workspace to chat mode")
+		}
+	}
+	termOpen, treeVisible, termFocus := m.ed.PanelState()
+	if termOpen || treeVisible || termFocus {
+		t.Fatalf("returning to the chat must fold the panels: termOpen=%v treeVisible=%v termFocus=%v", termOpen, treeVisible, termFocus)
+	}
+	if v := m.View(); !strings.Contains(v.Content, "waiting for a task") {
+		t.Fatalf("after ctrl+e the chat must be the main area, got:\n%.200s", v.Content)
 	}
 }
 

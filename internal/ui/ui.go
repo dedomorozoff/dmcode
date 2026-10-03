@@ -634,13 +634,12 @@ func (m *uiModel) openEditor() tea.Cmd {
 }
 
 // enterEditor flips the (already existing) workspace into the editor mode:
-// the tabs for the files the agent changed open on top, and the tree comes
-// with them — a bare editor without a navigator is not the editor anyone
-// asked for.
+// the tabs for the files the agent changed open on top. The project tree and
+// the other panels stay as the user last left them — closed until asked for
+// with ctrl+b, F9 or the status-bar icons.
 func (m *uiModel) enterEditor() {
 	m.ed.Chat = false
 	m.ed.OpenChangedTabs()
-	m.ed.OpenTree()
 }
 
 // ensureEditor creates the workspace the first time it is needed, on the
@@ -1424,7 +1423,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
-					line{kindSys, i18n.T("ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+q — back here")},
+					line{kindSys, i18n.T("ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})

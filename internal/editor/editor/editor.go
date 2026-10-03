@@ -1242,6 +1242,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.MouseMotionMsg:
 		if m.Chat {
+			// The chat owns the main area, but the chrome rows are still the
+			// editor's to hover: a callout left over from the editor mode —
+			// or drawn over the strip itself — must clear on motion, or it
+			// sits over the transcript forever. Chat mode draws none of its
+			// own, so a pointer over the strip belongs to the editor and is
+			// not handed to the host.
+			m.updateStatusHover(msg)
+			if m.hoverIcon != actNone || m.hoverSplit != actNone {
+				return m, nil
+			}
 			if m.Host != nil && m.Host.Motion != nil {
 				return m, m.Host.Motion(msg)
 			}
@@ -1506,7 +1516,21 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.openGitPanel()
 		}
 		return nil
-	case "f1", "ctrl+e":
+	case "f1":
+		m.helpOpen = !m.helpOpen
+		if m.helpOpen {
+			m.helpScroll = 0
+		}
+		return nil
+	case "ctrl+e":
+		// In the embedded workspace ctrl+e is the toggle: the key that opened
+		// the editor sends it back to the chat, and help left open behind the
+		// transcript would resurface on the next visit — so it folds on the
+		// way out. Standalone, the key keeps its help binding next to F1.
+		if m.Embed {
+			m.helpOpen = false
+			return func() tea.Msg { return ToggleEditorMsg{} }
+		}
 		m.helpOpen = !m.helpOpen
 		if m.helpOpen {
 			m.helpScroll = 0
@@ -1925,14 +1949,6 @@ func (m *Model) ClosePanels() {
 	m.gitOpen = false
 	m.gitFocus = false
 	m.gitDiffFocused = false
-}
-
-// OpenTree shows the project tree with the focus on it — the editor-mode
-// default when the host enters with every panel closed.
-func (m *Model) OpenTree() {
-	if !m.treeVisible {
-		m.toggleTree()
-	}
 }
 
 // PanelState reports the workspace chrome's flags: which panels are open and

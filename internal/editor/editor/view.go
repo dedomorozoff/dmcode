@@ -101,6 +101,26 @@ var helpEntries = []helpEntry{
 	{"Ctrl+Q / Ctrl+C", "help.quit"},
 }
 
+// helpRows adapts the static table to the embedding: in dmcode's workspace
+// ctrl+e is the chat toggle, so the way out is named by the same key that
+// opened the editor and the help binding stays F1 alone.
+func (m Model) helpRows() []helpEntry {
+	if !m.Embed {
+		return helpEntries
+	}
+	rows := make([]helpEntry, len(helpEntries))
+	copy(rows, helpEntries)
+	for i := range rows {
+		switch rows[i].desc {
+		case "help.to_chat":
+			rows[i].keys = "Ctrl+E / Ctrl+Q / ▣ icon"
+		case "help.toggle_help":
+			rows[i].keys = "F1"
+		}
+	}
+	return rows
+}
+
 func (m Model) finderExtraRows() int {
 	if !m.finderOpen {
 		return 0
@@ -833,13 +853,14 @@ func padTo(s string, w int) string {
 }
 
 func (m Model) helpPanel(h int) []string {
-	all := make([]string, 0, len(helpEntries)+1)
+	entries := m.helpRows()
+	all := make([]string, 0, len(entries)+1)
 	title := statusHiStyle.Render(m.t("help.title")) + " " + hintStyle.Render(m.t("help.close_hint"))
 	if m.helpMaxScroll() > 0 {
 		title += hintStyle.Render(m.t("help.scroll_hint"))
 	}
 	all = append(all, title)
-	for _, e := range helpEntries {
+	for _, e := range entries {
 		if e.keys == "" {
 			all = append(all, "")
 			continue
@@ -1813,6 +1834,9 @@ func (m Model) statusBar() string {
 		hint = m.t("status.f1_help")
 		if m.layout != splitNone {
 			hint += m.t("status.f8_pane")
+		}
+		if m.Embed {
+			hint += m.t("status.embed_chat")
 		}
 	}
 	rightBar := hintStyle.Render(hint) + langStyle.Render(langTag) + statusStyle.Render(fileInfo) + statusStyle.Render(right)

@@ -49,6 +49,37 @@ func TestHelpSwallowsTyping(t *testing.T) {
 	}
 }
 
+func TestEmbeddedCtrlETogglesToTheChat(t *testing.T) {
+	// Standalone: ctrl+e keeps toggling help, next to F1.
+	m := New()
+	m.width, m.height = 80, 24
+	m = press(m, tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if !m.helpOpen {
+		t.Fatal("standalone ctrl+e must open help")
+	}
+
+	// Embedded: ctrl+e asks the host to flip back to the chat, and the help
+	// panel folds on the way out instead of resurfacing behind the transcript.
+	e := New()
+	e.width, e.height = 80, 24
+	e.Embed = true
+	e = press(e, tea.KeyPressMsg{Code: tea.KeyF1})
+	if !e.helpOpen {
+		t.Fatal("setup: f1 must open help")
+	}
+	nm, cmd := e.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
+	if msg, ok := cmd().(ToggleEditorMsg); !ok {
+		t.Fatalf("embedded ctrl+e yielded %T, want ToggleEditorMsg", msg)
+	}
+	em, ok := nm.(Model)
+	if !ok {
+		t.Fatalf("Update returned %T, want editor.Model", nm)
+	}
+	if em.helpOpen {
+		t.Fatal("embedded ctrl+e must fold the help on the way out")
+	}
+}
+
 func TestStatusBarShowsHint(t *testing.T) {
 	m := New()
 	m.width, m.height = 80, 24

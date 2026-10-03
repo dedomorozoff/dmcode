@@ -180,6 +180,31 @@ func TestStatusIconHiddenInPromptMode(t *testing.T) {
 	}
 }
 
+func TestChatModeMotionTracksTheStatusIcons(t *testing.T) {
+	dir := t.TempDir()
+	chdir(t, t.TempDir())
+	a := writeTemp(t, dir, "a.txt", "alpha\n")
+	m := New(a)
+	m.width, m.height = 100, 24
+	m.Embed, m.Chat = true, true
+
+	// A callout left over from an editor-mode visit (the ▣ click that flipped
+	// the mode, for one) must clear on the first motion over the chat area —
+	// chat mode never draws one of its own, so a frozen tip sits over the
+	// transcript with nothing to remove it.
+	nm, _ := m.Update(tea.MouseMotionMsg{X: 10, Y: 5})
+	if em := nm.(Model); em.hoverIcon != actNone {
+		t.Fatalf("motion over the chat must clear a stale hover, got %v", em.hoverIcon)
+	}
+
+	// Over the strip the hover belongs to the editor: it sets and holds.
+	x := m.statusIconX(actGit)
+	nm, _ = m.Update(tea.MouseMotionMsg{X: x, Y: m.statusBarRow()})
+	if em := nm.(Model); em.hoverIcon != actGit {
+		t.Fatalf("motion over the strip must set the hover, got %v", em.hoverIcon)
+	}
+}
+
 func TestDockedPanelsHaveLeadingDivider(t *testing.T) {
 	m := New()
 	m.width, m.height = 80, 40

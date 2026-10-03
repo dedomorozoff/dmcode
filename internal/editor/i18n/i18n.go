@@ -126,6 +126,7 @@ var enCatalog = map[string]string{
 	// Status bar
 	"status.f1_help":    "F1 help ",
 	"status.f8_pane":    "F8 pane ",
+	"status.embed_chat": "Ctrl+E chat ",
 	"status.lncol":      "Ln %d, Col %d ",
 	"status.tip_editor": "Editor mode (Ctrl+E)",
 	"status.tip_tree":   "Project tree (Ctrl+B)",
@@ -423,6 +424,7 @@ var ruCatalog = map[string]string{
 	// Status bar
 	"status.f1_help":    "F1 справка ",
 	"status.f8_pane":    "F8 панель ",
+	"status.embed_chat": "Ctrl+E чат ",
 	"status.lncol":      "Стр %d, Кол %d ",
 	"status.tip_editor": "Редактор (Ctrl+E)",
 	"status.tip_tree":   "Дерево проекта (Ctrl+B)",
