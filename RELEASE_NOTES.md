@@ -57,6 +57,17 @@ Three fixes from the workspace's first days, no new surface:
   tracking the icon strip on mouse motion, so a callout left over from the
   editor mode clears on the first move instead of sitting on the screen with
   nothing to remove it.
+- `ctrl+q` quits dmcode from the chat — the key the sidebar has advertised
+  all along actually works now. Inside the editor it still means "back to
+  the chat"; from the chat the key ends the program, the way `ctrl+c` did
+  on an empty prompt.
+- A multi-cursor crash reported from the field is fixed: a line join moved
+  the lines under the cursors below it without moving the cursors, and the
+  next backspace sliced past the end of an empty line, taking the whole
+  session down. Joins now run strictly bottom-up regardless of cursor
+  order — which also un-skips the higher of two joins — and shift every
+  cursor at or below the joined line; a stale cursor is clamped instead of
+  panicking.
 
 ## What's new since v0.1.7
 
