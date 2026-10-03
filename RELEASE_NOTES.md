@@ -83,6 +83,9 @@ Three fixes from the workspace's first days, no new surface:
 - `/new` and `/sessions` now close the workspace's clean tabs, so the
   next `ctrl+e` starts from a bare editor rather than the previous
   conversation's files. A tab with unsaved typing survives the reset.
+- A fresh program start opens a bare editor too: the workspace no longer
+  restores the tabs the last run saved. The standalone editor keeps its
+  session restore.
 
 ## What's new since v0.1.7
 
