@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,6 +27,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
+	"github.com/dedomorozoff/dmcode/internal/editor/syntax"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/imgprev"
 	"github.com/dedomorozoff/dmcode/internal/llm"
@@ -47,6 +50,7 @@ const (
 	kindAgent
 	kindTool
 	kindToolRes
+	kindDiff
 	kindSys
 	kindErr
 	kindLogo
@@ -73,6 +77,8 @@ func kindName(k lineKind) string {
 		return "tool"
 	case kindToolRes:
 		return "toolres"
+	case kindDiff:
+		return "diff"
 	case kindSys:
 		return "sys"
 	case kindErr:
@@ -97,6 +103,11 @@ var (
 	cWarning = lipgloss.Color("11")
 	cBgBar   = lipgloss.Color("236")
 	cFgBar   = lipgloss.Color("253")
+	// The diff block's row backgrounds, matched to the editor's own diff
+	// palette: a dim green or red wash under the syntax colours reads as
+	// "this changed" without drowning the code out.
+	cDiffAddBg = lipgloss.Color("22")
+	cDiffDelBg = lipgloss.Color("52")
 
 	styleUser    = lipgloss.NewStyle().Bold(true).Foreground(cUser)
 	styleAgent   = lipgloss.NewStyle().Foreground(cAgent)
@@ -244,6 +255,7 @@ type toolCallMsg struct {
 type toolResMsg struct {
 	name   string
 	output string
+	diff   string
 }
 type turnDoneMsg struct{ err error }
 
@@ -452,6 +464,11 @@ type uiModel struct {
 	// image preview is drawn. It is recorded rather than asked for at draw time
 	// because the renderer is the only thing that knows it.
 	profile colorprofile.Profile
+	// synDiff is the diff block's highlighter, created lazily when the first
+	// change block is drawn. The editor's own highlighter is preferred — same
+	// theme the user already reads code in — and survives even if the editor
+	// is gone.
+	synDiff *syntax.Highlighter
 	// watchedPath is the picture path last looked at in the input. It exists so
 	// that a path already attached is not attached again on every keystroke — the
 	// input is watched on each one, and re-decoding the same file for each is a
@@ -472,6 +489,22 @@ type uiModel struct {
 	// direct flip of m.ed — so the flip is deferred until the copy lands.
 	pendingEditor bool
 	winW, winH    int
+}
+
+// diffHighlighter returns the highlighter the transcript's change blocks are
+// coloured with. The editor's own comes first — the theme the user already
+// reads code in — and a standalone one is created otherwise, so a diff drawn
+// before the editor exists still gets its colours.
+func (m *uiModel) diffHighlighter() *syntax.Highlighter {
+	if m.ed != nil {
+		if h := m.ed.Highlighter(); h != nil {
+			return h
+		}
+	}
+	if m.synDiff == nil {
+		m.synDiff = syntax.New("")
+	}
+	return m.synDiff
 }
 
 // cachedLine holds the rendered rows of one history line. It is index-aligned
@@ -1666,6 +1699,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pre-wrapping here would both double the prefix and measure against a
 		// width that ignores it.
 		m.history = append(m.history, line{kindToolRes, msg.output})
+		if msg.diff != "" {
+			m.history = append(m.history, line{kindDiff, msg.diff})
+		}
 		m.historyDirty = true
 	case modelsListMsg:
 		if msg.err != nil {
@@ -2146,6 +2182,13 @@ type transcriptRow struct {
 	// the picture's own and reset it at the end of the row — a preview of a
 	// screenshot comes out tinted and half its colours replaced by the default.
 	prestyled bool
+	// diff marks a change block (kindDiff): its rows are coloured per line by
+	// diffRows before wrapping, so they ride through unstyled, but the block
+	// keeps the transcript's left margin like the tool result it belongs to.
+	diff bool
+	// syn is the highlighter the diff block colours its code rows with. The
+	// row style fills it in; nil means the plain, unhighlighted path.
+	syn *syntax.Highlighter
 	// captionLast marks a block whose final row is a caption rather than part of
 	// the picture, so a block too wide to draw can fall back to that row instead of
 	// disappearing. The logo has no such row and so keeps being dropped whole.
@@ -2160,6 +2203,12 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 		return transcriptRow{style: styleTool, first: "⏺ ", rest: "  "}
 	case kindToolRes:
 		return transcriptRow{style: styleToolRes, first: "  ⎿ ", rest: "    "}
+	case kindDiff:
+		// The diff colours its own rows: the styles are applied per row by
+		// diffRows in rowRows, so the block rides through as prestyled — but it
+		// is not verbatim, it keeps the transcript's left margin like the
+		// tool result it belongs to.
+		return transcriptRow{style: lipgloss.NewStyle(), first: "    ", rest: "    ", prestyled: true, diff: true, syn: m.diffHighlighter()}
 	case kindAgent:
 		return transcriptRow{style: styleAgent, markdown: true}
 	case kindSys:
@@ -2197,6 +2246,9 @@ func rowRows(text string, width int, row transcriptRow) []string {
 		}
 		return rows
 	}
+	if row.diff {
+		return diffRows(text, width, row)
+	}
 	if !row.verbatim {
 		return wrapIndent(text, width, row.first, row.rest)
 	}
@@ -2218,6 +2270,166 @@ func rowRows(text string, width int, row transcriptRow) []string {
 		}
 	}
 	return rows
+}
+
+// diffRow is one line of a change block as the renderer sees it: the marker,
+// the line's position in the file (0 when the row carries none — the tail of
+// a capped block), and the code itself. The wire format is "-12: code" /
+// "+12: code"; the colon keeps a code line that begins with digits from
+// being read as a number.
+type diffRow struct {
+	mark string
+	num  int
+	code string
+}
+
+// parseDiffRow reads one DiffBlock line. A row without the number shape
+// (the tail, or a marker-only row) keeps its whole tail as code.
+func parseDiffRow(line string) diffRow {
+	if line == "" {
+		return diffRow{}
+	}
+	mark, rest := "", line
+	if line[0] == '+' || line[0] == '-' {
+		mark, rest = line[:1], line[1:]
+	}
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(rest) && rest[i] == ':' {
+		if n, err := strconv.Atoi(rest[:i]); err == nil {
+			return diffRow{mark: mark, num: n, code: strings.TrimPrefix(rest[i+1:], " ")}
+		}
+	}
+	return diffRow{mark: mark, code: rest}
+}
+
+// diffRows renders a change block as a piece of the editor: a dim line
+// number in the gutter, then the code — highlighted with the editor's theme
+// when the language is one it knows, the +/- rows carrying a dim green or
+// red background over the theme's own foreground, the way a git pager does.
+// Numbers come from the block itself: old-file positions for removals,
+// new-file positions for additions. Rows the highlighter does not cover are
+// wrapped like ordinary text; highlighted rows are ANSI-truncated instead,
+// because wrapping measured plain text cannot survive the escapes the theme
+// paints with.
+func diffRows(text string, width int, row transcriptRow) []string {
+	avail := width - max(ansi.StringWidth(row.first), ansi.StringWidth(row.rest))
+	if avail < 1 {
+		avail = 1
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	path := ""
+	if len(lines) > 0 && strings.HasPrefix(lines[0], "── ") {
+		path = strings.TrimPrefix(lines[0], "── ")
+		lines = lines[1:]
+	}
+
+	parsed := make([]diffRow, len(lines))
+	numw := 0
+	for i, l := range lines {
+		parsed[i] = parseDiffRow(l)
+		if p := len(strconv.Itoa(parsed[i].num)); parsed[i].num > 0 && p > numw {
+			numw = p
+		}
+	}
+	if numw < 3 {
+		numw = 3
+	}
+
+	var out []string
+	// The header wraps like plain text: it is not code, and the file name is
+	// the one thing in the block that must survive any width.
+	for j, r := range wrapCells("── "+path, avail) {
+		indent := row.rest
+		if j == 0 {
+			indent = row.first
+		}
+		out = append(out, styleHint.Render(indent+r))
+	}
+
+	for g := 0; g < len(parsed); {
+		mark := parsed[g].mark
+		j := g
+		for j < len(parsed) && parsed[j].mark == mark {
+			j++
+		}
+		out = append(out, diffGroup(mark, parsed[g:j], path, avail, numw, row)...)
+		g = j
+	}
+	return out
+}
+
+// diffGroup renders one run of same-marker rows. Consecutive rows are
+// highlighted as one text so a string literal spanning lines keeps its
+// colour across the block.
+func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row transcriptRow) []string {
+	st, bg := styleHint, lipgloss.Color("")
+	switch mark {
+	case "+":
+		st, bg = styleAdd, cDiffAddBg
+	case "-":
+		st, bg = styleDel, cDiffDelBg
+	}
+
+	// The gutter: the line's position, right-aligned, dim — a number the
+	// eye can anchor on without competing with the code beside it.
+	gutter := func(n int, dim bool) string {
+		s := fmt.Sprintf("%*d ", numw, n)
+		if n <= 0 {
+			s = strings.Repeat(" ", numw+1)
+		}
+		if dim {
+			s = styleHint.Render(s)
+		}
+		return s
+	}
+
+	var out []string
+	if row.syn == nil || syntax.Lang(path) == "" {
+		// No highlighter, or a language chroma does not know: the plain
+		// path — wrapped like ordinary text, code budget shrunk by the
+		// gutter the numbers now take.
+		codeAvail := avail - (numw + 1)
+		if codeAvail < 1 {
+			codeAvail = 1
+		}
+		for _, p := range rows {
+			code := p.code
+			if p.mark != "" {
+				code = p.mark + " " + p.code
+			}
+			for j, r := range wrapCells(code, codeAvail) {
+				indent := row.rest
+				gut := gutter(p.num, true)
+				if j > 0 {
+					indent, gut = row.rest, styleHint.Render(strings.Repeat(" ", numw+1))
+				}
+				if j == 0 {
+					indent = row.first
+				}
+				out = append(out, st.Render(indent)+gut+st.Render(r))
+			}
+		}
+		return out
+	}
+
+	code := make([]string, len(rows))
+	for i, p := range rows {
+		code[i] = p.code
+	}
+	styled := row.syn.HighlightCode(path, strings.Join(code, "\n"), func(base lipgloss.Style) lipgloss.Style {
+		return base.Background(bg)
+	})
+	for i, p := range rows {
+		line := ""
+		if i < len(styled) {
+			line = ansi.Truncate(styled[i], avail-(numw+1)-2, "…")
+		}
+		out = append(out, row.first+gutter(p.num, true)+st.Render(p.mark+" ")+line)
+	}
+	return out
 }
 
 // chatIndent is the small left margin every transcript row is drawn with: a
@@ -2277,7 +2489,9 @@ func (m *uiModel) renderHistory() string {
 		// column of the image that is out of step with the rest.
 		margin := strings.Repeat(" ", chatIndent)
 		for _, r := range rows {
-			if row.prestyled {
+			// Only full-bleed art (the image preview) skips the margin; a diff
+			// block carries its own colours but belongs to the transcript's page.
+			if row.prestyled && row.verbatim {
 				b.WriteString(r + "\n")
 				continue
 			}
@@ -3437,7 +3651,8 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 					args, _ := json.Marshal(tp.call.Args)
 					p.Send(toolCallMsg{name: tp.call.Name, args: truncate(string(args), 160)})
 				case tp.resp != nil:
-					p.Send(toolResMsg{name: tp.resp.Name, output: renderToolResponse(tp.resp)})
+					summary, diff := renderToolResponse(tp.resp)
+					p.Send(toolResMsg{name: tp.resp.Name, output: summary, diff: diff})
 				}
 			}
 		}
@@ -3629,12 +3844,24 @@ func highlightCells(row string, from, to int) string {
 func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 
 // renderToolResponse renders a tool result for the transcript.
-func renderToolResponse(fr *genai.FunctionResponse) string {
-	b, err := json.Marshal(fr.Response)
-	if err != nil {
-		return fmt.Sprint(fr.Response)
+// renderToolResponse renders a tool result for the transcript. A write that
+// came with a diff (write_file, edit_file) has that diff pulled out of the
+// summary JSON: the transcript draws it coloured under the result, and the
+// JSON line stays a one-liner instead of an escaped block.
+func renderToolResponse(fr *genai.FunctionResponse) (summary, diff string) {
+	resp := fr.Response
+	if m := resp; m != nil {
+		if d, ok := m["diff"].(string); ok && d != "" {
+			diff = d
+			resp = maps.Clone(m)
+			delete(resp, "diff")
+		}
 	}
-	return truncate(string(b), 600)
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Sprint(resp), diff
+	}
+	return truncate(string(b), 600), diff
 }
 
 // truncate cuts s to at most n terminal cells. Counting cells instead of bytes

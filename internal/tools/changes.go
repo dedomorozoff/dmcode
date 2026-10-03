@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"sort"
 	"strings"
@@ -153,6 +154,54 @@ func splitLines(s string) []string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.TrimSuffix(s, "\n")
 	return strings.Split(s, "\n")
+}
+
+// diffMaxRows caps the per-write diff the transcript draws. A model replacing
+// a whole file in one write_file can produce hundreds of lines, and a diff
+// block that swallows the transcript defeats the point of showing it.
+const diffMaxRows = 40
+
+// DiffBlock renders what one write changed, the way the transcript shows it:
+// the file name on a header row, then the removed and the added lines with
+// their position in the file and a -/+ marker — line numbers from the old
+// text for removals and from the new one for additions, which is what makes
+// a replacement read as the same line twice. The block is a piece of the
+// editor on the transcript: numbers in the gutter, code beside them. It is
+// the view of this single call — before against after — not the session
+// tally's net change against its baseline. The output is plain text; the
+// transcript's renderer owns the colours. Empty when the two versions agree.
+func DiffBlock(path, before, after string) string {
+	b := splitLines(before)
+	a := splitLines(after)
+	pre := 0
+	for pre < len(b) && pre < len(a) && b[pre] == a[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(b)-pre && suf < len(a)-pre && b[len(b)-1-suf] == a[len(a)-1-suf] {
+		suf++
+	}
+	del := b[pre : len(b)-suf]
+	add := a[pre : len(a)-suf]
+	if len(del) == 0 && len(add) == 0 {
+		return ""
+	}
+	rows := make([]string, 0, len(del)+len(add)+2)
+	rows = append(rows, "── "+path)
+	oldN, newN := pre+1, pre+1
+	for _, l := range del {
+		rows = append(rows, fmt.Sprintf("-%d: %s", oldN, l))
+		oldN++
+	}
+	for _, l := range add {
+		rows = append(rows, fmt.Sprintf("+%d: %s", newN, l))
+		newN++
+	}
+	if len(rows)-1 > diffMaxRows {
+		rows = rows[:diffMaxRows+1]
+		rows = append(rows, fmt.Sprintf("… (+%d more lines)", len(del)+len(add)-diffMaxRows))
+	}
+	return strings.Join(rows, "\n")
 }
 
 // readIfExists returns a file's content, or "" when it does not exist. A read

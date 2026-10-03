@@ -1958,6 +1958,11 @@ func (m Model) PanelState() (termOpen, treeVisible, termFocus bool) {
 	return m.termOpen, m.treeVisible, m.termFocus
 }
 
+// Highlighter exposes the model's syntax highlighter for a host that renders
+// code of its own — dmcode's transcript colours its diff blocks with the same
+// theme the editor uses. Nil before New ran.
+func (m *Model) Highlighter() *syntax.Highlighter { return m.syn }
+
 // Shutdown stops the editor's background processes (the terminal's shell
 // above all) and persists the session, without ending anything else. The
 // host program calls it when the whole session ends.

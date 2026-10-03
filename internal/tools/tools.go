@@ -334,7 +334,8 @@ type writeFileArgs struct {
 	Content string `json:"content"`
 }
 type writeFileResult struct {
-	BytesWritten int `json:"bytes_written"`
+	BytesWritten int    `json:"bytes_written"`
+	Diff         string `json:"diff,omitempty"`
 }
 
 func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
@@ -358,10 +359,11 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 			return writeFileResult{}, err
 		}
 	}
-	if err := writeFileAtomic(path, []byte(in.Content)); err != nil {
+	before, err := writeFileAtomic(path, []byte(in.Content))
+	if err != nil {
 		return writeFileResult{}, err
 	}
-	return writeFileResult{BytesWritten: len(in.Content)}, nil
+	return writeFileResult{BytesWritten: len(in.Content), Diff: DiffBlock(in.Path, before, in.Content)}, nil
 }
 
 // writeFileAtomic writes data through a temporary file in the target directory
@@ -373,7 +375,7 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 // edit_file both land here — so it is where the session's change tally is kept.
 // Doing it here rather than in each tool means no write can reach disk without
 // being counted.
-func writeFileAtomic(path string, data []byte) error {
+func writeFileAtomic(path string, data []byte) (string, error) {
 	// What is being replaced, read before the rename. A read failure other than
 	// "not there" is not fatal to the write: the tool's job is to write, and
 	// refusing to overwrite a file that cannot be read would be a worse outcome
@@ -383,24 +385,24 @@ func writeFileAtomic(path string, data []byte) error {
 
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".dmcode-*")
 	if err != nil {
-		return err
+		return before, err
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return err
+		return before, err
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return err
+		return before, err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		os.Remove(tmpName)
-		return err
+		return before, err
 	}
 	recordChange(path, before, string(data))
-	return nil
+	return before, nil
 }
 
 type editFileArgs struct {
@@ -410,7 +412,8 @@ type editFileArgs struct {
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
 type editFileResult struct {
-	Replacements int `json:"replacements"`
+	Replacements int    `json:"replacements"`
+	Diff         string `json:"diff,omitempty"`
 }
 
 func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
@@ -432,18 +435,21 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 
 	// 1. Try exact match
 	write := func(content string) (editFileResult, error) {
-		if err := writeFileAtomic(path, []byte(content)); err != nil {
+		before, err := writeFileAtomic(path, []byte(content))
+		if err != nil {
 			return editFileResult{}, err
 		}
-		return editFileResult{}, nil
+		return editFileResult{Diff: DiffBlock(in.Path, before, content)}, nil
 	}
 	if in.ReplaceAll {
 		n := strings.Count(src, in.OldString)
 		if n > 0 {
-			if _, err := write(strings.ReplaceAll(src, in.OldString, in.NewString)); err != nil {
+			res, err := write(strings.ReplaceAll(src, in.OldString, in.NewString))
+			if err != nil {
 				return editFileResult{}, err
 			}
-			return editFileResult{Replacements: n}, nil
+			res.Replacements = n
+			return res, nil
 		}
 	} else {
 		idx := strings.Index(src, in.OldString)
@@ -451,10 +457,12 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if strings.Index(src[idx+1:], in.OldString) >= 0 {
 				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
 			}
-			if _, err := write(src[:idx] + in.NewString + src[idx+len(in.OldString):]); err != nil {
+			res, err := write(src[:idx] + in.NewString + src[idx+len(in.OldString):])
+			if err != nil {
 				return editFileResult{}, err
 			}
-			return editFileResult{Replacements: 1}, nil
+			res.Replacements = 1
+			return res, nil
 		}
 	}
 
@@ -471,10 +479,12 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if _, err := write(normSrc); err != nil {
+			res, err := write(normSrc)
+			if err != nil {
 				return editFileResult{}, err
 			}
-			return editFileResult{Replacements: n}, nil
+			res.Replacements = n
+			return res, nil
 		}
 	} else {
 		idx := strings.Index(normSrc, normOld)
@@ -486,10 +496,12 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if _, err := write(normSrc); err != nil {
+			res, err := write(normSrc)
+			if err != nil {
 				return editFileResult{}, err
 			}
-			return editFileResult{Replacements: 1}, nil
+			res.Replacements = 1
+			return res, nil
 		}
 	}
 
@@ -504,16 +516,20 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 		return editFileResult{}, err
 	}
 	if count == 1 {
-		if _, err := write(out); err != nil {
+		res, err := write(out)
+		if err != nil {
 			return editFileResult{}, err
 		}
-		return editFileResult{Replacements: 1}, nil
+		res.Replacements = 1
+		return res, nil
 	}
 	if count > 1 && in.ReplaceAll {
-		if _, err := write(out); err != nil {
+		res, err := write(out)
+		if err != nil {
 			return editFileResult{}, err
 		}
-		return editFileResult{Replacements: count}, nil
+		res.Replacements = count
+		return res, nil
 	}
 	if count > 1 {
 		return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)

@@ -77,6 +77,51 @@ func (h *Highlighter) getStyle(tt chroma.TokenType) lipgloss.Style {
 	return res
 }
 
+// HighlightCode tokenizes text with the lexer for filename and renders it as
+// styled rows, one per source line. decorate, when not nil, restyles every
+// segment — the transcript's diff view adds its own background this way
+// without losing the theme's colours. Empty input comes back as one empty
+// row; the input's trailing newline does not produce one.
+func (h *Highlighter) HighlightCode(filename, text string, decorate func(lipgloss.Style) lipgloss.Style) []string {
+	text = strings.TrimSuffix(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	if text == "" {
+		return []string{""}
+	}
+	lexer := lexers.Match(filename)
+	if lexer == nil {
+		lexer = lexers.Match(filepath.Base(filename))
+	}
+	if lexer == nil {
+		lexer = lexers.Analyse(text)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	iterator, err := chroma.Coalesce(lexer).Tokenise(nil, text)
+	if err != nil {
+		return nil
+	}
+	rows := []strings.Builder{{}}
+	for _, token := range iterator.Tokens() {
+		st := h.getStyle(token.Type)
+		if decorate != nil {
+			st = decorate(st)
+		}
+		segs := strings.Split(token.Value, "\n")
+		for i, seg := range segs {
+			if i > 0 {
+				rows = append(rows, strings.Builder{})
+			}
+			rows[len(rows)-1].WriteString(st.Render(seg))
+		}
+	}
+	out := make([]string, len(rows))
+	for i := range rows {
+		out[i] = rows[i].String()
+	}
+	return out
+}
+
 // Lang returns the short language tag for a filename (chroma's first alias,
 // e.g. "go", "php", "python"), or "" when the file type is unknown/plain
 // text. Used for the status-bar language indicator and DAP auto-detection.

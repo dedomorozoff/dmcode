@@ -3,6 +3,8 @@ package tools
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -49,13 +51,13 @@ func TestChangesNetOutAcrossWrites(t *testing.T) {
 
 	// Two edits to the same line: the file ends up differing from the original by
 	// exactly one line, whatever the agent went through on the way.
-	if err := writeFileAtomic(p, []byte("one\nTWO\nthree\n")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("one\nTWO\nthree\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFileAtomic(p, []byte("one\nTWO!\nthree\n")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("one\nTWO!\nthree\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFileAtomic(p, []byte("one\ntwo\nthree\nfour\n")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("one\ntwo\nthree\nfour\n")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -76,10 +78,10 @@ func TestChangesCountNewFiles(t *testing.T) {
 	ResetChanges()
 	t.Cleanup(ResetChanges)
 
-	if err := writeFileAtomic(filepath.Join(dir, "n.txt"), []byte("a\nb\n")); err != nil {
+	if _, err := writeFileAtomic(filepath.Join(dir, "n.txt"), []byte("a\nb\n")); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFileAtomic(filepath.Join(dir, "m.txt"), []byte("c\n")); err != nil {
+	if _, err := writeFileAtomic(filepath.Join(dir, "m.txt"), []byte("c\n")); err != nil {
 		t.Fatal(err)
 	}
 	got := Changes()
@@ -99,14 +101,51 @@ func TestUnchangedFileIsNotCounted(t *testing.T) {
 	t.Cleanup(ResetChanges)
 
 	p := filepath.Join(dir, "same.txt")
-	if err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
 		t.Fatal(err)
 	}
 	ResetChanges()
-	if err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
 		t.Fatal(err)
 	}
 	if got := Changes(); got.Files != 0 {
 		t.Errorf("an identical rewrite counted as %d changed files", got.Files)
+	}
+}
+
+func TestDiffBlockShowsTheChangedLines(t *testing.T) {
+	got := DiffBlock("src/app.go", "a\nb\nc\n", "a\nB\nc\n")
+	want := "── src/app.go\n-2: b\n+2: B"
+	if got != want {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestDiffBlockEmptyWhenUnchanged(t *testing.T) {
+	if d := DiffBlock("f", "same\n", "same\n"); d != "" {
+		t.Fatalf("unchanged files must not produce a diff, got %q", d)
+	}
+}
+
+func TestDiffBlockNewFileIsAllAdditions(t *testing.T) {
+	got := DiffBlock("n.txt", "", "a\nb\n")
+	want := "── n.txt\n+1: a\n+2: b"
+	if got != want {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestDiffBlockCapsTheRows(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 50; i++ {
+		lines = append(lines, strconv.Itoa(i))
+	}
+	got := DiffBlock("big.txt", "", strings.Join(lines, "\n")+"\n")
+	rows := strings.Split(got, "\n")
+	if len(rows) != diffMaxRows+2 {
+		t.Fatalf("rows = %d, want header + %d + the tail", len(rows), diffMaxRows)
+	}
+	if !strings.Contains(rows[len(rows)-1], "+10 more") {
+		t.Fatalf("tail %q does not name the remaining lines", rows[len(rows)-1])
 	}
 }

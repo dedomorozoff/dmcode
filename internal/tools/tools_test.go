@@ -218,7 +218,7 @@ func TestWriteFileAtomicOverwrite(t *testing.T) {
 	if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeFileAtomic(p, []byte("new content")); err != nil {
+	if _, err := writeFileAtomic(p, []byte("new content")); err != nil {
 		t.Fatalf("overwrite failed: %v", err)
 	}
 	data, _ := os.ReadFile(p)
