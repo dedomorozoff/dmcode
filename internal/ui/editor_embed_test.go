@@ -109,6 +109,35 @@ func TestEditorCtrlEReturnsToChatMode(t *testing.T) {
 	}
 }
 
+// TestCtrlQQuitsFromTheChat pins the exit key: ctrl+q in the chat ends the
+// program — the sidebar has advertised it all along — while inside the
+// editor the same key still only returns to the chat.
+func TestCtrlQQuitsFromTheChat(t *testing.T) {
+	m := newTurnModel(t)
+	m.workDir = t.TempDir()
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("ctrl+q in the chat must produce a quit command")
+	}
+	if msg, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("ctrl+q in the chat yielded %T, want QuitMsg", cmd())
+	} else {
+		_ = msg
+	}
+
+	// In the editor the key is the chat toggle, not an exit.
+	_ = m.openEditor()
+	_, cmd = m.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
+	if msg, ok := cmd().(editor.CloseEditorMsg); !ok {
+		t.Fatalf("ctrl+q in the editor yielded %T, want CloseEditorMsg", cmd())
+	} else {
+		if _, _ = m.Update(msg); !m.ed.Chat {
+			t.Fatal("ctrl+q in the editor must return to the chat")
+		}
+	}
+}
+
 // TestWorkspaceIsUpFromStart pins the startup promise: the workspace exists
 // from Init — the tree, the git panel and the terminal are one key or one
 // status-bar icon away — but every panel starts closed and the first screen

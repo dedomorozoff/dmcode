@@ -982,7 +982,7 @@ func (m *uiModel) printWelcome() {
 		line{kindSys, ""},
 		line{kindLogo, logo},
 		line{kindSys, ""},
-		line{kindSys, i18n.T("ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop")},
+		line{kindSys, i18n.T("ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · ctrl+q quit · up/down history · esc stop")},
 		line{kindSys, ""})
 }
 
@@ -1294,6 +1294,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.quitCmd()
+		case "ctrl+q":
+			// The chat's quit. ctrl+c is taken by stopping a turn, so the
+			// program's exit gets its own key — one the sidebar already
+			// advertises. Inside the editor ctrl+q still means "back to the
+			// chat": the editor answers it with CloseEditorMsg before the
+			// chat ever sees the key.
+			return m, m.quitCmd()
 		case "ctrl+p":
 			m.palette = paletteState{open: true}
 			return m, nil
@@ -1420,7 +1427,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.quitCmd()
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
+					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
 					line{kindSys, i18n.T("ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
@@ -3770,11 +3777,13 @@ func (m *uiModel) sidebarView(height int) string {
 			row(styleSidebarLabel, i18n.T("HOTKEYS"))
 			row(styleHint, i18n.T(" ctrl+e  editor"))
 			row(styleHint, i18n.T(" ctrl+p  commands"))
-			row(styleHint, i18n.T(" ctrl+b  hide panel"))
+			row(styleHint, i18n.T(" ctrl+b  project panel"))
 			row(styleHint, i18n.T(" ctrl+y  copy reply"))
 			row(styleHint, i18n.T(" ctrl+z  undo last message"))
+			row(styleHint, i18n.T(" ctrl+q  quit"))
+			row(styleHint, i18n.T(" alt+t  terminal"))
 			row(styleHint, i18n.T(" tab     plan/act"))
-			row(styleHint, i18n.T("shift+tab yolo"))
+			row(styleHint, i18n.T(" shift+tab yolo"))
 			row(styleHint, i18n.T(" esc     stop turn"))
 			row(styleHint, i18n.T(" pgup/dn scroll"))
 		}

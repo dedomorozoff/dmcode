@@ -299,6 +299,7 @@ the agent is not going to ask before they stop watching.
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
 | `ctrl+z` | undo the last message (rewind) |
+| `ctrl+q` | quit dmcode (in the editor it returns to the chat first) |
 | `tab` | plan / act mode |
 | `shift+tab` | yolo mode on / off (act and plan keep their tools) |
 | `esc` | close the command list, or stop the current turn |
@@ -317,7 +318,8 @@ the chat back (`ctrl+q` does the same). The project tree waits for `ctrl+b`
 rather than opening itself.
 It is a real editor, not a viewer: syntax highlighting, a project tree, a git
 panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
-bookmarks, LSP completion and go-to-definition.
+bookmarks, multi-cursor editing (`alt+d`, `alt+click`), LSP completion and
+go-to-definition.
 
 The two modes share one screen rather than one window per thing. The transcript
 stays in the main area when the editor is closed, the panel toggles stay live in

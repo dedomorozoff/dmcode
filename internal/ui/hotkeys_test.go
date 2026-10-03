@@ -233,7 +233,8 @@ func TestNewShortcutsAreTranslated(t *testing.T) {
 	for _, s := range []string{
 		"clear the screen (ctrl+l)",
 		"start a new session, the old one is kept (ctrl+n)",
-		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session",
+		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit",
+		"ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · ctrl+q quit · up/down history · esc stop",
 	} {
 		if got := i18n.T(s); got == s {
 			t.Errorf("no Russian translation for %q", s)
