@@ -60,3 +60,31 @@ func TestCloseAllTabsDropsCleanKeepsDirty(t *testing.T) {
 		t.Fatal("the kept tab must still be dirty")
 	}
 }
+
+// TestEmbeddedNewDoesNotRestoreTheSession pins the fresh start: a standalone
+// editor picks up the tabs the last run saved, an embedded one — dmcode's
+// workspace — opens bare, because a new program run is a new conversation and
+// the host decides what is open.
+func TestEmbeddedNewDoesNotRestoreTheSession(t *testing.T) {
+	dir := t.TempDir()
+	f := writeTemp(t, dir, "doc.txt", "one\n")
+
+	standalone := New(dir, f)
+	standalone.root = dir
+	standalone.saveSession()
+
+	// Standalone: the saved tab comes back.
+	m := New(dir)
+	if len(m.tabs) != 1 || m.tabs[0].path != f {
+		t.Fatalf("standalone restore broken: tabs = %d", len(m.tabs))
+	}
+
+	// Embedded: a bare editor, no tabs from the last run.
+	e := NewEmbedded(dir)
+	if len(e.tabs) != 1 || e.tabs[0].path != "" {
+		t.Fatalf("embedded start must be bare, tabs = %d (path %q)", len(e.tabs), e.tabs[0].path)
+	}
+	if !e.Embed {
+		t.Fatal("NewEmbedded must mark the model embedded")
+	}
+}

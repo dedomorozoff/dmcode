@@ -494,10 +494,22 @@ func controlByteKey(r rune, mod tea.KeyMod) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: r + 96, Mod: mod | tea.ModCtrl}
 }
 
-func New(paths ...string) Model {
+// New builds the standalone editor: on start it restores the previous
+// session's tabs for the project root, and on exit it saves them.
+func New(paths ...string) Model { return newModel(false, paths...) }
+
+// NewEmbedded builds the editor for a host program — dmcode's workspace. The
+// editor's own session file does not apply: a fresh dmcode start opens on a
+// bare editor rather than the last run's tabs, and which files are open is
+// the host's business (OpenChangedTabs on entering the editor, CloseAllTabs
+// when the conversation changes).
+func NewEmbedded(paths ...string) Model { return newModel(true, paths...) }
+
+func newModel(embed bool, paths ...string) Model {
 	fe := make(chan string, 16)
 	m := Model{
 		g:                     unicodeGlyphs,
+		Embed:                 embed,
 		width:                 80,
 		height:                24,
 		expanded:              map[string]bool{},
@@ -531,9 +543,10 @@ func New(paths ...string) Model {
 
 	// Restore the previous session only when the user did not open specific
 	// files and a project root is known — an explicit file list takes
-	// precedence over the session.
+	// precedence over the session. An embedded editor never restores: the
+	// host decides what is open.
 	restoreActiveTab := -1
-	if len(files) == 0 && m.root != "" {
+	if !embed && len(files) == 0 && m.root != "" {
 		sessPath := session.DefaultPath(m.root)
 		if sessPath != "" {
 			if _, err := os.Stat(sessPath); err != nil {
@@ -2573,6 +2586,12 @@ func (m *Model) restoreCursors(cursors map[string]session.CursorPos) {
 }
 
 func (m *Model) saveSession() {
+	if m.Embed {
+		// The editor's own session file is a standalone-editor feature. The
+		// host decides what is open, and a host that never restores would
+		// otherwise leave a stale tab list behind for a standalone run.
+		return
+	}
 	var files []string
 	cursors := map[string]session.CursorPos{}
 	for _, t := range m.tabs {

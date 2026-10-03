@@ -688,8 +688,7 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 	if m.workDir != "" {
 		args = append(args, m.workDir)
 	}
-	ed := editor.New(args...)
-	ed.Embed = true
+	ed := editor.NewEmbedded(args...)
 	ed.Chat = true
 	ed.ApplyTerminalCompat()
 	// The panels start closed: the first screen is the chat, the panels are
