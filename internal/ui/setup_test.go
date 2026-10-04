@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -334,8 +335,12 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 }
 
 // Every option has to be readable in the overlay at the sizes people actually
-// use. A long label that gets cut off is an option that does not exist.
-func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
+// use, and the overlay has to fit the terminal. A short screen cannot hold every
+// provider at once, so the guarantee is that each one is either drawn or named
+// by the overflow marker: a list that quietly drops its bottom rows is the
+// failure worth guarding, and a label cut off mid-word reads as an option that
+// does not exist.
+func TestSetupOverlayAccountsForEveryOptionAndFits(t *testing.T) {
 	m := InitialModel(nil, nil, config.Provider{Label: "old", Model: "old-model", API: config.APIChat}, nil, nil, nil)
 	m.history = nil
 
@@ -344,12 +349,22 @@ func TestSetupOverlayShowsEveryOptionAndFits(t *testing.T) {
 		setupKeys{m: m}.type_("/setup").enter()
 		view := m.View().Content
 
+		shown := 0
 		for _, o := range config.SetupOptions() {
 			// Labels wrap, so check the first word that cannot be split.
-			head := strings.Fields(o.Label)[0]
-			if !strings.Contains(view, head) {
-				t.Errorf("%dx%d: %q is missing from the overlay:\n%s", size[0], size[1], head, view)
+			if strings.Contains(view, strings.Fields(o.Label)[0]) {
+				shown++
 			}
+		}
+		hidden := 0
+		if i := strings.Index(view, "↓ more "); i >= 0 {
+			if _, err := fmt.Sscanf(view[i+len("↓ more "):], "%d", &hidden); err != nil {
+				t.Errorf("%dx%d: the overflow marker carries no count: %v", size[0], size[1], err)
+			}
+		}
+		if total := len(config.SetupOptions()); shown+hidden != total {
+			t.Errorf("%dx%d: %d providers drawn and %d reported hidden, want %d accounted for:\n%s",
+				size[0], size[1], shown, hidden, total, view)
 		}
 		for i, l := range strings.Split(strings.TrimRight(view, "\n"), "\n") {
 			if w := ansi.StringWidth(l); w > m.width {

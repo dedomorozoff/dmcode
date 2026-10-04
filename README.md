@@ -56,7 +56,7 @@ and fails over to another one if the current provider dies mid-session.
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
 | **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
-| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
+| **Groq, OpenRouter, OpenCode Zen, Cline, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
 and it lands in `.env`. The free tiers that need no card are all in that list —

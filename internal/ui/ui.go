@@ -4642,9 +4642,14 @@ func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int
 		"",
 	}
 
+	// The head is measured rather than counted. The title shares its row with
+	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
+	// counted as three then leaves the panel one row taller than the screen it
+	// has to fit inside, and the bottom border falls off the bottom.
+	headRows := lipgloss.Height(stylePanel.Width(m.floatingWidth()).Render(strings.Join(head, "\n"))) - panelBorder
 	// One row is held back for the "still hidden" marker, so revealing it can
 	// never push the bottom border off the screen.
-	room := max(m.height-panelBorder-len(head)-1, 1)
+	room := max(m.height-panelBorder-headRows-1, 1)
 	total := len(entries)
 	for len(entries) > 0 && len(entries)-1 != sel && rowCount(entries) > room {
 		entries = entries[:len(entries)-1]

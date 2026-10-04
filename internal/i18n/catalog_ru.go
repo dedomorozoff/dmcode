@@ -205,6 +205,7 @@ var catalog = map[Lang]map[string]string{
 		"OpenRouter — free models (deepseek and others)":                             "OpenRouter — бесплатные модели (deepseek и др.)",
 		"Kilo — gateway with free models (kilo-auto/free, account key)":              "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)",
 		"OpenCode Zen — free models (nemotron, mimo, big-pickle)":                    "OpenCode Zen — бесплатные модели (nemotron, mimo, big-pickle)",
+		"Cline — gateway to Anthropic, OpenAI and Google models":                     "Cline — шлюз к моделям Anthropic, OpenAI и Google",
 		"Groq — free, fast, tool calling works":                                      "Groq — бесплатно, быстро, tool calling работает",
 		"GitHub Models — free with a GitHub token":                                   "GitHub Models — бесплатно по токену GitHub",
 		"Mistral — codestral, paid tier has a free slice":                            "Mistral — codestral, у платного тарифа есть бесплатная часть",

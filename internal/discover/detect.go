@@ -39,6 +39,7 @@ type keyedPreset struct {
 func keyedPresets() []keyedPreset {
 	return []keyedPreset{
 		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "big-pickle", config.APIResponses, "OpenCode Zen"},
+		{"CLINE_API_KEY", "https://api.cline.bot/api/v1", "anthropic/claude-sonnet-4-6", config.APIChat, "Cline"},
 		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", config.APIResponses, "Groq"},
 		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIResponses, "GitHub Models"},
 		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", config.APIResponses, "Mistral"},
