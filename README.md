@@ -167,6 +167,31 @@ refused and the error names both directories. `run_command`'s `work_dir` is
 checked the same way. The tools that open a file re-check the path after
 following symlinks, so a symlink planted inside the tree cannot reach out of it.
 
+## Coming back to a session
+
+A session is a file in `~/.dmcode/sessions`, and dmcode prints the command to
+reopen it when it exits:
+
+```
+dmcode: session sess-42 saved — resume it with:  dmcode -s sess-42
+```
+
+That line lands after the TUI is gone, so it is the one thing that survives the
+window closing. `-s` on its own resumes the newest session, which is what you want
+most of the time — "where I was" rather than a session you can name:
+
+```bash
+dmcode -s                # the most recent session
+dmcode -s sess-42       # that one
+dmcode -s -C ~/myapp    # resume and work somewhere else
+```
+
+The conversation comes back whole: the tail is printed before the first frame, so
+the session does not open empty beside a model that remembers everything. The tool
+calls, the results and every change block come back with it, drawn by the same code
+that drew them the first time — so a restored session looks like the session you
+left rather than a summary of it.
+
 ## Markdown in replies
 
 Replies are laid out as markdown, not re-wrapped as plain prose:

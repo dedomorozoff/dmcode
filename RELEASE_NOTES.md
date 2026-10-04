@@ -116,6 +116,22 @@ Three fixes from the workspace's first days, no new surface:
   is the list of commands and the set of commands being two different sets, so
   it is listed now, from both places, and a test pins that every command that
   answers is offered.
+- **Resuming a session no longer loses the code.** Switching to or resuming a
+  saved conversation printed the prompts and the prose and nothing else: every
+  tool call, every tool result and every change block was gone, so a session came
+  back as a conversation in which the agent appeared to have done no work. The
+  store had all of it — the function parts are in the events and survive to disk —
+  and the transcript builder simply never read it. Both halves are fixed: the
+  store hands back what each event contained, and the transcript draws it through
+  the same functions the live turn draws it with. A restored change block is a
+  real change block again, so clicking it still opens the file at that line.
+- **`dmcode -s` reopens a session, and dmcode tells you the command when it
+  exits.** A bare `-s` resumes the newest session, `-s <id>` that one, and the
+  other flags still work beside it (`dmcode -s -C ~/myapp`). The hint is printed
+  after the TUI closes — the only moment a line about the session survives the
+  window going away — and the resumed conversation is printed before the first
+  frame, so a resume does not open on an empty transcript beside a model that
+  remembers everything.
 
 ## What's new since v0.1.7
 

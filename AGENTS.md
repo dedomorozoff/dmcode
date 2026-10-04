@@ -327,14 +327,49 @@ ADK session interface (`Service`, `Session`, `Events`, `State`) is exported, so
 the store is implemented outside the ADK package.
 
 - `RewindToLastUserMessage` cuts at the last `Author == "user"` event, removing
-  that message too, and replays state from what survives.
-- Writes are append-only JSONL, one file per session, with a metadata header on
+  that message too, and replays state from what survives.- Writes are append-only JSONL, one file per session, with a metadata header on
   the first line so `/sessions` never has to read a conversation to list it.
   A rewind rewrites the file (temp + rename); an error is recorded, not returned,
   so a full disk cannot fail a turn.
+- **`Turn` carries `Entries`, not an `Agent` string.** `eventText` reads text
+  parts and nothing else, so a transcript built from it dropped every tool call,
+  every result and every change block — a restored session came back as a
+  conversation in which the agent had plainly done no work, while the events sat
+  on disk unread. `Entry` hands back the raw `*genai.FunctionCall` /
+  `*genai.FunctionResponse` rather than text this package formatted, because the
+  UI has one renderer for a tool line and one for a result
+  (`toolLine`/`toolArgs`/`renderToolResponse`), and a second set of formatters
+  would be a second answer to the same question with nothing to catch the drift.
+  `Broken` means *no* entries, not "no prose": a turn whose model answered with a
+  tool call is not a broken one.
 - `Service` is mutex-guarded and every method that may do I/O takes the write
   lock — including `load`, which can lazily read from disk. `recordWriteErr` is
   the one helper that must **not** take the lock itself.
+
+### Coming back to a session
+
+`-s` is the door back into a saved conversation, and it is taken out of
+`os.Args` by hand rather than declared, because Go's `flag` package cannot
+express an optional value: a string flag demands an argument, a bool flag refuses
+one, and the two requests are different — "the newest session" is what a user
+types almost every time, and it is not an id anyone can guess. `takeResumeFlag`
+also leaves a following `-flag` alone, so `dmcode -s -C ~/myapp` resumes *and*
+relocates rather than reading `-C` as a session id.
+
+Two things about where the id is settled, both of which are answers to "which
+bug":
+
+- **main resolves it, before the UI exists.** `NewestSessionID` reads only the
+  header of each session file, and `r.Run` is handed `m.sessionID` at *turn*
+  time — so a session chosen after `newRunner` would have the runner already
+  pointed at the fresh id `InitialModel` minted. An empty answer is not an error:
+  a store with nothing in it means a new session, and failing a start over a flag
+  the user typed out of habit would be worse.
+- **The hint is a string, and it is printed after `prog.Run` returns.** The
+  transcript was on the alternate screen, so every row that named the session —
+  header, sidebar, `/sessions` — is gone by then, and this is the only moment a
+  line about it survives. Making it `resumeHint(id) string` rather than a print
+  is what lets a test say the line names a command the parser accepts.
 
 ### Retries
 
