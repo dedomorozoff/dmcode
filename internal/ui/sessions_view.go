@@ -176,7 +176,7 @@ func (m *uiModel) sessionsBox() string {
 		marker, style := "   ", styleHint
 		switch {
 		case i == list.selected:
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		case sum.ID == m.sessionID:
 			marker, style = " * ", styleTool
 		}

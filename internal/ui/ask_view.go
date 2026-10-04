@@ -300,7 +300,7 @@ func (m *uiModel) askBox() string {
 		marker := "   "
 		switch {
 		case i == m.ask.cursor:
-			marker = " ? "
+			marker = " ▸ "
 		case m.ask.checked[i]:
 			marker = " ✓ "
 		}
@@ -320,7 +320,7 @@ func (m *uiModel) askBox() string {
 		}
 		marker := "   "
 		if cr == m.ask.cursor {
-			marker = " ? "
+			marker = " ▸ "
 		}
 		entries = append(entries, style(cr, marker, label))
 	}

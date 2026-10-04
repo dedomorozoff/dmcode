@@ -3194,7 +3194,7 @@ func (m *uiModel) proxyBox() string {
 	} {
 		marker, style := "   ", lipgloss.NewStyle()
 		if i == m.proxy.selected {
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		}
 		rows := wrapIndent(label, inner, marker, "     ")
 		if i != m.proxy.selected {
@@ -4627,6 +4627,11 @@ func (m *uiModel) floatingWidth() int {
 	return max(min(m.width, 68), 24)
 }
 
+// Every list drawn through here marks the row under the cursor with ▸ and the
+// item currently in use with *, the same two glyphs in every overlay: one
+// selection reading as two depending on which box is open is something a user
+// has to learn twice.
+//
 // floatingPanel frames a palette-style box: a two-row header, a list body and
 // the border. The body is trimmed by rendered row rather than by entry, because
 // one long model id can take two rows and a count taken before wrapping is not
@@ -4797,9 +4802,12 @@ func (m *uiModel) setupBox() string {
 	var entries [][]string
 	for i, o := range opts {
 		marker, style := "   ", lipgloss.NewStyle()
+		// ▸ for the cursor and * for the provider in use, as everywhere else;
+		// see floatingPanel. "?" stayed out of it because it already prefixes
+		// every wizard prompt's title.
 		switch {
 		case i == m.setup.selected:
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		case setupLabel(o) == m.prov.Label:
 			marker, style = " * ", styleTool
 		}
@@ -4874,7 +4882,7 @@ func (m *uiModel) langKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// langBox renders the /lang list: * marks the active language, ? the cursor.
+// langBox renders the /lang list: * marks the active language, ▸ the cursor.
 func (m *uiModel) langBox() string {
 	inner := m.floatingWidth() - panelBorder
 	var entries [][]string
@@ -4882,7 +4890,7 @@ func (m *uiModel) langBox() string {
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
 		case i == m.lang.selected:
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		case l == i18n.Current():
 			marker, style = " * ", styleTool
 		}
