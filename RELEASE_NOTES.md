@@ -116,6 +116,16 @@ Three fixes from the workspace's first days, no new surface:
   is the list of commands and the set of commands being two different sets, so
   it is listed now, from both places, and a test pins that every command that
   answers is offered.
+- **`/image` is reachable again.** Two ways to lose a path, both of them
+  reporting nothing wrong: typing `/im` and pressing enter **ran** `/image` with
+  no argument, so a usage line appeared, the prompt was emptied, and the path
+  typed next was sent to the model as a question about a filename — even though
+  the list had just offered that row as the completion of what was typed. A
+  command that needs an argument is now completed into the prompt instead of run,
+  and `/resume <id>` gets the same treatment. And a quoted path
+  (`/image "…/my shot.png"`) is a path again: the quotes a terminal puts around
+  a dropped name, or a user copies back, were being taken as part of the file
+  name.
 - **Resuming a session no longer loses the code.** Switching to or resuming a
   saved conversation printed the prompts and the prose and nothing else: every
   tool call, every tool result and every change block was gone, so a session came

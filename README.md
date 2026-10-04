@@ -223,7 +223,11 @@ Three ways in, and they all end at the same place:
 - `/image <path>` attaches one without sending anything, so you can look at the
   preview and decide. It appears once, as a strip above the input while it waits,
   and moves into the transcript when it is sent — the same rendered art either
-  time, so what you approved and what went are the same picture.
+  time, so what you approved and what went are the same picture. A path with spaces
+  works quoted (`/image "…/my shot.png"`), the same form a dropped path arrives in.
+  Type `/im` and press `enter` and the command is *completed* into the prompt with
+  room for the path, rather than run — a command that needs an argument has nowhere
+  to put one otherwise.
 - **Drag and drop.** A terminal cannot hand over a file — dropping one inserts its
   *path* as text — so a picture path in the prompt is taken out of the prompt and
   attached. The model reads your question without the filename in it. A quoted path

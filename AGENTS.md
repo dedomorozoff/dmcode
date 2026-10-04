@@ -203,6 +203,12 @@ Three things that are easy to get wrong here:
 - **`HasPrefix` on a command name is a trap in the dispatcher too.** `/debug`
   answered to `/debugger` too; every other prefix command uses `CutPrefix`, and so
   does this one now.
+- **`enter` on a row that needs an argument completes it; it does not run it.**
+  `/im`, `enter`, path is the flow the list invites, and it used to run `/image`
+  with no argument: a usage line, an emptied prompt, and the path sent to the
+  model as a question about a filename. `command.takesArg` is the per-command
+  half, and it is deliberately narrow — `/proxy`, `/cd`, `/new`, `/mode` and
+  `/todo` all have a useful *bare* form, and completing those would take it away.
 
 ### Mode switches
 
