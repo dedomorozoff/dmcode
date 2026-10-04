@@ -44,7 +44,7 @@ func SetupOptions() []SetupOption {
 		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true},
 		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
-		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "nemotron-3-ultra-free", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
+		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "big-pickle", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
 		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses},
 		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIResponses},
 		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
