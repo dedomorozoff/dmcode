@@ -327,18 +327,19 @@ func TestCloseTabKeysWorkInAllModes(t *testing.T) {
 		t.Fatal("ctrl+x must close/quit while git panel is open")
 	}
 
-	// Tree focused, single untitled tab: Ctrl+W closes it → quit
+	// Tree focused, nothing open: Ctrl+W closes nothing, so it must not quit.
+	// The only tab is the editor's standing empty buffer, which is not on screen.
 	mt := New(dir)
 	mt.width, mt.height = 80, 24
-	if len(mt.tabs) != 1 {
-		t.Fatalf("setup: want single untitled tab, got %d", len(mt.tabs))
+	if len(mt.tabs) != 1 || !mt.tabs[0].scratch() {
+		t.Fatalf("setup: want one empty buffer, got %d tabs", len(mt.tabs))
 	}
 	mt = press(mt, tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	if !mt.treeFocus {
 		t.Fatal("setup: tree must be focused")
 	}
-	if _, cmd := mt.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl}); cmd == nil {
-		t.Fatal("ctrl+w must close/quit while tree is focused")
+	if _, cmd := mt.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl}); cmd != nil {
+		t.Fatal("ctrl+w must not quit while no file is open — ctrl+q and F1 are the exits")
 	}
 }
 

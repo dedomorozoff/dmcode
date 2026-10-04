@@ -57,6 +57,39 @@ func (t *tab) name(base string) string {
 	return shortenPath(base, t.path)
 }
 
+// scratch reports whether this tab is the editor's standing empty buffer rather
+// than a file anybody can see: unnamed, and with nothing typed into it.
+//
+// The tab itself is not the problem and cannot simply go. It is the reason there
+// is always a buffer to type into and a cur() that cannot be nil, and that
+// invariant is load-bearing — renderPaneRows indexes tabs[pane.tabIdx] outright,
+// and around a hundred other places call cur(). Removing it is a different and
+// far larger change, and it would leave every one of those places to guard.
+//
+// What must not survive is the tab's *pretence* to be a document. A tab bar
+// reading "1:[untitled]" over an empty gutter claims a file that does not exist,
+// and a user who pressed ctrl+e on a session where the agent had changed nothing
+// was shown one. So the tab is derived rather than tracked: the moment anything
+// is typed into it — which is what the user asked for by typing — it stops being
+// a scratch buffer and appears under its own name, to be saved or closed like
+// any other.
+func (t *tab) scratch() bool {
+	return t.path == "" && !t.buf.Dirty() && t.buf.LineCount() <= 1 && t.buf.LineLen(0) == 0
+}
+
+// lastTabIsEmpty reports whether the editor's only tab is the standing empty
+// buffer. There is then nothing on screen to close, so closing it must not be
+// what ends the editor — a key the user cannot see anything about is not an exit,
+// and ctrl+q and F1 are the advertised ones.
+//
+// Both tab-closing paths ask this, which is why it is a function and not a line
+// copied into each: closeActiveTab (ctrl+w) and closeTabAt (ctrl+x, the tab
+// bar's middle-click) each decide "the last tab going means quit" independently,
+// and a rule that lives in one of them is a trap in the other.
+func (m *Model) lastTabIsEmpty() bool {
+	return len(m.tabs) == 1 && m.tabs[0].scratch()
+}
+
 // detectFileInfo analyzes raw bytes to determine line endings and encoding.
 func detectFileInfo(data []byte) (lineEnding, encoding string) {
 	lineEnding = "lf"
@@ -622,6 +655,13 @@ func (m *Model) openPath(rawPath string) {
 	path := normalizePath(m.baseDir(), rawPath)
 	data, err := os.ReadFile(path)
 	t := tab{path: path, buf: buffer.New(), lineEnding: "lf", encoding: "utf-8"}
+	// The standing empty buffer is dropped the moment a file is opened, so it
+	// cannot linger as an invisible tab 1 with every visible tab numbered from 2.
+	// Only an untouched scratch goes: one with anything in it is somebody's
+	// unsaved typing, and dropping that would lose it.
+	if len(m.tabs) == 1 && m.tabs[0].scratch() {
+		m.tabs = nil
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			m.msg = m.t("msg.new_file", path)
@@ -678,6 +718,9 @@ func (m *Model) closeTab() tea.Cmd {
 // tab bar, which targets a specific tab rather than the active one).
 func (m *Model) closeTabAt(idx int) tea.Cmd {
 	if len(m.tabs) == 1 {
+		if m.lastTabIsEmpty() {
+			return nil
+		}
 		return m.requestQuit()
 	}
 	if idx < 0 || idx >= len(m.tabs) {
@@ -2084,6 +2127,9 @@ func (m *Model) closeActiveTab() tea.Cmd {
 
 	// If this is the last tab, quit (with save prompt if dirty)
 	if len(m.tabs) == 1 {
+		if m.lastTabIsEmpty() {
+			return nil
+		}
 		if t.buf.Dirty() {
 			m.quitConfirm = true
 			m.pendingQuit = true

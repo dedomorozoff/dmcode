@@ -448,6 +448,27 @@ func (m Model) editorRows(h int) []string {
 	return rows
 }
 
+// nothingOpenRows is the buffer area when no file is open: a dim line saying so
+// and naming the keys that fill it, over blank rows.
+//
+// It is drawn rather than left empty on purpose. A blank editor with nothing in
+// the tab bar reads as a broken program; a line that says which key opens a file
+// reads as an editor waiting for one. The rows are padded to the pane's width
+// because composeSidebar concatenates them with the rail rather than laying them
+// out — a short row would shear the sidebar down the page.
+func (m Model) nothingOpenRows(h, totalW int) []string {
+	rows := make([]string, h)
+	for i := range rows {
+		rows[i] = strings.Repeat(" ", max(totalW, 0))
+	}
+	if h < 1 || totalW < 8 {
+		return rows
+	}
+	hint := "  " + m.t("editor.nothing_open")
+	rows[0] = padTo(ansi.Truncate(hintStyle.Render(hint), totalW, "…"), totalW)
+	return rows
+}
+
 func (m Model) composeSidebar(editor []string) []string {
 	var rail []string
 	switch {
@@ -500,6 +521,13 @@ func (m Model) frameRows(rows []string, w int) []string {
 func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 	p := &m.panes[paneIdx]
 	t := &m.tabs[p.tabIdx]
+	// The standing empty buffer gets no gutter and no line numbers: a column of
+	// "1" beside an empty screen is exactly the artefact the scratch tab is
+	// hidden to avoid. What is there instead says so, and names the two keys
+	// that fill it.
+	if t.scratch() {
+		return m.nothingOpenRows(h, totalW)
+	}
 	gw := m.gutterWidthForTab(t)
 	contentW := totalW - gw
 	if contentW < 0 {
@@ -744,6 +772,12 @@ func (m Model) tabBar() string {
 	var parts []string
 	activeTab := m.activeTabIndex()
 	for i := range m.tabs {
+		// The standing empty buffer is not a tab anybody can look at. It is still
+		// in the slice, so the numbering below is the real index and ctrl+2 still
+		// means the second tab: skipping it here must not renumber the rest.
+		if m.tabs[i].scratch() {
+			continue
+		}
 		name := m.tabLabel(i)
 		if i == activeTab {
 			parts = append(parts, statusHiStyle.Render(name))
@@ -1815,7 +1849,9 @@ func (m Model) statusBar() string {
 		mid = statusStyle.Render("  " + m.msg)
 	}
 	right := ""
-	if !perPane && !m.Chat {
+	// The scratch buffer has no file to report on, so it reports no line either:
+	// "Ln 1, Col 1" on an empty screen is a cursor that is nowhere.
+	if !perPane && !m.Chat && !t.scratch() {
 		right = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
 	}
 	fileInfo := ""

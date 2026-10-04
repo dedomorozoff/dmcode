@@ -136,6 +136,9 @@ var enCatalog = map[string]string{
 	"status.tip_splitv": "Vertical split (Ctrl+\\ / F6)",
 	"status.tip_splith": "Horizontal split (Ctrl+Alt+H / F7)",
 
+	// The buffer area with no file open in it.
+	"editor.nothing_open": "no file open — Ctrl+O to find one · Ctrl+P for a new file",
+
 	// Prompt / commit lines
 	"prompt.open_file":    " open file: ",
 	"prompt.new_file":     " new file: ",
@@ -433,6 +436,9 @@ var ruCatalog = map[string]string{
 	"status.tip_term":   "Терминал (Alt+T)",
 	"status.tip_splitv": "Вертикальный сплит (Ctrl+\\ / F6)",
 	"status.tip_splith": "Горизонтальный сплит (Ctrl+Alt+H / F7)",
+
+	// Область буфера, когда файл не открыт.
+	"editor.nothing_open": "файл не открыт — Ctrl+O найти · Ctrl+P новый файл",
 
 	// Prompt / commit lines
 	"prompt.open_file":    " открыть файл: ",

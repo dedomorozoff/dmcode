@@ -292,8 +292,15 @@ func (m Model) paneStatusBar(paneIdx int) string {
 	t := &m.tabs[p.tabIdx]
 	active := paneIdx == m.activePane
 
-	mark := fmt.Sprintf("[%d] %s", paneIdx+1, t.name(m.baseDir()))
-	lncol := m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+	// The scratch buffer has no file to name and no line to be on, so the bar
+	// shows the pane and stops. "[1] [untitled]  Ln 1, Col 1" would be a file's
+	// report card for a file that is not there.
+	mark := fmt.Sprintf("[%d]", paneIdx+1)
+	lncol := ""
+	if !t.scratch() {
+		mark = fmt.Sprintf("[%d] %s", paneIdx+1, t.name(m.baseDir()))
+		lncol = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+	}
 	fileInfo := ""
 	langTag := ""
 	if t.path != "" {

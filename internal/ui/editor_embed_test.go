@@ -31,8 +31,18 @@ func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 	if _, treeVisible, _ := m.ed.PanelState(); treeVisible {
 		t.Fatal("entering the editor must leave the project tree closed")
 	}
-	if v := m.View(); !strings.Contains(v.Content, "[untitled]") {
-		t.Fatalf("editor mode must show the tab bar, got:\n%.200s", v.Content)
+	// A fresh session has changed nothing, so the editor shows its own chrome
+	// and says there is no file open — not a tab bar reading "[untitled]" over
+	// an empty gutter, which is a document nobody has.
+	v := m.View()
+	if !strings.Contains(v.Content, "◫") {
+		t.Fatalf("editor mode must show its own chrome, got:\n%.200s", v.Content)
+	}
+	if !strings.Contains(v.Content, "no file open") {
+		t.Fatalf("an editor with no file must say so, got:\n%.200s", v.Content)
+	}
+	if strings.Contains(v.Content, "[untitled]") {
+		t.Fatalf("an empty buffer must not be presented as a file, got:\n%.200s", v.Content)
 	}
 
 	// Back to the chat: ctrl+q yields CloseEditorMsg, the panels fold, the
@@ -49,12 +59,12 @@ func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 	if termOpen || treeVisible || termFocus {
 		t.Fatalf("returning to the chat must fold the panels: termOpen=%v treeVisible=%v termFocus=%v", termOpen, treeVisible, termFocus)
 	}
-	v := m.View()
-	if !strings.Contains(v.Content, "waiting for a task") {
-		t.Fatalf("chat mode must render the transcript and input, got:\n%.200s", v.Content)
+	chat := m.View()
+	if !strings.Contains(chat.Content, "waiting for a task") {
+		t.Fatalf("chat mode must render the transcript and input, got:\n%.200s", chat.Content)
 	}
-	if strings.Contains(v.Content, "[untitled]") {
-		t.Fatal("chat mode must hide the editor's tab bar")
+	if strings.Contains(chat.Content, "no file open") || strings.Contains(chat.Content, "◫") {
+		t.Fatal("chat mode must hide the editor's screen")
 	}
 }
 

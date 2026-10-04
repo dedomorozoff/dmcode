@@ -190,7 +190,12 @@ func TestPromptOpensAndCancels(t *testing.T) {
 }
 
 func TestCloseLastTabReturnsQuit(t *testing.T) {
-	m := New()
+	// A real file, so "the last tab went" is the thing being asserted. The
+	// editor's standing empty buffer is the exception — with nothing open there
+	// is nothing to close, and ctrl+w is not the exit (see
+	// TestClosingTheOnlyEmptyBufferDoesNotQuit).
+	f := writeTemp(t, t.TempDir(), "a.txt", "alpha\n")
+	m := New(f)
 	m.width, m.height = 80, 24
 	next, cmd := m.Update(tea.KeyPressMsg{Code: 'w', Mod: tea.ModCtrl})
 	nm := next.(Model)
