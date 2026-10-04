@@ -315,7 +315,7 @@ func TestLogoArtSurvivesIntact(t *testing.T) {
 		}
 	}
 
-	wide := rowRows(logo, 200, m0(kindLogo))
+	wide := rowRows(logo, 200, m0(kindLogo)).rows
 	if len(wide) != len(art) {
 		t.Fatalf("logo at 200 cells produced %d rows, want %d", len(wide), len(art))
 	}
@@ -327,13 +327,13 @@ func TestLogoArtSurvivesIntact(t *testing.T) {
 
 	// Art that cannot fit is dropped entirely: no partial banner, no re-wrap.
 	for width := 8; width < widest; width++ {
-		if got := rowRows(logo, width, m0(kindLogo)); got != nil {
+		if got := rowRows(logo, width, m0(kindLogo)).rows; got != nil {
 			t.Errorf("logo at %d cells leaked a partial banner: %q", width, got)
 		}
 	}
 
 	// Exactly wide enough: it must come back, whole.
-	if got := rowRows(logo, widest, m0(kindLogo)); len(got) != len(art) {
+	if got := rowRows(logo, widest, m0(kindLogo)).rows; len(got) != len(art) {
 		t.Errorf("logo at its exact width (%d) produced %d rows, want %d", widest, len(got), len(art))
 	}
 }

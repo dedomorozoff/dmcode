@@ -150,9 +150,12 @@ func TestRewindDropsThePromptFromRecall(t *testing.T) {
 	}
 }
 
-// key builds a key press for a key name, so a test can drive the overlay
-// handlers directly instead of going through the whole Update.
-func key(name string) tea.KeyPressMsg {
+// pressKey builds a key press for a key name, so a test can drive the overlay
+// handlers directly instead of going through the whole Update. It is not called
+// key because the package imports charm.land/bubbles/v2/key, and a test helper
+// sharing a package's name is a collision waiting for the next test that wants
+// the import.
+func pressKey(name string) tea.KeyPressMsg {
 	switch name {
 	case "up":
 		return tea.KeyPressMsg{Code: tea.KeyUp}
@@ -334,7 +337,7 @@ func TestDeleteAsksTwice(t *testing.T) {
 	m.openSessions()
 	m.sessionsList.selected = 0
 
-	m.sessionsKey(key("d"))
+	m.sessionsKey(pressKey("d"))
 	if m.sessionsList.confirmDelete != only {
 		t.Fatal("the first d did not ask for confirmation")
 	}
@@ -342,7 +345,7 @@ func TestDeleteAsksTwice(t *testing.T) {
 		t.Error("the session was deleted on the first d")
 	}
 
-	m.sessionsKey(key("d"))
+	m.sessionsKey(pressKey("d"))
 	if len(m.sessions.Summaries()) != 0 {
 		t.Error("the session survived the confirmed delete")
 	}
@@ -358,9 +361,9 @@ func TestEscapeLeavesTheDeleteConfirmation(t *testing.T) {
 	sendTurn(t, m, "единственная")
 	m.openSessions()
 	m.sessionsList.selected = 0
-	m.sessionsKey(key("d"))
+	m.sessionsKey(pressKey("d"))
 
-	m.sessionsKey(key("esc"))
+	m.sessionsKey(pressKey("esc"))
 
 	if m.sessionsList.open {
 		t.Error("escape did not close the overlay")

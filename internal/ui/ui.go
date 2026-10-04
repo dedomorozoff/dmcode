@@ -169,6 +169,12 @@ const (
 	// pending-image strip are added on top when they are shown — see
 	// chromeHeight(), the one place the three combine.
 	chromeHeight = statusHeight + inputHeight + panelBorder
+
+	// panelTopBorder is how many rows of the frame sit between the top of the
+	// chat panel and its first transcript row: the panel's own top border, which
+	// panelBorder counts together with the bottom one. A row-to-file test needs
+	// the top one alone, which is why it is named rather than divided out.
+	panelTopBorder = 1
 )
 
 // deltaMsg carries one text part of a round to the event loop. It is a spoken
@@ -455,7 +461,12 @@ type uiModel struct {
 	cachedWidth   int
 	historyDirty  bool
 	cachedRows    []cachedLine
-	proxy         proxyState
+	// rowRefs is what each row of the rendered transcript stands for, index-
+	// aligned with renderHistory's output. It is the answer to "which line of
+	// which file is under the pointer", and it is the only copy: the rendered
+	// rows are strings by the time a click arrives.
+	rowRefs []codeRef
+	proxy   proxyState
 	// pending are the images attached to the next turn. They live on the model
 	// rather than inside the input text so a preview can be drawn and the bytes
 	// sent without re-reading the file, and so a rewind can put them back.
@@ -488,7 +499,18 @@ type uiModel struct {
 	// editor's Update returns its own copy and editorUpdate would clobber a
 	// direct flip of m.ed — so the flip is deferred until the copy lands.
 	pendingEditor bool
-	winW, winH    int
+	// pendingJump is the place in a file the chat asked the editor to go to, by
+	// a click on a change row or by the jump key. It is applied by enterEditor,
+	// because OpenChangedTabs runs first and would otherwise focus a tab for the
+	// same file and leave the cursor somewhere else in it.
+	pendingJump *codeRef
+	// jumpFrom is how far the jump key's walk into the transcript has got: the
+	// row after the change it went to last, and -1 before it has gone anywhere.
+	// The transcript's scroll offset cannot stand in for it — two presses in a
+	// row do not move the view, so a walk derived from where the user is looking
+	// would return the same change for ever.
+	jumpFrom   int
+	winW, winH int
 }
 
 // diffHighlighter returns the highlighter the transcript's change blocks are
@@ -511,11 +533,17 @@ func (m *uiModel) diffHighlighter() *syntax.Highlighter {
 // with m.history: a streamed token rewrites the text of the last agent line,
 // so on the next frame every earlier line still matches its cache entry and is
 // reused as-is, and only the line that changed is re-rendered and re-wrapped.
+//
+// The refs travel inside the rendered rows rather than beside them, which is
+// the whole reason they are in the cache at all: a cache that kept the styled
+// strings and dropped the places they stand for would empty the click index on
+// exactly the frames that reuse the cache, so the jump would work once and then
+// stop working on every message that scrolled past.
 type cachedLine struct {
 	kind  lineKind
 	text  string
 	width int
-	rows  []string
+	rows  renderedRows
 }
 
 type modelPicker struct {
@@ -667,12 +695,21 @@ func (m *uiModel) openEditor() tea.Cmd {
 }
 
 // enterEditor flips the (already existing) workspace into the editor mode:
-// the tabs for the files the agent changed open on top. The project tree and
-// the other panels stay as the user last left them — closed until asked for
+// the tabs for the files the agent changed open on top. The project tree and the
+// other panels stay as the user last left them — closed until asked for
 // with ctrl+b, F9 or the status-bar icons.
+//
+// A jump the chat asked for is applied here, at the end, and not where it was
+// asked for: OpenChangedTabs above focuses a tab per changed file, so a cursor
+// set before it would be replaced by whichever of those files came last.
 func (m *uiModel) enterEditor() {
 	m.ed.Chat = false
 	m.ed.OpenChangedTabs()
+	if m.pendingJump != nil {
+		j := *m.pendingJump
+		m.pendingJump = nil
+		m.applyJump(j)
+	}
 }
 
 // ensureEditor creates the workspace the first time it is needed, on the
@@ -707,20 +744,34 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 			_, cmd := m.Update(msg)
 			return cmd
 		},
+		// The mouse callbacks are wrapped like Key is, and for the same reason:
+		// a click that jumps to the editor asks for a mode flip from inside the
+		// editor's own Update, and a direct flip of m.ed would be undone by the
+		// copy that Update returns. openEditor defers on the strength of this
+		// flag, so a click routed only through MouseClick/Motion/Release —
+		// without the flag set — would lose the jump every time.
 		Click: func(msg tea.MouseClickMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
 			x0, y0, _, _ := m.ed.MainArea()
 			msg.X, msg.Y = msg.X-x0, msg.Y-y0
 			return m.chatClick(msg)
 		},
 		Wheel: func(msg tea.MouseWheelMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
 			return m.chatWheel(msg)
 		},
 		Motion: func(msg tea.MouseMotionMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
 			x0, y0, _, _ := m.ed.MainArea()
 			msg.X, msg.Y = msg.X-x0, msg.Y-y0
 			return m.chatMotion(msg)
 		},
 		Release: func(msg tea.MouseReleaseMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
 			x0, y0, _, _ := m.ed.MainArea()
 			msg.X, msg.Y = msg.X-x0, msg.Y-y0
 			return m.chatRelease(msg)
@@ -771,9 +822,27 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	}
 	m.selDown = false
 	if !m.selMoved {
-		// A click, not a drag: clear the highlight and leave the clipboard be.
+		// A click, not a drag: nothing is copied, and a click on a change row
+		// opens the file at the line that row stands for. Anything else — a
+		// reply, the input, the sidebar — is still nothing, which is the rule
+		// that keeps a click from becoming a copy of one character.
 		m.selMoved = false
-		return nil
+		if m.chatOverlayUp() {
+			// A box owns those pixels. The frame on screen is the box, so the
+			// arithmetic that maps a row to a transcript row is answering about a
+			// screen that is not there — and the row under the pointer is the
+			// command list, not the diff behind it.
+			return nil
+		}
+		m.syncVP()
+		i, ref, ok := m.refAtPointer(msg.X, msg.Y)
+		if !ok {
+			return nil
+		}
+		// The walk continues from here, so pressing the key after a click steps
+		// on to the next change rather than back to the one already open.
+		m.jumpFrom = i + 1
+		return m.jumpToRef(ref)
 	}
 	m.selFocusX, m.selFocusY = msg.X, msg.Y
 	text := m.selectedText()
@@ -849,6 +918,9 @@ func (m *uiModel) commands() []command {
 		{name: "editor", desc: i18n.T("open the code editor: tree, git, terminal (ctrl+e)"), run: func(m *uiModel) tea.Cmd {
 			return m.openEditor()
 		}},
+		{name: "changes", desc: fmt.Sprintf("%s (%s)", i18n.T("open the next change in the editor"), jumpKey.Help().Key), run: func(m *uiModel) tea.Cmd {
+			return m.jumpToNextChange()
+		}},
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
 		}},
@@ -900,6 +972,9 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
+				// The key is asked of the binding rather than written into the text,
+				// so the line cannot advertise a key the handler no longer answers.
+				line{kindSys, fmt.Sprintf(i18n.T("click a change in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
@@ -993,6 +1068,10 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		workDir:       wd,
 		workDirShort:  filepath.Base(wd),
 		historyDirty:  true,
+		// -1 rather than the zero value: the jump key's walk has not started
+		// yet, and 0 would mean "after the first transcript row", skipping the
+		// very first change on a fresh session.
+		jumpFrom: -1,
 		// Act by default, and the mode shift+tab returns to when yolo is left.
 		// Starting in yolo would be a session the user never asked for.
 		beforeYolo: modeAct,
@@ -1272,6 +1351,15 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
 			return model, cmd
+		}
+		// Before the switch, and matched through the binding rather than a
+		// literal: /help prints the binding's own help text, and a key written
+		// out in two places is a key that will be wrong in one of them. alt+g is
+		// where the mnemonic would put ctrl+g, which is unusable — the editor
+		// answers it with the git panel before the chat sees it, so ctrl+g would
+		// work in a bare chat and do nothing once the editor existed.
+		if jumpPressed(msg) {
+			return m, m.jumpToNextChange()
 		}
 		switch msg.String() {
 		case "ctrl+v":
@@ -2229,12 +2317,71 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 	return transcriptRow{style: styleAgent}
 }
 
+// codeRef is a place in a file that one transcript row stands for. It is what a
+// click on a change block resolves to, and it exists as a value of its own
+// because the alternative is gone by the time the click arrives: a diff row has
+// been styled, gutter-numbered, maybe wrapped onto a second screen row and
+// maybe ANSI-truncated, and the line it names survives only as digits inside
+// cells the renderer owns. Recovering it from the drawn row would mean
+// re-deriving the gutter's arithmetic and guessing which blank gutter was a
+// wrapped continuation — a different question than the one being asked.
+type codeRef struct {
+	// path is the file as the block's header spelled it: the path the model
+	// passed to the tool, so usually relative to the workspace root.
+	path string
+	// line is 1-based, as the gutter prints it. Zero means the row names no
+	// position at all: a block's header, the tail of a capped block, or any
+	// history line that is not a change.
+	line int
+}
+
+// ok reports whether the ref names a place a jump could actually go.
+func (r codeRef) ok() bool { return r.path != "" && r.line > 0 }
+
+// String is the file:line a status line shows, and the empty string for a ref
+// that names nothing.
+func (r codeRef) String() string {
+	if !r.ok() {
+		return ""
+	}
+	return r.path + ":" + strconv.Itoa(r.line)
+}
+
+// renderedRows is one history entry laid out: the rows as they go into the
+// viewport, and index-aligned with them, the place in a file each row stands
+// for. The two are produced together because they are decided together — a diff
+// row that wrapped onto a second screen row is still the same line of the same
+// file, and only the row that knows so can say it.
+type renderedRows struct {
+	rows []string
+	refs []codeRef
+}
+
+// at is the place row i stands for, or the zero value for a row that names
+// none — which is every row of every history line but a change block's.
+func (rr renderedRows) at(i int) codeRef {
+	if i < 0 || i >= len(rr.refs) {
+		return codeRef{}
+	}
+	return rr.refs[i]
+}
+
+func (rr *renderedRows) add(row string, ref codeRef) {
+	rr.rows = append(rr.rows, row)
+	rr.refs = append(rr.refs, ref)
+}
+
+func (rr *renderedRows) addAll(other renderedRows) {
+	rr.rows = append(rr.rows, other.rows...)
+	rr.refs = append(rr.refs, other.refs...)
+}
+
 // rowRows turns one history entry into the transcript rows it occupies. Prose is
 // wrapped to width under a hanging indent. Pre-formatted art keeps its own line
 // breaks and is dropped whole when it cannot fit: a banner sliced to the panel
 // edge, or broken across rows, reads as corruption rather than as a logo. The
 // header names the app regardless, so losing the art costs nothing.
-func rowRows(text string, width int, row transcriptRow) []string {
+func rowRows(text string, width int, row transcriptRow) renderedRows {
 	// Markdown is only applied where the model produced it. Tool output and the
 	// user's own prompts are literal text — a path or a JSON payload that happens
 	// to contain "**" must survive untouched.
@@ -2243,13 +2390,13 @@ func rowRows(text string, width int, row transcriptRow) []string {
 		for i, r := range rows {
 			rows[i] = row.first + r
 		}
-		return rows
+		return renderedRows{rows: rows}
 	}
 	if row.diff {
 		return diffRows(text, width, row)
 	}
 	if !row.verbatim {
-		return wrapIndent(text, width, row.first, row.rest)
+		return renderedRows{rows: wrapIndent(text, width, row.first, row.rest)}
 	}
 	rows := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	for _, r := range rows {
@@ -2262,13 +2409,13 @@ func rowRows(text string, width int, row transcriptRow) []string {
 			if row.captionLast && len(rows) > 0 {
 				last := rows[len(rows)-1]
 				if ansi.StringWidth(last) <= width {
-					return []string{last}
+					return renderedRows{rows: []string{last}}
 				}
 			}
-			return nil
+			return renderedRows{}
 		}
 	}
-	return rows
+	return renderedRows{rows: rows}
 }
 
 // diffRow is one line of a change block as the renderer sees it: the marker,
@@ -2313,7 +2460,14 @@ func parseDiffRow(line string) diffRow {
 // wrapped like ordinary text; highlighted rows are ANSI-truncated instead,
 // because wrapping measured plain text cannot survive the escapes the theme
 // paints with.
-func diffRows(text string, width int, row transcriptRow) []string {
+//
+// Every row it returns also carries the place it names, so a click on one can
+// open the file there. A removal's number is the old file's, which is the one
+// row that no longer exists to land on: the block trims a shared prefix and
+// suffix off both texts and numbers both sides from the same place, so the line
+// a removal used to be on is the line the replacement is on, and a pure
+// deletion lands on the line that took its place.
+func diffRows(text string, width int, row transcriptRow) renderedRows {
 	avail := width - max(ansi.StringWidth(row.first), ansi.StringWidth(row.rest))
 	if avail < 1 {
 		avail = 1
@@ -2337,15 +2491,16 @@ func diffRows(text string, width int, row transcriptRow) []string {
 		numw = 3
 	}
 
-	var out []string
+	var out renderedRows
 	// The header wraps like plain text: it is not code, and the file name is
-	// the one thing in the block that must survive any width.
+	// the one thing in the block that must survive any width. It names the file
+	// rather than a line in it, so it stands for nothing.
 	for j, r := range wrapCells("── "+path, avail) {
 		indent := row.rest
 		if j == 0 {
 			indent = row.first
 		}
-		out = append(out, styleHint.Render(indent+r))
+		out.add(styleHint.Render(indent+r), codeRef{})
 	}
 
 	for g := 0; g < len(parsed); {
@@ -2354,7 +2509,7 @@ func diffRows(text string, width int, row transcriptRow) []string {
 		for j < len(parsed) && parsed[j].mark == mark {
 			j++
 		}
-		out = append(out, diffGroup(mark, parsed[g:j], path, avail, numw, row)...)
+		out.addAll(diffGroup(mark, parsed[g:j], path, avail, numw, row))
 		g = j
 	}
 	return out
@@ -2363,7 +2518,7 @@ func diffRows(text string, width int, row transcriptRow) []string {
 // diffGroup renders one run of same-marker rows. Consecutive rows are
 // highlighted as one text so a string literal spanning lines keeps its
 // colour across the block.
-func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row transcriptRow) []string {
+func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row transcriptRow) renderedRows {
 	st, bg := styleHint, lipgloss.Color("")
 	switch mark {
 	case "+":
@@ -2385,7 +2540,17 @@ func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row tr
 		return s
 	}
 
-	var out []string
+	// A row with no number — the tail of a capped block — names no line, and a
+	// wrapped continuation row repeats its own row's number because it is the
+	// same line of the same file, drawn across two rows of the screen.
+	ref := func(n int) codeRef {
+		if n <= 0 {
+			return codeRef{}
+		}
+		return codeRef{path: path, line: n}
+	}
+
+	var out renderedRows
 	if row.syn == nil || syntax.Lang(path) == "" {
 		// No highlighter, or a language chroma does not know: the plain
 		// path — wrapped like ordinary text, code budget shrunk by the
@@ -2408,7 +2573,7 @@ func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row tr
 				if j == 0 {
 					indent = row.first
 				}
-				out = append(out, st.Render(indent)+gut+st.Render(r))
+				out.add(st.Render(indent)+gut+st.Render(r), ref(p.num))
 			}
 		}
 		return out
@@ -2426,7 +2591,7 @@ func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row tr
 		if i < len(styled) {
 			line = ansi.Truncate(styled[i], avail-(numw+1)-2, "…")
 		}
-		out = append(out, row.first+gutter(p.num, true)+st.Render(p.mark+" ")+line)
+		out.add(row.first+gutter(p.num, true)+st.Render(p.mark+" ")+line, ref(p.num))
 	}
 	return out
 }
@@ -2447,30 +2612,36 @@ func (m *uiModel) renderHistory() string {
 	if len(m.cachedRows) > len(m.history) {
 		m.cachedRows = m.cachedRows[:len(m.history)]
 	}
+	// The click index is rebuilt here and only here, which is why it is built at
+	// all: it is the one place that knows how many rows a history entry turned
+	// into and what each of them stands for. The early return above keeps the
+	// previous index, which is exactly right — the content it was built for is
+	// the content the viewport is still showing.
+	m.rowRefs = m.rowRefs[:0]
 	var b strings.Builder
 	for i := range m.history {
 		l := &m.history[i]
 		row := m.rowStyle(l.kind)
-		var rows []string
+		var rr renderedRows
 		hit := false
 		if i < len(m.cachedRows) {
 			c := &m.cachedRows[i]
 			if c.kind == l.kind && c.text == l.text && c.width == w {
-				rows, hit = c.rows, true
+				rr, hit = c.rows, true
 			}
 		}
 		if !hit {
-			for _, r := range rowRows(l.text, w, row) {
+			rr = rowRows(l.text, w, row)
+			for i, r := range rr.rows {
 				// A markdown row arrives already styled by the renderer, and a
 				// prestyled one already carries its own colours; wrapping either
 				// again would nest the escapes and break the width accounting.
 				if row.markdown || row.prestyled {
-					rows = append(rows, r)
 					continue
 				}
-				rows = append(rows, row.style.Render(r))
+				rr.rows[i] = row.style.Render(r)
 			}
-			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rows}
+			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rr}
 			if i < len(m.cachedRows) {
 				m.cachedRows[i] = entry
 			} else if i == len(m.cachedRows) {
@@ -2487,14 +2658,15 @@ func (m *uiModel) renderHistory() string {
 		// terminal's own background down the side of the picture, which reads as a
 		// column of the image that is out of step with the rest.
 		margin := strings.Repeat(" ", chatIndent)
-		for _, r := range rows {
+		for j, r := range rr.rows {
 			// Only full-bleed art (the image preview) skips the margin; a diff
 			// block carries its own colours but belongs to the transcript's page.
 			if row.prestyled && row.verbatim {
 				b.WriteString(r + "\n")
-				continue
+			} else {
+				b.WriteString(margin + r + "\n")
 			}
-			b.WriteString(margin + r + "\n")
+			m.rowRefs = append(m.rowRefs, rr.at(j))
 		}
 	}
 	m.cachedHistory = b.String()
@@ -4601,11 +4773,30 @@ func (m *uiModel) View() tea.View {
 	return v
 }
 
+// modalUp reports whether one of the stacked boxes owns the whole frame: with
+// any of them open the frame is the box and not the chat, so every row the hit
+// test could name is a row that is not on screen.
+func (m *uiModel) modalUp() bool {
+	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
+		m.proxy.open || m.sessionsList.open || m.ask.open
+}
+
+// chatOverlayUp reports whether anything is drawn over the transcript, so that
+// what is under the pointer is not a transcript row.
+//
+// The command list is one of them even though it is painted over the panel
+// rather than replacing it: the transcript rows are still in the frame, so the
+// hit test would answer with one of them, and it would be the row behind the
+// list the user actually pointed at.
+func (m *uiModel) chatOverlayUp() bool {
+	return m.modalUp() || len(m.suggest) > 0
+}
+
 // buildFrame assembles the chat frame at the model's current width and height:
 // the whole window when the editor has never been opened, the workspace main
 // area in chat mode (chatFrame sets the sizes to the region's then).
 func (m *uiModel) buildFrame() string {
-	if m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.proxy.open || m.sessionsList.open || m.ask.open {
+	if m.modalUp() {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:

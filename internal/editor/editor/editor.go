@@ -1942,6 +1942,45 @@ func (m *Model) OpenChangedTabs() {
 	}
 }
 
+// OpenAt focuses rawPath and puts its cursor on the given 1-based line,
+// opening a tab for it when the workspace does not already show it. It reports
+// whether there was a file to go to.
+//
+// The path is relative to the workspace root, which is the form the chat's change
+// blocks carry: a header names the file the way the agent spelled it to the
+// tool, not as an absolute path.
+//
+// Two decisions worth keeping. A path that is not there is refused rather than
+// opened, because a missing file would otherwise leave an empty tab and a
+// "new file" message for something the user asked to look at, not to create. And
+// a line past the end of the file is clamped to the last one rather than
+// refused: the numbers in a change block come from the text a write produced,
+// and a file edited by hand since is shorter than the block claims — landing on
+// the end beats refusing to move at all.
+func (m *Model) OpenAt(rawPath string, line int) bool {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		return false
+	}
+	path := normalizePath(m.baseDir(), rawPath)
+	if fi, err := os.Stat(path); err != nil || fi.IsDir() {
+		return false
+	}
+	m.focusOrOpen(path)
+	t := m.cur()
+	if t == nil {
+		return false
+	}
+	if line > 0 {
+		if n := t.buf.LineCount(); n > 0 && line > n {
+			line = n
+		}
+		t.buf.SetCursor(line-1, 0)
+	}
+	m.clampScroll()
+	return true
+}
+
 // CloseAllTabs drops every tab whose buffer is clean — the tabs a session of
 // agent edits accumulated, which a new conversation has no use for. A dirty
 // buffer is the user's own unsaved typing, and starting another session is

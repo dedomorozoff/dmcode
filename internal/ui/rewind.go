@@ -87,6 +87,9 @@ func (m *uiModel) rewind() {
 	if mark.idx <= len(m.history) {
 		m.history = m.history[:mark.idx]
 	}
+	// The walk into the transcript starts again, because the rows it was counting
+	// are not all there any more.
+	m.jumpFrom = -1
 	// The pictures come back with the prompt. A turn sent as nothing but a
 	// screenshot has no text for the store to hand back, so without this the user
 	// would find an empty input box and have to go and find the file again.
@@ -163,6 +166,10 @@ func (m *uiModel) newSession(title string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.promptMarks = nil
+	// The jump key's walk is a position in this session's transcript, and a new
+	// session has a different one. Carried over it would start the walk halfway
+	// down a transcript it has never seen.
+	m.jumpFrom = -1
 	// An attachment belongs to the prompt it was going to ride with, and /new is
 	// a different conversation. Carrying it over would attach the previous
 	// session's screenshot to the first message of this one.

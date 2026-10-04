@@ -11,10 +11,10 @@ import (
 func TestDiffRowsColourAndIndent(t *testing.T) {
 	m := &uiModel{}
 	row := m.rowStyle(kindDiff)
-	rows := diffRows("── main.go\n-2: old line\n+2: new line", 60, row)
+	got := diffRows("── main.go\n-2: old line\n+2: new line", 60, row)
 
 	var plain []string
-	for _, r := range rows {
+	for _, r := range got.rows {
 		plain = append(plain, ansi.Strip(r))
 	}
 	want := []string{"    ── main.go", "      2 - old line", "      2 + new line"}
@@ -29,20 +29,20 @@ func TestDiffRowsColourAndIndent(t *testing.T) {
 	// A language chroma knows routes the row through the highlighted path:
 	// the gutter is dim, the marker carries its own colour and the code the
 	// theme's, over the removal's dim red background.
-	if !strings.Contains(rows[1], "48;5;52") {
-		t.Fatalf("the removed row carries no removal background: %q", rows[1])
+	if !strings.Contains(got.rows[1], "48;5;52") {
+		t.Fatalf("the removed row carries no removal background: %q", got.rows[1])
 	}
-	if !strings.Contains(rows[2], "48;5;22") {
-		t.Fatalf("the added row carries no addition background: %q", rows[2])
+	if !strings.Contains(got.rows[2], "48;5;22") {
+		t.Fatalf("the added row carries no addition background: %q", got.rows[2])
 	}
 }
 
 func TestDiffRowsPlainPathForUnknownLanguage(t *testing.T) {
 	m := &uiModel{}
 	row := m.rowStyle(kindDiff)
-	rows := diffRows("── data.xyz123\n-2: old line\n+2: new line", 60, row)
-	if rows[1] != styleDel.Render("    ")+styleHint.Render("  2 ")+styleDel.Render("- old line") {
-		t.Fatalf("an unknown language must wrap and colour the whole row: %q", rows[1])
+	got := diffRows("── data.xyz123\n-2: old line\n+2: new line", 60, row)
+	if got.rows[1] != styleDel.Render("    ")+styleHint.Render("  2 ")+styleDel.Render("- old line") {
+		t.Fatalf("an unknown language must wrap and colour the whole row: %q", got.rows[1])
 	}
 }
 
@@ -50,11 +50,11 @@ func TestDiffRowsWrapLongLines(t *testing.T) {
 	m := &uiModel{}
 	row := m.rowStyle(kindDiff)
 	long := "+2: " + strings.Repeat("x", 80)
-	rows := diffRows(long, 40, row)
-	if len(rows) < 2 {
-		t.Fatalf("a row wider than the panel must wrap, got %d rows", len(rows))
+	got := diffRows(long, 40, row)
+	if len(got.rows) < 2 {
+		t.Fatalf("a row wider than the panel must wrap, got %d rows", len(got.rows))
 	}
-	for _, r := range rows {
+	for _, r := range got.rows {
 		if w := ansi.StringWidth(ansi.Strip(r)); w > 40 {
 			t.Fatalf("row is %d cells wide: %q", w, ansi.Strip(r))
 		}
