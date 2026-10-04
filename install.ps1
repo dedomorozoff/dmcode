@@ -32,6 +32,34 @@ $out = Join-Path $target "$bin.exe"
 Write-Host "dmcode: ставлю $tag (windows/$arch) -> $out"
 Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $out
 
+# Check the download against the release's checksums when it publishes them.
+# The file lists every asset; a release from before it existed skips the check
+# with a warning rather than failing an installer that would otherwise work.
+$sums = $release.assets | Where-Object { $_.name -eq 'sha256sums.txt' } | Select-Object -First 1
+if ($sums) {
+  $sumsText = (Invoke-WebRequest -Uri $sums.browser_download_url).Content
+  $want = $null
+  foreach ($line in ($sumsText -split "`n")) {
+    $line = $line.Trim()
+    if ($line -eq '') { continue }
+    $parts = $line -split '\s+', 2
+    if ($parts.Count -ne 2) { continue }
+    # sha256sum marks binary mode with a leading '*'; strip it before matching.
+    $name = $parts[1] -replace '^\*', ''
+    if ($name -eq $asset.name) { $want = $parts[0].ToLower(); break }
+  }
+  if (-not $want) {
+    Write-Warning "dmcode: $($asset.name) отсутствует в sha256sums.txt — пропускаю проверку"
+  } else {
+    $got = (Get-FileHash -Algorithm SHA256 -Path $out).Hash.ToLower()
+    if ($got -ne $want) {
+      Remove-Item -Force $out -ErrorAction SilentlyContinue
+      throw "dmcode: контрольная сумма не совпала (ожидалось $want, получено $got)"
+    }
+    Write-Host 'dmcode: контрольная сумма OK'
+  }
+}
+
 # Add the install dir to the user PATH when it is missing, so `dmcode` resolves
 # in future shells without the user editing anything by hand.
 $userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')

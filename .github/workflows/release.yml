@@ -124,6 +124,14 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate checksums
+        run: |
+          # One flat line per asset, named relative to dist/ so an installer can
+          # match its own file by name; the checksum file excludes itself.
+          cd dist
+          find . -type f ! -name sha256sums.txt -printf '%P\n' | sort |
+            xargs -r sha256sum > sha256sums.txt
+
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}

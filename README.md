@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh
 irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
 ```
 
+Both scripts check the download against the release's `sha256sums.txt`.
+
 **From source** — needs Go 1.26+:
 
 ```bash
