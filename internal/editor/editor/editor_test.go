@@ -575,7 +575,7 @@ func TestTerminalCursor(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		m.cur().buf.MoveRight()
 	}
-	x, y = m.cursorScreenPos()
+	x, _ = m.cursorScreenPos()
 	if x < 0 {
 		t.Fatalf("cursor x must be >= 0 after move right, got %d", x)
 	}

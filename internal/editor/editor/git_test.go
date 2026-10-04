@@ -1017,7 +1017,7 @@ func TestEditorGitBlameToggle(t *testing.T) {
 	}
 
 	// Alt+B again turns it off and clears the annotations.
-	next, cmd = m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModAlt})
+	next, _ = m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModAlt})
 	m = next.(Model)
 	if m.blameOn {
 		t.Fatal("Alt+B must toggle blame off")

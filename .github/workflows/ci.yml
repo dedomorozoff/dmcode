@@ -75,6 +75,37 @@ jobs:
       - name: Build (native)
         run: go build ./...
 
+  # The linter set is named in .golangci.yml rather than inherited from a
+  # default, so it is the same on a laptop and on CI. The version is pinned to
+  # the one the tree was verified against.
+  lint:
+    name: lint (gofmt + golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Tracked files only: the working tree also holds ignored scratch (tmp/),
+      # which must not decide whether the build is green.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l $(git ls-files '*.go'))
+          if [ -n "$unformatted" ]; then
+            echo "dmcode: these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11.3
+
   cross-build:
     name: cross-compile (${{ matrix.platform }})
     runs-on: ubuntu-latest

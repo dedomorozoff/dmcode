@@ -110,10 +110,8 @@ func Load(projectRoot string) Config {
 
 	// Environment variable overrides. The DMCODE_ names are the merged
 	// project's; the DMED_ ones are the dmed spellings, still honored.
-	if v := firstEnv("DMCODE_SHELL", "DMED_SHELL"); v != "" {
-		// Shell is not in Config struct but stored separately in the editor.
-		// This override is handled by the editor.
-	}
+	// DMCODE_SHELL/DMED_SHELL is deliberately not read here: Shell is not part
+	// of Config, it is stored separately in the editor, which owns that override.
 	if v := firstEnv("DMCODE_LANG", "DMED_LANG"); v != "" {
 		cfg.UI.Lang = v
 	}

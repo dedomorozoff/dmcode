@@ -623,7 +623,7 @@ func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 			numPad = 0
 		}
 		numStr := strings.Repeat(" ", numPad) + num
-		gutStr := numStr
+		var gutStr string
 		if active && ln == cur && ln < t.buf.LineCount() {
 			gutStr = curGutterStyle.Render(numStr)
 		} else {
@@ -1071,9 +1071,6 @@ func (m Model) gitStatusLine() string {
 	fill := m.width - lipgloss.Width(hint) - lipgloss.Width(line)
 	if fill < 0 {
 		if avail := m.width - lipgloss.Width(hint); avail < 4 {
-			if avail < 0 {
-				avail = 0
-			}
 			hint = m.fitStatusTail(hint, m.width-2)
 		}
 		avail := m.width - lipgloss.Width(hint)

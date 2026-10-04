@@ -21,7 +21,7 @@ build-%:
 	GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(DIST)/$(BINARY)-$*$$ext .
 
-.PHONY: vet test test-race fmt build clean install uninstall win-zip deb rpm pkg termux
+.PHONY: vet lint test test-race fmt fmt-check build clean install uninstall win-zip deb rpm pkg termux
 
 build: ## Native build into dist/ (version stamped).
 	@mkdir -p $(DIST)
@@ -29,6 +29,11 @@ build: ## Native build into dist/ (version stamped).
 
 vet:
 	go vet ./...
+
+# The set of linters is in .golangci.yml, and CI pins the same golangci-lint
+# version, so a laptop and a build see one set.
+lint:
+	golangci-lint run ./...
 
 test:
 	go test ./...
@@ -39,6 +44,15 @@ test-race:
 
 fmt:
 	go fmt ./...
+
+# gofmt check over tracked files only: the working tree also holds ignored
+# scratch (tmp/), which is not the repository's to format.
+fmt-check:
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go')); \
+	if [ -n "$$unformatted" ]; then \
+		echo "not gofmt'd:"; echo "$$unformatted"; exit 1; \
+	fi
+	@echo "gofmt clean"
 
 win-zip: build-windows-amd64
 	@command -v zip >/dev/null 2>&1 || { \

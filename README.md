@@ -556,6 +556,8 @@ make build              # -> dist/dmcode
 make test               # unit tests
 make test-race          # unit tests with the race detector
 make vet                # go vet
+make lint               # golangci-lint (.golangci.yml decides the set)
+make fmt-check          # fail if a tracked .go file is not gofmt'd
 make clean              # remove dist/
 ```
 
