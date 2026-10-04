@@ -103,6 +103,19 @@ Three fixes from the workspace's first days, no new surface:
   buffer appears under its own name as anything else would.
   `ctrl+w` with no file open is no longer an exit, which it never should have
   been — `ctrl+q` and `F1` are the advertised ones.
+- Typing `/` now matches what you type against command names **in order,
+  anywhere in the name**, instead of only as a prefix. One keystroke used to
+  leave one row — `/p` was `/proxy` and nothing else, `/n` was `/new` — so the
+  list closed the moment it opened, and finding `/resume` meant backspacing out
+  to reach the `r`. The order answers "which one did I mean": an exact name,
+  then names starting with it, then the rest by how close together your letters
+  appear. `/md` is `/mode`, not `/models`; `/c` is `/cd`, not `/changes`. The
+  window is also a few rows taller, since more commands stay plausible at once.
+- `/debug` works, is named in the README, and appeared in neither the `/` list
+  nor `ctrl+p` — typing `/de` matched nothing at all. A command hidden this way
+  is the list of commands and the set of commands being two different sets, so
+  it is listed now, from both places, and a test pins that every command that
+  answers is offered.
 
 ## What's new since v0.1.7
 

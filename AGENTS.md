@@ -178,6 +178,32 @@ Three consequences, each with a test in `scratch_tab_test.go`:
   going means quit" independently. A rule written into one of them is a trap in
   the other, which is exactly what `TestCloseLastTabReturnsQuit` used to pin.
 
+### The `/` list
+
+Typing `/` builds the list through `rankCommands` and `commandRank`
+(`internal/ui`), and neither is a prefix filter. Three grades, lower first: an
+exact name, a name starting with what was typed, and a name containing those
+letters **in order**. The third is the whole point — with prefix matching alone
+`/p` is `/proxy` and nothing else, so one keystroke left one row and the list
+closed the moment it opened. A length tie-break inside a grade settles what the
+rank cannot (`/md` is `/mode`, not `/models`), and the highlighted row is the one
+a single `enter` takes, so its being the *likely* one is the whole contract.
+
+Three things that are easy to get wrong here:
+
+- **An empty needle keeps the declared order.** Every command ties at rank 0, so
+  the length tie-break would otherwise sort the whole list by how long the
+  command names happen to be. `rankCommands` returns early instead.
+- **The list of commands and the set of commands must be one set.** `/debug` was
+  handled by the dispatcher, named in the README, and in neither the `/` list nor
+  `ctrl+p` — `/de` matched nothing. A command that works but is not offered is
+  invisible, and `TestEveryCommandThatWorksIsOffered` is the guard. `/model <id>`
+  is deliberately *not* listed: bare `/model` does nothing, and offering it would
+  advertise a trap.
+- **`HasPrefix` on a command name is a trap in the dispatcher too.** `/debug`
+  answered to `/debugger` too; every other prefix command uses `CutPrefix`, and so
+  does this one now.
+
 ### Mode switches
 
 `uiModel.pendingMode` is a mode the **agent** asked for, and it is applied only

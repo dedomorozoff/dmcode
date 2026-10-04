@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -992,6 +993,10 @@ func (m *uiModel) commands() []command {
 			m.historyDirty = true
 			return nil
 		}},
+		{name: "debug", desc: i18n.T("diagnostics for the transcript renderer"), run: func(m *uiModel) tea.Cmd {
+			m.showDebug()
+			return nil
+		}},
 		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
 			return m.openProxy()
 		}},
@@ -1675,29 +1680,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// exactly the user who wants to try a different picture next.
 				return m, m.attachImageCmd(arg)
 			}
-			if strings.HasPrefix(text, "/debug") {
-				// Diagnostics for the transcript pipeline: which line kind the
-				// reply is stored under, and whether the markdown renderer saw
-				// it. A reply that renders as raw markup is stored under some
-				// kind other than kindAgent, so every non-empty line is listed
-				// rather than guessed at.
-				m.history = append(m.history, line{kindSys, fmt.Sprintf(
-					"width=%d renderCalls=%d lines=%d",
-					m.contentWidth(), renderCalls, len(m.history))})
-				shown := 0
-				for i := len(m.history) - 1; i >= 0 && shown < 6; i-- {
-					l := m.history[i]
-					if strings.TrimSpace(l.text) == "" {
-						continue
-					}
-					row := m.rowStyle(l.kind)
-					m.history = append(m.history, line{kindSys, fmt.Sprintf(
-						"  [%d] %-7s md=%-5v %q",
-						i, kindName(l.kind), row.markdown, truncate(oneLine(l.text), 46))})
-					shown++
+			if arg, ok := strings.CutPrefix(text, "/debug"); ok {
+				// Cut by prefix rather than by HasPrefix, so "/debugger" is a prompt
+				// like any other: a command that answers to a longer word is a command
+				// nobody can see the end of.
+				if strings.TrimSpace(arg) != "" || m.busy {
+					return m, nil
 				}
-				m.historyDirty = true
-				m.followVP()
+				m.showDebug()
 				return m, nil
 			}
 			if id, ok := strings.CutPrefix(text, "/model "); ok {
@@ -1989,8 +1979,13 @@ func (m *uiModel) suggestHeight() int {
 const minSuggestRows = 2
 
 // suggestMaxRows caps the list. A user arrowing through commands wants to read
-// the reply they are answering, not scroll a pane that swallowed it.
-const suggestMaxRows = 8
+// the reply they are answering, not scroll a pane that swallowed it — but it has
+// to be enough rows to be a list rather than a peek, because matching the letters
+// in order (see rankCommands) keeps several commands plausible after one
+// keystroke, and a window that showed two of them would be hiding the reason for
+// the change. Everything above this is bounded by the room on the screen, which
+// suggestHeight asks for.
+const suggestMaxRows = 12
 
 // transcriptRows is how many transcript rows the terminal affords. The same
 // arithmetic layout and View both need, kept in one place so the viewport
@@ -2137,6 +2132,36 @@ type suggestion struct {
 // the rebuild below. Without the memo the highlight was thrown away twice a
 // second, so a single press of Down appeared to snap the cursor back to the top.
 
+// showDebug prints diagnostics for the transcript pipeline: which line kind the
+// reply is stored under, and whether the markdown renderer saw it. A reply that
+// renders as raw markup is stored under some kind other than kindAgent, so every
+// non-empty line is listed rather than guessed at.
+//
+// A method rather than a block in the dispatcher so the command can be listed
+// where the others are. It was working and invisible: "/debug" answered, the
+// README named it, and it appeared in neither the "/" list nor ctrl+p — the list
+// of commands and the set of commands being two different sets is the bug that
+// lets a command hide.
+func (m *uiModel) showDebug() {
+	m.history = append(m.history, line{kindSys, fmt.Sprintf(
+		"width=%d renderCalls=%d lines=%d",
+		m.contentWidth(), renderCalls, len(m.history))})
+	shown := 0
+	for i := len(m.history) - 1; i >= 0 && shown < 6; i-- {
+		l := m.history[i]
+		if strings.TrimSpace(l.text) == "" {
+			continue
+		}
+		row := m.rowStyle(l.kind)
+		m.history = append(m.history, line{kindSys, fmt.Sprintf(
+			"  [%d] %-7s md=%-5v %q",
+			i, kindName(l.kind), row.markdown, truncate(oneLine(l.text), 46))})
+		shown++
+	}
+	m.historyDirty = true
+	m.followVP()
+}
+
 func (m *uiModel) updateSuggest() {
 	m.rebuildSuggest(m.input.Value())
 }
@@ -2199,12 +2224,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 		return
 	}
 	if !strings.Contains(text, " ") {
-		prefix := strings.TrimPrefix(text, "/")
-		for _, c := range m.commands() {
-			if strings.HasPrefix(c.name, prefix) {
-				m.suggest = append(m.suggest, suggestion{"/" + c.name, c.desc})
-			}
-		}
+		m.suggest = rankCommands(m.commands(), strings.ToLower(strings.TrimPrefix(text, "/")))
 		m.clampSuggest()
 		return
 	}
@@ -2220,6 +2240,99 @@ func (m *uiModel) rebuildSuggest(text string) {
 		}
 	}
 	m.clampSuggest()
+}
+
+// rankCommands is what the "/" list is built from: every command that can still
+// match what has been typed, best match first.
+//
+// Prefix matching alone was the problem. One keystroke usually left exactly one
+// row — "/p" is "/proxy" and nothing else, "/n" is "/new" — so the list closed
+// the moment it opened, and a user who meant "/resume" had to backspace out to
+// find it. Matching the letters in order, rather than only at the front, keeps
+// several candidates on screen for as long as several are plausible, and the
+// ranking is what stops that from being noise: the command most likely meant is
+// the one under the highlight, which is the row a single Enter takes.
+//
+// An empty needle keeps every command in its declared order, so a bare "/" is
+// still the whole list rather than a rank order nobody chose.
+// A length tie-break inside a rank, so the shorter of two equally good matches
+// wins: "/md" is /mode rather than /models, "/c" is /cd rather than /changes, and
+// a command spelled shorter is the one a user typing two letters was reaching for.
+// The sort is stable, so the declared order still settles what nothing else can.
+func rankCommands(cmds []command, needle string) []suggestion {
+	if needle == "" {
+		// A bare "/" is the whole list in the order it was declared — the order
+		// somebody chose when they wrote the commands down. Ranking cannot improve
+		// on that, and the length tie-break below would otherwise sort it by how
+		// long the command names happen to be.
+		s := make([]suggestion, 0, len(cmds))
+		for _, c := range cmds {
+			s = append(s, suggestion{"/" + c.name, c.desc})
+		}
+		return s
+	}
+	type ranked struct {
+		s    suggestion
+		rank int
+	}
+	var out []ranked
+	for _, c := range cmds {
+		if rank, ok := commandRank(strings.ToLower(c.name), needle); ok {
+			out = append(out, ranked{suggestion{"/" + c.name, c.desc}, rank})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].rank != out[j].rank {
+			return out[i].rank < out[j].rank
+		}
+		return len(out[i].s.text) < len(out[j].s.text)
+	})
+	s := make([]suggestion, 0, len(out))
+	for _, r := range out {
+		s = append(s, r.s)
+	}
+	return s
+}
+
+// commandRank grades one command name against the needle: lower is a better
+// match, and ok is false when the letters cannot be found at all.
+//
+// Three grades. An exact name is the command and nothing else. A name starting
+// with the needle is what a user who knows the name types. A name that contains
+// the needle's letters in order is the third grade, and it is what makes one
+// letter worth typing at all.
+//
+// The gap penalty inside that third grade is what keeps it from being noise: it
+// is the distance from the last letter already matched to the next one, so "/do"
+// ranks "/todo" above "/editor" and "/ot" ranks "/todo" above "/proxy". The
+// letters a user typed together should land together — a run scattered across a
+// name is a worse answer than a run found side by side, even when both are
+// subsequence matches.
+func commandRank(name, needle string) (rank int, ok bool) {
+	if needle == "" {
+		// Everything matches, and nothing is ranked above anything else.
+		return 0, true
+	}
+	if name == needle {
+		return 0, true
+	}
+	if strings.HasPrefix(name, needle) {
+		return 1, true
+	}
+	pos, gaps := 0, 0
+	for i := 0; i < len(needle); i++ {
+		j := strings.IndexByte(name[pos:], needle[i])
+		if j < 0 {
+			return 0, false
+		}
+		if i > 0 {
+			gaps += j
+		}
+		pos += j + 1
+	}
+	// Past the prefix grade, so a gap can only worsen a match and never
+	// promote one above a name that simply starts with what was typed.
+	return 2 + gaps, true
 }
 
 // clampSuggest pulls the highlighted row back inside the list. Typing narrows the

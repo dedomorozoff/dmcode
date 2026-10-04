@@ -384,6 +384,25 @@ the header and the sidebar, and the keys are in `/help`.
 
 Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
+## Commands
+
+Type `/` and the list opens with everything in it. Type a letter or two and it
+narrows by matching those letters *in order* anywhere in a command's name, not
+only at the front — so `/p` keeps `/proxy`, `/copy`, `/help` and `/setup` on
+screen instead of collapsing to the one command that starts with `p`, and `/se`
+finds `/sessions` whether or not you finished typing it.
+
+The order is the answer to "which one did I mean": a command that *is* what you
+typed comes first, then those that start with it, then the rest by how close
+together the letters you typed appear in the name. The row under the highlight is
+what a single `enter` takes, so it is the one most likely meant — `/md` gives
+`/mode` rather than `/models`, `/c` gives `/cd` rather than `/changes`.
+
+`/debug` used to work without appearing anywhere: it was handled by the
+dispatcher, named in this file, and in neither the `/` list nor `ctrl+p`. The
+list of commands and the set of commands being two different sets is how a
+command hides.
+
 ## HTTP proxy
 
 `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are honoured, so a proxy already
