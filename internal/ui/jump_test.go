@@ -25,6 +25,7 @@ import (
 // and mouse reporting on — the state a click arrives in.
 func jumpModel(t *testing.T, dir string) *uiModel {
 	t.Helper()
+	pinEditorFrame(t, dir)
 	m := newTurnModel(t)
 	m.workDir = dir
 	m.workDirShort = filepath.Base(dir)

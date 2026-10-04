@@ -17,7 +17,7 @@ import (
 // chrome — tab bar, tree, status bar — stays up around the transcript.
 func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 	m := newTurnModel(t)
-	m.workDir = t.TempDir()
+	m.workDir = editorWorkDir(t)
 
 	_ = m.openEditor()
 	if m.ed == nil || m.ed.Chat {
@@ -73,7 +73,7 @@ func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 // running — closing the editor must not end the program.
 func TestEditorQuitReturnsToChatMode(t *testing.T) {
 	m := newTurnModel(t)
-	m.workDir = t.TempDir()
+	m.workDir = editorWorkDir(t)
 	_ = m.openEditor() // into editor mode
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'q', Mod: tea.ModCtrl})
@@ -98,7 +98,7 @@ func TestEditorQuitReturnsToChatMode(t *testing.T) {
 // ToggleEditorMsg and the host flips the mode and folds the panels.
 func TestEditorCtrlEReturnsToChatMode(t *testing.T) {
 	m := newTurnModel(t)
-	m.workDir = t.TempDir()
+	m.workDir = editorWorkDir(t)
 	_ = m.openEditor() // into editor mode
 
 	_, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl})
