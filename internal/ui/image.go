@@ -387,9 +387,18 @@ type imageErrMsg struct{ err error }
 // attachImageCmd is /image and the paste path: it attaches a picture without
 // sending anything, so the user can look at the preview and decide.
 func (m *uiModel) attachImageCmd(args string) tea.Cmd {
-	arg := strings.TrimSpace(args)
+	// The argument goes through splitTokens because a path with a space in it
+	// arrives quoted — dropped that way by a terminal, and typed that way by a
+	// user copying the form it printed. A token still carrying its quotes is not
+	// a path anything will resolve, and the error that comes back names the quote
+	// rather than the file.
+	arg := ""
+	for _, tok := range splitTokens(args) {
+		arg = tok.text
+		break
+	}
 	if arg == "" {
-		m.statusText = i18n.T("usage: /image <path> вЂ” or drop a picture into the prompt")
+		m.statusText = i18n.T("usage: /image <path> — or drop a picture into the prompt")
 		return nil
 	}
 	a, err := m.attachImage(arg)

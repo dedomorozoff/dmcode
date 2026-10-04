@@ -654,6 +654,11 @@ type command struct {
 	name string
 	desc string
 	run  func(m *uiModel) tea.Cmd
+	// takesArg marks a command whose bare form is not what the user wants, so
+	// the command list completes such a row into the prompt instead of running
+	// it. /image and /resume do nothing without an argument; /proxy, /cd and
+	// /new all have a useful bare form, so they keep running.
+	takesArg bool
 }
 
 // editorUpdate forwards a message into the embedded editor and keeps the
@@ -928,7 +933,7 @@ func (m *uiModel) commands() []command {
 		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
 			return m.changeDir("")
 		}},
-		{name: "image", desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
+		{name: "image", takesArg: true, desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
 			return m.attachImageCmd("")
 		}},
 		{name: "unimage", desc: i18n.T("drop the last attached picture"), run: func(m *uiModel) tea.Cmd {
@@ -946,10 +951,12 @@ func (m *uiModel) commands() []command {
 		{name: "sessions", desc: i18n.T("switch between saved sessions"), run: func(m *uiModel) tea.Cmd {
 			return m.openSessions()
 		}},
-		{name: "resume", desc: i18n.T("open a session by id (/resume <id>)"), run: func(m *uiModel) tea.Cmd {
+		{name: "resume", takesArg: true, desc: i18n.T("open a session by id (/resume <id>)"), run: func(m *uiModel) tea.Cmd {
 			// The palette runs a command with no argument, and this one is
 			// meaningless without an id — so it says how to use itself rather
-			// than opening a prompt the palette would immediately lose.
+			// than opening a prompt the palette would immediately lose. The
+			// command list does not reach here for the same command: takesArg
+			// completes the row into the prompt instead of running it.
 			m.statusText = i18n.T("usage: /resume <id> — /sessions lists the ids")
 			return nil
 		}},
@@ -1521,9 +1528,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// highlighted. Without this the arrows would only move a cursor and
 			// the user would still have to type the command exactly.
 			if m.suggestSel < len(m.suggest) && len(m.suggest) > 0 {
-				text := strings.TrimSpace(m.suggest[m.suggestSel].text)
-				m.input.SetValue(text)
+				row := m.suggest[m.suggestSel]
+				text := strings.TrimSpace(row.text)
 				m.suggest = nil
+				if row.takesArg {
+					// A command that needs an argument is completed, not run.
+					// Running "/image" with no path prints a usage line and
+					// empties the prompt, so the path the user types next is sent
+					// to the model as a question about a filename — which is
+					// exactly what "the command is broken" looks like, and it is
+					// what the list invites you to do when it offers a row for
+					// what you typed.
+					m.input.SetValue(text + " ")
+					m.input.CursorEnd()
+					m.updateSuggest()
+					return m, nil
+				}
+				m.input.SetValue(text)
 				m.updateSuggest()
 				// A /model row carries its argument already; anything else goes
 				// through the command switch below as typed.
@@ -2117,6 +2138,10 @@ func (m *uiModel) followVP() {
 type suggestion struct {
 	text string
 	desc string
+	// takesArg is the command's own flag, carried on the row because the Enter
+	// handler needs it and holds only rows. A row that needs an argument is
+	// completed into the prompt rather than run.
+	takesArg bool
 }
 
 // updateSuggest rebuilds the command list shown above the input.
@@ -2232,7 +2257,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 		q := strings.TrimSpace(id)
 		for _, id := range m.picker.Models {
 			if q == "" || strings.Contains(id, q) {
-				m.suggest = append(m.suggest, suggestion{"/model " + id, i18n.T("switch to this model")})
+				m.suggest = append(m.suggest, suggestion{text: "/model " + id, desc: i18n.T("switch to this model")})
 			}
 			if len(m.suggest) >= 8 {
 				break
@@ -2267,7 +2292,7 @@ func rankCommands(cmds []command, needle string) []suggestion {
 		// long the command names happen to be.
 		s := make([]suggestion, 0, len(cmds))
 		for _, c := range cmds {
-			s = append(s, suggestion{"/" + c.name, c.desc})
+			s = append(s, suggestion{text: "/" + c.name, desc: c.desc})
 		}
 		return s
 	}
@@ -2278,7 +2303,9 @@ func rankCommands(cmds []command, needle string) []suggestion {
 	var out []ranked
 	for _, c := range cmds {
 		if rank, ok := commandRank(strings.ToLower(c.name), needle); ok {
-			out = append(out, ranked{suggestion{"/" + c.name, c.desc}, rank})
+			out = append(out, ranked{
+				suggestion{"/" + c.name, c.desc, c.takesArg}, rank,
+			})
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {

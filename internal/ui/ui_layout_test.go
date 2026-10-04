@@ -443,11 +443,11 @@ func framedModel(w, h int, model string) *uiModel {
 		{kindSys, i18n.T("— session reset —")},
 	}
 	m.suggest = []suggestion{
-		{"/model " + model, i18n.T("switch to this model")},
-		{"/models", i18n.T("list models")},
-		{"/new", i18n.T("start a new session")},
-		{"/clear", i18n.T("clear the screen")},
-		{"/quit", i18n.T("leave")},
+		{text: "/model " + model, desc: i18n.T("switch to this model")},
+		{text: "/models", desc: i18n.T("list models")},
+		{text: "/new", desc: i18n.T("start a new session")},
+		{text: "/clear", desc: i18n.T("clear the screen")},
+		{text: "/quit", desc: i18n.T("leave")},
 	}
 	m.width, m.height = w, h
 	m.layout()
