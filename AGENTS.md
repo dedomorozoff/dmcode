@@ -68,7 +68,12 @@
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
   - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
   - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `List` is the one eager pass: names for the sidebar, notes for the servers that did not come up.
-  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar), `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go` (ctrl+z, session switching), `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the question overlay and the sub-agent notes), `plan_view.go` (the plan block).
+  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar),
+    `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending
+    agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go`
+    (ctrl+z, session switching), `jump.go` (clicking a change opens the file at
+    that line), `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the
+    question overlay and the sub-agent notes), `plan_view.go` (the plan block).
   - `internal/memsession`: the session store — the ADK `session.Service` dmcode runs on, plus the JSONL persistence under `~/.dmcode/sessions`.
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
@@ -108,6 +113,70 @@ Columns are cells, not bytes and not runes: the loop decodes each rune and asks
 `ansi.StringWidth` for its width, because a CJK character is two cells wide and
 counting runes cuts the first one in half. `TestSelectionCountsWideRunesAsTwoCells`
 is the one that would catch a regression there.
+
+### From a change in the transcript to the file
+
+A `kindDiff` row can be clicked and the editor opens the file at that line
+(`internal/ui/jump.go`). Five things about it are not obvious, and each is one
+that reads fine until it is wrong:
+
+- **The line number has to survive as a value, not as text.** By the time the
+  click arrives the row is styled, gutter-numbered, maybe wrapped onto a second
+  screen row and maybe ANSI-truncated, so the number is a `codeRef` beside the
+  rendered row (`renderedRows`). Reading it back out of the drawn row would mean
+  re-deriving the gutter's own arithmetic — including which blank gutter was a
+  wrapped continuation — which is the "answers a different question" mistake.
+- **`cachedLine` holds the refs, not just the strings.** The render cache exists
+  so a streamed token re-wraps one line, which means most frames reuse it. A
+  cache that kept the rows and dropped the refs would empty the click index on
+  exactly those frames: the click works once, then stops working on every message
+  that scrolls past. `TestTheChangeIndexSurvivesTheRenderCache` is the guard.
+- **A screen row is not a transcript row.** `transcriptTop()` (the header, when
+  it is up, plus the panel's own top border) and `vp.YOffset()` are that
+  arithmetic. The tests build a real frame, *find* the change row in it and click
+  there, so an off-by-one fails instead of jumping somewhere plausible — the four
+  mutations worth trying are `transcriptTop`, the cached refs, the `hostCall` flag
+  in `Host.Release`, and `jumpFrom`.
+- **A box on screen is a box on screen.** With an overlay up, `buildFrame` draws
+  the box and not the chat, so the hit test's arithmetic is answering about a
+  screen that is not there. `chatOverlayUp` covers the command list too, which
+  is painted *over* the panel rather than replacing it: those transcript rows are
+  still in the frame, and the row under the pointer would be the one behind the
+  list.
+- **`alt+g`, not `ctrl+g`.** The editor answers `ctrl+g` with its git panel
+  before the chat sees the key, so the mnemonic would work in a bare chat and do
+  nothing once the editor existed — §5's `ctrl+v` trap from the other direction.
+- **`Host.Click/Motion/Release/Wheel` set `hostCall`, exactly as `Host.Key`
+  does.** A jump taken from a click that arrived through the editor is *inside*
+  the editor's `Update`, and a direct `m.ed.Chat = false` there is clobbered by
+  the copy that `Update` returns — the jump would be lost every time, silently.
+
+A `-` row carries the old file's number and lands on the replacement: the block
+trims a shared prefix and suffix off both texts and numbers both sides from the
+same place, so the line a removal used to be on is the line its replacement is on.
+
+### The editor's empty buffer
+
+`internal/editor/editor` always has a tab, so there is always a buffer to type
+into and a `cur()` that cannot be nil. `renderPaneRows` indexes
+`tabs[pane.tabIdx]` outright and about a hundred other places call `cur()`, so
+that tab is load-bearing and cannot simply be deleted — which is why the fix is
+presentational rather than structural: `tab.scratch()` derives "this is the
+standing empty buffer, not a file" from the state already there (no path, not
+dirty, nothing typed), and everything that draws it asks that.
+
+Three consequences, each with a test in `scratch_tab_test.go`:
+
+- **Derived, not tracked.** A `bool` set once would have to be unset in every
+  path that clears a buffer; the predicate cannot disagree with the buffer.
+- **It is dropped when a file opens** (`openPath`), not just hidden. Left in the
+  slice it is an invisible tab 1, and every tab the user can see is numbered
+  from 2 — and `Alt+1..9` jumps by real index, so the numbers and the keys
+  would disagree.
+- **Both tab-closing paths ask `lastTabIsEmpty()`** — `closeActiveTab`
+  (`ctrl+w`) and `closeTabAt` (`ctrl+x`, middle-click) each decide "the last tab
+  going means quit" independently. A rule written into one of them is a trap in
+  the other, which is exactly what `TestCloseLastTabReturnsQuit` used to pin.
 
 ### Mode switches
 

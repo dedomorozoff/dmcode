@@ -299,6 +299,7 @@ the agent is not going to ask before they stop watching.
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
 | `ctrl+z` | undo the last message (rewind) |
+| `alt+g` | open the next change the agent made, in the editor (repeat to walk them) |
 | `ctrl+q` | quit dmcode (in the editor it returns to the chat first) |
 | `tab` | plan / act mode |
 | `shift+tab` | yolo mode on / off (act and plan keep their tools) |
@@ -307,9 +308,26 @@ the agent is not going to ask before they stop watching.
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
+| click | open the file at the line of the change you clicked |
 
 Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
 PTY, LSP completions, splits and bookmarks, which is too much for a table here.
+
+## Going to a change
+
+When a write lands, the transcript draws what changed: the file's name, the real
+line numbers in the gutter, and the code itself. **Click any line of that block
+and the editor opens the file there**, cursor on the row you pointed at. The same
+goes for a line the write removed — it opens the line that replaced it, which is
+the one a reader is looking for.
+
+`alt+g` (or `/changes`) does the same without aiming: it opens the next change
+below where you are, and pressing it again steps through the rest of the
+session's edits and comes back round to the first.
+
+A click that is not on a change row still does nothing, which is the rule that
+keeps the selection below usable: without it, every click in the transcript would
+be a jump.
 
 ## The editor
 
@@ -326,6 +344,12 @@ stays in the main area when the editor is closed, the panel toggles stay live in
 both, and the status bar at the bottom is the same row in each — in chat mode it
 carries the icons and the git branch, and in the editor mode it adds the file's
 own state (`Ln`, `Col`, encoding, language).
+
+With no file open the editor says so rather than showing an empty tab: no tab in
+the bar, no line numbers down the side, and one line naming the keys that fill it
+(`ctrl+o` finds a file, `ctrl+p` has a new-file command). The editor always has a
+buffer behind that, so typing works straight away — the tab appears the moment
+there is something in it, under `[untitled]` until you name it with `ctrl+s`.
 
 The four icons at the left of that row are the workspace: `▣` editor, `▤` project
 tree, `⎇` git, `❯` terminal. Each is clickable, each shows its label on hover,
@@ -347,7 +371,8 @@ of a row takes what is there.
 
 A plain click copies nothing. Without that rule every click in the transcript
 would overwrite the clipboard with a single character and the feature would be
-worse than useless.
+worse than useless. The one thing a click *does* do is open a change in the
+editor — see [Going to a change](#going-to-a-change).
 
 `/mouse` turns the whole thing off and hands the terminal back, which is what you
 want if you prefer the terminal's own drag-select and paste menu — dmcode cannot
@@ -357,7 +382,7 @@ doing it itself.
 The status bar carries the mode and the state, and nothing else — the model is in
 the header and the sidebar, and the keys are in `/help`.
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
 ## HTTP proxy
 

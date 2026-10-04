@@ -72,6 +72,14 @@ Three fixes from the workspace's first days, no new surface:
   transcript: a header naming the file, real line numbers from the old and
   the new text in a gutter, and the code highlighted with the editor's
   syntax theme over a dim green or red wash for the added and removed rows.
+- Those line numbers are now something you can act on. **Click any line of a
+  change block and the editor opens the file there**, cursor on the row you
+  pointed at — including a line the write removed, which opens the line that
+  replaced it. `alt+g` (or `/changes`) does the same without aiming: it opens
+  the next change below where you are, and pressing it again walks the rest of
+  the session's edits and comes back round.
+- A click that is not on a change row still does nothing, so the
+  select-and-copy that a plain click is careful not to break keeps working.
 - A `write_file` cut off by the model's output limit no longer loses the
   turn when the model had narrated first: the re-ask goes ahead, preceded
   by a blank line, with a concrete recipe for writing the file in chunks.
@@ -86,6 +94,15 @@ Three fixes from the workspace's first days, no new surface:
 - A fresh program start opens a bare editor too: the workspace no longer
   restores the tabs the last run saved. The standalone editor keeps its
   session restore.
+- The editor no longer shows an `[untitled]` tab it did not open. Opening the
+  workspace on a session where the agent had changed nothing used to put a tab
+  bar reading `1:[untitled]` over an empty gutter and a status line reading
+  `Ln 1, Col 1` — a document nobody has, reporting a cursor that is nowhere.
+  It now says **no file open — Ctrl+O to find one · Ctrl+P for a new file**,
+  over nothing: no tab, no gutter, no line number. The moment you type, the
+  buffer appears under its own name as anything else would.
+  `ctrl+w` with no file open is no longer an exit, which it never should have
+  been — `ctrl+q` and `F1` are the advertised ones.
 
 ## What's new since v0.1.7
 
