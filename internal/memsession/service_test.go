@@ -376,7 +376,7 @@ func TestTranscriptOfPairsPromptsWithAnswers(t *testing.T) {
 	if len(tr.Turns) != 2 {
 		t.Fatalf("got %d turns, want 2", len(tr.Turns))
 	}
-	if tr.Turns[0].User != "вопрос" || tr.Turns[0].Agent != "ответ" {
+	if tr.Turns[0].User != "вопрос" || tr.Turns[0].Prose() != "ответ" {
 		t.Errorf("turn 1 = %+v, want the first exchange", tr.Turns[0])
 	}
 	if tr.Turns[1].User != "ещё вопрос" {

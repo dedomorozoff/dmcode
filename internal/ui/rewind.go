@@ -7,6 +7,7 @@ import (
 	"google.golang.org/adk/v2/session"
 
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	"github.com/dedomorozoff/dmcode/internal/memsession"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
@@ -285,10 +286,41 @@ func (m *uiModel) summariseSession(id string) {
 			m.history = append(m.history, line{kindSys, i18n.T("(no answer — that turn was cut short)")})
 			continue
 		}
-		m.history = append(m.history, line{kindAgent, truncate(t.Agent, 800)})
+		m.printTurn(t)
 	}
 	m.historyDirty = true
 	m.followVP()
+}
+
+// printTurn draws one restored turn.
+//
+// Every entry is drawn, and through the same functions the live turn draws them:
+// a tool result carrying a diff becomes the result row *and* the change block,
+// because that is what it became when it happened. The prose-only version is how
+// this used to render, and it dropped the whole of a turn's working — a
+// resumed session read as a conversation with none of the code in it, while the
+// store had every call, result and diff all along.
+func (m *uiModel) printTurn(t memsession.Turn) {
+	for _, e := range t.Entries {
+		switch e.Kind {
+		case memsession.EntryAgent:
+			m.history = append(m.history, line{kindAgent, truncate(e.Text, 800)})
+		case memsession.EntryTool:
+			if e.Call == nil {
+				continue
+			}
+			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, toolArgs(e.Call.Args))})
+		case memsession.EntryToolResult:
+			if e.Result == nil {
+				continue
+			}
+			summary, diff := renderToolResponse(e.Result)
+			m.history = append(m.history, line{kindToolRes, summary})
+			if diff != "" {
+				m.history = append(m.history, line{kindDiff, diff})
+			}
+		}
+	}
 }
 
 // reportStoreProblem surfaces a failed session write once, in the transcript

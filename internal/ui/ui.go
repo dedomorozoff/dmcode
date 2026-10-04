@@ -1768,7 +1768,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastTool = msg.name
 		m.toolCallCount++
 		m.statusText = i18n.T("calling: ") + msg.name
-		m.history = append(m.history, line{kindTool, msg.name + "(" + msg.args + ")"})
+		m.history = append(m.history, line{kindTool, toolLine(msg.name, msg.args)})
 		m.historyDirty = true
 	case toolResMsg:
 		m.statusText = i18n.T("returned: ") + msg.name
@@ -3932,8 +3932,7 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 			for _, tp := range parts {
 				switch {
 				case tp.call != nil:
-					args, _ := json.Marshal(tp.call.Args)
-					p.Send(toolCallMsg{name: tp.call.Name, args: truncate(string(args), 160)})
+					p.Send(toolCallMsg{name: tp.call.Name, args: toolArgs(tp.call.Args)})
 				case tp.resp != nil:
 					summary, diff := renderToolResponse(tp.resp)
 					p.Send(toolResMsg{name: tp.resp.Name, output: summary, diff: diff})
@@ -4132,6 +4131,23 @@ func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 // came with a diff (write_file, edit_file) has that diff pulled out of the
 // summary JSON: the transcript draws it coloured under the result, and the
 // JSON line stays a one-liner instead of an escaped block.
+// toolLine is the transcript's line for a tool the model asked for: the name and
+// its arguments.
+//
+// toolArgs is its other half, so a restored session prints the same line a live
+// turn did. Two callers that each built the line themselves would be a second
+// answer to "what does a tool call look like" — free to drift, and with the
+// transcript of a resumed session quietly showing a different shape from the one
+// the user remembers.
+func toolLine(name, args string) string { return name + "(" + args + ")" }
+
+// toolArgs is a call's arguments as the transcript shows them: the marshalled
+// map, shortened so a long path cannot take the row.
+func toolArgs(args map[string]any) string {
+	b, _ := json.Marshal(args)
+	return truncate(string(b), 160)
+}
+
 func renderToolResponse(fr *genai.FunctionResponse) (summary, diff string) {
 	resp := fr.Response
 	if m := resp; m != nil {
