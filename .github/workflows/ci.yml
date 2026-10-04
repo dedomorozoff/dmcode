@@ -11,7 +11,7 @@ env:
 
 jobs:
   test:
-    name: vet + test
+    name: vet + test (ubuntu, race)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,8 +28,52 @@ jobs:
       - name: Unit tests
         run: make test
 
+      - name: Unit tests (race)
+        run: make test-race
+
       - name: Build (native)
         run: make build
+
+  # The suite branches on GOOS where it matters — a Windows screenshot is a DIB
+  # read by a windows-only file, and the shell probe, the PTY layer and the
+  # terminal-compat check each pick a different path — so the tests run on the
+  # platforms the code branches for, not only the one it was written on. `go` is
+  # called here rather than `make` because the Windows image has no `make`.
+  platforms:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            race: 'yes'
+          # A -race build needs a C toolchain cgo can find, which the Windows
+          # image does not guarantee; the plain suite runs there instead.
+          - os: windows-latest
+            race: 'no'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Static analysis
+        run: go vet ./...
+
+      - name: Unit tests (race)
+        if: matrix.race == 'yes'
+        run: go test -race ./...
+
+      - name: Unit tests
+        if: matrix.race != 'yes'
+        run: go test ./...
+
+      - name: Build (native)
+        run: go build ./...
 
   cross-build:
     name: cross-compile (${{ matrix.platform }})

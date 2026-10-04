@@ -552,6 +552,7 @@ Other targets:
 ```bash
 make build              # -> dist/dmcode
 make test               # unit tests
+make test-race          # unit tests with the race detector
 make vet                # go vet
 make clean              # remove dist/
 ```

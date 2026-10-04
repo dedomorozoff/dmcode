@@ -21,7 +21,7 @@ build-%:
 	GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(DIST)/$(BINARY)-$*$$ext .
 
-.PHONY: vet test fmt build clean install uninstall win-zip deb rpm pkg termux
+.PHONY: vet test test-race fmt build clean install uninstall win-zip deb rpm pkg termux
 
 build: ## Native build into dist/ (version stamped).
 	@mkdir -p $(DIST)
@@ -32,6 +32,10 @@ vet:
 
 test:
 	go test ./...
+
+# -race needs a C toolchain (CGO_ENABLED=1); it runs in CI on Linux and macOS.
+test-race:
+	go test -race ./...
 
 fmt:
 	go fmt ./...
