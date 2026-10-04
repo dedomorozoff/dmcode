@@ -5037,7 +5037,31 @@ func (m *uiModel) askWait(req ask.Request) time.Duration {
 // and cannot get one, so it cannot send anything itself. A plain
 // func(SubEvent) parameter could only be called by main, which would be the
 // wrong direction.
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool) error {
+// Resume says which saved session a start should open. The zero value opens
+// none, which is what every start without the flag wants.
+//
+// ID is the session to open; empty with Asked set means "the newest one", which
+// is what a bare -s asks for. main settles that before it gets here, because the
+// runner is built around a session id and an id chosen afterwards would point the
+// conversation at the wrong one.
+type Resume struct {
+	Asked bool
+	ID    string
+}
+
+// sessionToOpen is the session this start should open, or "" for a new one.
+//
+// A method so that the decision is testable without a TUI: it is the whole of what
+// -s asks for, and the mistake to guard against is the id arriving after the
+// runner has been built around a different one.
+func (r Resume) sessionToOpen() string {
+	if !r.Asked {
+		return ""
+	}
+	return r.ID
+}
+
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -5054,6 +5078,14 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	if len(mcpNotes) > 0 {
 		m.statusText = strings.Join(mcpNotes, "; ")
 	}
+	// Set before the runner exists, so the store registers this id rather than
+	// the fresh one InitialModel minted. A resume that names nothing — no store,
+	// or a store with nothing in it — stays a new session rather than failing a
+	// start over a flag the user typed out of habit.
+	resumed := resume.sessionToOpen()
+	if resumed != "" {
+		m.sessionID = resumed
+	}
 
 	prog := tea.NewProgram(m)
 	m.prog = prog
@@ -5069,10 +5101,54 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 		return err
 	}
 	m.runner = r
+	if resumed != "" {
+		// The tail goes up before the first frame. Without it the session opens
+		// on an empty transcript beside a model that remembers everything, which
+		// is the one thing that makes a resume look broken.
+		m.resumedSession()
+	}
 
 	_, err = prog.Run()
+	// The transcript was on the alternate screen and is gone now, so this is the
+	// one moment a line about it reaches the scrollback and stays there. Before
+	// this the program says which session it is in — in the header, the sidebar
+	// and every /sessions row — but all of those vanish with the TUI.
+	if hint := resumeHint(m.sessionID); hint != "" {
+		fmt.Println(hint)
+	}
 	return err
 }
+
+// resumeHint is the line dmcode leaves behind when it exits.
+//
+// A session is a thing on disk that nothing in the TUI can show once the window
+// is closed, and its id is opaque. Printing the exact command is what makes the
+// id usable rather than something to look up in a directory listing — and it is
+// the same command every time, so it can be pasted rather than assembled.
+//
+// It is a string and not a print so that what it says is testable without
+// capturing the process's output.
+func resumeHint(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	return fmt.Sprintf(i18n.T("dmcode: session %s saved — resume it with:  dmcode -s %s"), id, id)
+}
+
+// resumedSession prints what the resumed conversation was, and says which one it
+// is. The session itself needs nothing: the id is the store's own key, so the
+// runner reads that conversation's events on the first turn with no extra step.
+func (m *uiModel) resumedSession() {
+	m.statusText = i18n.T("resumed session: ") + m.sessionID
+	m.summariseSession(m.sessionID)
+}
+
+// newRunner assembles the agent and the session runner for a tool set.
+//
+// The session service is created once and reused across mode switches: keeping
+// it is what preserves the conversation, so flipping to plan and back does not
+// cost the user the context they had built up.
 
 // newRunner assembles the agent and the session runner for a tool set.
 //
