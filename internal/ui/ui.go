@@ -1295,6 +1295,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// as a field of wrong-coloured blocks, and the ramp is the fallback that
 		// still carries the picture.
 		m.profile = msg.Profile
+		// The editor draws pictures too — a picture opened in a tab is rendered
+		// with the same renderer as the transcript's preview — and it has no other
+		// way to learn the profile: it never sees the terminal. Handing it over
+		// here is the whole of the wiring, and it has to happen before the first
+		// picture is drawn or the tab opens in the wrong palette.
+		if m.ed != nil {
+			nm, _ := m.ed.Update(msg)
+			if em, ok := nm.(editor.Model); ok {
+				m.ed = &em
+			}
+		}
 		// The renderer has already adopted the reported profile; all that is left
 		// is to ask for the finer capabilities when this one is not enough.
 		return m, upgradeColorProfile(msg.Profile)

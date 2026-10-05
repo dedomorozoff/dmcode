@@ -80,7 +80,11 @@
   - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
   - `internal/imgprev`: turns image bytes into a picture in the terminal and into
     the reduced bytes that go on the wire. Two outputs from one input, in that
-    order, so what is drawn is what is sent. `Load` does all of it.
+    order, so what is drawn is what is sent. `Load` does all of it. `Render` and
+    `Decode` are the editor's half of the same package: the first draws one frame
+    at a width the caller chooses, the second decodes an animation frame by frame —
+    exported rather than copied so a picture looks the same whichever half of
+    dmcode opened it.
   - `internal/clipimg`: reads the clipboard's picture. A package of its own
     because the answer is entirely platform-specific — a Windows screenshot is a
     DIB, a macOS one a file URL, a Linux one an image URI from whichever tool owns
@@ -323,6 +327,55 @@ reason.
 ADK's `openaimodel` rejects an inline blob outright (`unsupported content part:
 InlineData` — true in both v2.4.0 and v2.5.0). Refusing early turns an SDK
 error into an instruction.
+
+### Pictures in an editor tab
+
+`internal/editor/editor/imageview.go`. A tab can hold a picture instead of text,
+and the decisions in it are the ones to keep:
+
+- **The buffer stays, and stays empty.** It is not deleted and not bypassed:
+  about a hundred places index `tabs[pane.tabIdx]` and call `cur()`, so a picture
+  tab with no buffer is a nil dereference in a key handler rather than a picture.
+  What changes is that nothing may write to it. The old behaviour was worse than
+  ugly: the bytes went in as latin-1 prose, and `ctrl+s` wrote the buffer back
+  over the file — a picture was destroyed by saving it.
+- **Read-only is enforced where the keys are, not by convention.** The guard sits
+  *before* the editing switch, because the keys that must not arrive (typing,
+  `enter`, `backspace`, `ctrl+s`) are that switch's own cases; a check inside it
+  would be one more case to forget. `pasteInput` carries a second guard because a
+  paste is one message with the whole text and walks straight past a key-press
+  check. `TestEveryKeyOnAPictureTabIsHarmless` is the table that keeps a new key
+  out of the wrong switch.
+- **`imgprev.Render` is exported rather than copied.** One picture, one drawing
+  routine: a second renderer would mean the same file looks different depending on
+  which half of dmcode opened it. `TestRenderIsTheSameRenderer` asserts the art is
+  byte-identical to what `Load` produces.
+- **GIF frames are composited, not just decoded.** A frame is the rectangle that
+  changed, drawn over the last one, so rendering frames as decoded shows an empty
+  cell for every partial frame — in a real animation, most of them.
+  `DisposalPrevious` keeps a copy to restore and `DisposalBackground` clears.
+  Without this the feature works on a test GIF of full-size frames and shows
+  nothing on a real one.
+- **The animation is a tick chain, not a goroutine.** One `tea.Tick` per frame,
+  each scheduling the next, so it stops by itself when there is nothing to
+  advance — a closed tab, another file, the chat on screen — with no cancel path
+  to get wrong. `imgPending` is the one guard against two chains: every message
+  asks for a frame, and without it the picture runs at twice its declared speed.
+  The frame advances *after* the delay is checked, so a tick that arrives after
+  the picture went away cannot leave it one frame on.
+- **The extension is the cheap question, the bytes are the real one.** A content
+  sniff instead would decode every file the editor opens, which is the wrong
+  question to ask of a 4 MB log. A `.png` that does not decode opens as text with
+  the reason on the status line — a tab that refuses to open is a far worse
+  answer than a tab showing text with one line of explanation.
+- **The caption goes on the last row, not under the art.** The art's height
+  follows the aspect ratio and the pane's does not, so a caption placed under the
+  art would move up and down as the terminal is resized. It carries the base name
+  rather than the tab's path: on one row at the pane's width an absolute path is
+  truncated to an ellipsis, taking the dimensions and frame counter with it.
+- **No gutter.** `gutterWidthForTab` returns 0, which also stops `paneContentWidth`
+  from narrowing the art for a column of line numbers over a document that has
+  none.
 
 ### Session store
 

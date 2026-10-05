@@ -139,6 +139,11 @@ var enCatalog = map[string]string{
 	// The buffer area with no file open in it.
 	"editor.nothing_open": "no file open — Ctrl+O to find one · Ctrl+P for a new file",
 
+	// A picture opened in a tab is drawn instead of its text, and cannot be
+	// edited — the caption and the reason a file would not decode both land here.
+	"editor.image_failed": "cannot draw this picture: %s",
+	"editor.image_hint":   "picture — read-only, Ctrl+E for chat",
+
 	// Prompt / commit lines
 	"prompt.open_file":    " open file: ",
 	"prompt.new_file":     " new file: ",
@@ -157,6 +162,8 @@ var enCatalog = map[string]string{
 	"msg.save_failed":         "save failed: %s",
 	"msg.save_failed_gen":     "save failed",
 	"msg.cannot_save":         "cannot save: no file name",
+	"msg.image_readonly":      "this is a picture — there is nothing to edit or save",
+	"msg.image_failed":        "opened as text: %s",
 	"msg.new_file":            "new file: %s",
 	"msg.open_failed":         "open failed: %s",
 	"msg.watch_failed":        "cannot watch %s for external changes: %s",
@@ -366,6 +373,7 @@ var enCatalog = map[string]string{
 	"help.split_close":       "close pane (unsplit)",
 	"help.tab_close":         "close tab (last quits)",
 	"help.move":              "move cursor",
+	"help.image_scroll":      "scroll a picture",
 	"help.edit":              "edit text",
 	"help.undo":              "undo / redo",
 	"help.lines":             "delete line / duplicate line",
@@ -440,6 +448,10 @@ var ruCatalog = map[string]string{
 	// Область буфера, когда файл не открыт.
 	"editor.nothing_open": "файл не открыт — Ctrl+O найти · Ctrl+P новый файл",
 
+	// Картинка во вкладке рисуется вместо текста и не редактируется.
+	"editor.image_failed": "не удалось нарисовать картинку: %s",
+	"editor.image_hint":   "картинка — только чтение, Ctrl+E в чат",
+
 	// Prompt / commit lines
 	"prompt.open_file":    " открыть файл: ",
 	"prompt.new_file":     " новый файл: ",
@@ -458,6 +470,8 @@ var ruCatalog = map[string]string{
 	"msg.save_failed":         "ошибка сохранения: %s",
 	"msg.save_failed_gen":     "ошибка сохранения",
 	"msg.cannot_save":         "нельзя сохранить: нет имени файла",
+	"msg.image_readonly":      "это картинка — редактировать и сохранять нечего",
+	"msg.image_failed":        "открыто как текст: %s",
 	"msg.new_file":            "новый файл: %s",
 	"msg.open_failed":         "ошибка открытия: %s",
 	"msg.watch_failed":        "не удалось следить за %s: внешние изменения не обнаружатся (%s)",
@@ -668,6 +682,7 @@ var ruCatalog = map[string]string{
 	"help.split_close":       "закрыть панель (без сплита)",
 	"help.tab_close":         "закрыть вкладку (последняя закрывает редактор)",
 	"help.move":              "двигать курсор",
+	"help.image_scroll":      "прокрутить картинку",
 	"help.edit":              "редактировать текст",
 	"help.undo":              "отменить / повторить",
 	"help.lines":             "удалить строку / дублировать строку",

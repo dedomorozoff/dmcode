@@ -1,4 +1,4 @@
-# dmCode v0.2.2
+# dmCode v0.2.3
 
 dmcode is a workspace now. The chat is still the agent you know; the same
 window also holds a real code editor — project tree, git, a terminal, splits,
@@ -9,10 +9,11 @@ bookmarks and LSP — and switches between them with one key.
 > **The editor's keys and the terminal panel have been exercised, but not
 > driven for hours by a person.** The frames, the mouse arithmetic and the
 > chat-mode composition are covered by tests that assert the row counts and
-> the hit-testing, and this release is the first whose test suite runs on
-> macOS and Windows as well as Linux — that run is what found the bugs below.
-> What is still unproven is how the editor feels over a long session, and
-> nothing here has been driven by a person for hours on any platform.
+> the hit-testing, and the test suite runs on macOS and Windows as well as
+> Linux. What is still unproven is how the editor feels over a long session,
+> and nothing here has been driven by a person for hours on any platform.
+> The picture view added in this release is covered by tests only for the
+> same reason: nobody has watched an animated GIF play in a real terminal yet.
 >
 > **Sending a picture to a model is still unverified.** Attaching and
 > previewing are confirmed working on Windows against a live session; no
@@ -44,13 +45,91 @@ Or with Go 1.26+:
 go install github.com/dedomorozoff/dmcode@latest
 ```
 
-## What's new since v0.2.1
+## What's new since v0.2.2
 
-A patch release, and most of it is one bug wearing four hats.
+### The editor draws pictures instead of their bytes
+
+Open a PNG and the editor used to show you the file's bytes as prose: a column
+of `ÿØ` boxes, one per pixel row, that scrolled like source and — this is the
+part that mattered — **saved back over the picture**. `ctrl+s` on a `.png` wrote
+whatever was in the buffer into the file.
+
+A picture is now a tab of its own kind. It is drawn where the lines would be,
+at the pane's width, out of the same half-block renderer the chat's preview
+uses — one picture, one drawing routine, rather than two that differ by which
+half of dmcode opened it. There is no gutter: line numbers beside an image
+describe a document that does not exist. The caption on the last row carries the
+name, the dimensions, the format and — for an animation — which frame you are
+looking at, because a GIF with no frame counter reads as a flicker.
+
+**A picture tab is read-only, and that is enforced rather than promised.** Typing,
+`enter`, `backspace`, paste and `ctrl+s` do not reach the buffer: the key
+handler for a picture drops them before the editing switch every text tab falls
+into, and a paste — which arrives as one message carrying the whole text, and
+would walk straight past a check written for key presses — is refused where it
+lands. The keys that are about the workspace rather than the file keep working:
+switch tabs with `alt+←`/`alt+→`, scroll a tall picture with the wheel or
+`pgup`/`pgdn`.
+
+### Animated GIFs play
+
+A GIF is not a still with a `.gif` extension — the motion is the content, and a
+preview of frame zero is a preview of a video in the same sense. Every frame is
+decoded and composited at open, then advanced on a timer.
+
+Compositing is the part that is easy to leave out and obvious once you know: a
+GIF frame is the rectangle that *changed*, drawn over the frame before it, and
+the disposal method says whether the canvas is put back afterwards. Rendering
+the frames as decoded shows an empty cell for every partial frame, which in a
+real animation is most of them — so each frame is drawn onto the canvas the last
+one left behind, with `DisposalBackground` and `DisposalPrevious` honoured.
+
+The timer is one `tea.Tick` per frame, each scheduling the next, rather than a
+goroutine with a clock of its own. That is what makes the animation stop by
+itself: a closed tab, a switch to another file, or the chat screen covering the
+editor all mean there is nothing to advance, and the chain ends with no cancel
+path to get wrong. A flag keeps one animation from becoming two chains — every
+message asks for a frame, and without it the picture would run at twice the
+speed its own delays declare. A frame delay the file asks for is honoured, with
+a floor and a ceiling: a GIF may declare zero, which is a strobe rather than a
+picture, and a declared ten seconds is a picture that looks frozen.
+
+Frames are capped at 240, and a file over 64 MB opens as text with the reason
+on the status line — a worse view of a picture, and a far better outcome than
+pulling an arbitrarily large file into memory.
+
+### A file named `.png` that is not one opens as text, and says why
+
+The extension is the cheap first question and the bytes are the real one, so a
+`.png` that does not decode is not a tab that refuses to open: it is the text it
+actually is, with one line in the status line naming the reason. The same is true
+of the other direction — a picture overwritten with text reloads as text rather
+than going on showing the frame of a file that no longer exists.
+
+WebP is in the list of extensions worth trying and has no decoder in this build,
+exactly as in the chat: you get a named refusal rather than a filename being
+treated as prose.
+
+### The status bar stops describing a document that is not there
+
+`Ln 1, Col 1` under a rendered image is a cursor that is nowhere, and `LF UTF-8`
+is a question nobody asks about a PNG. A picture tab reports its dimensions and
+format instead, in the single pane and in each pane of a split alike.
+
+### Everything else from v0.2.2 stands
+
+The rest of what shipped in v0.2.2 is unchanged and still current. In brief: one
+file arriving under two names and the code comparing them — which made the
+workspace refuse its own files, made git operations fail on files that were
+plainly in the tree, made the editor open a file twice, and made saving not
+reload the tab, all fixed through `internal/pathnorm`; a closed terminal that
+left its shell holding the project directory; a white picture that drew as a
+field of dots because Go fuses multiply-add on arm64; Cline as a first-class
+provider in `/setup`; and `/setup` no longer outgrows a 22-row terminal.
 
 ### One file has more than one name
 
-CI grew macOS and Windows runners in this release, and on the first run eight
+CI grew macOS and Windows runners in that release, and on the first run eight
 tests failed. All eight were the same thing: **the same file arrived under two
 names, and the code compared the names.** On a developer's machine those names
 are the same string — the temp directory, the checkout and the home directory

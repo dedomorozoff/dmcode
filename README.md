@@ -259,6 +259,10 @@ message rather than sent: it would not fit the session store's per-line limit, a
 the store drops a line it cannot read — a lost turn with nothing on screen to say
 so.
 
+To *look* at a picture without sending it, open it in the editor instead — see
+[The editor](#pictures-in-a-tab). There it is drawn at the pane's width rather
+than at 32 columns, and an animated GIF plays.
+
 Pictures need the **chat wire** (`/chat/completions`). On a provider configured for
 `/v1/responses` dmcode says so at the moment you attach, naming the fix, rather
 than failing later inside the SDK — ADK's own client rejects an inline picture
@@ -385,6 +389,37 @@ there is something in it, under `[untitled]` until you name it with `ctrl+s`.
 The four icons at the left of that row are the workspace: `▣` editor, `▤` project
 tree, `⎇` git, `❯` terminal. Each is clickable, each shows its label on hover,
 and the first one is the mode toggle.
+
+### Pictures in a tab
+
+Open a `.png`, `.jpg`, `.gif`, `.bmp` or `.webp` and the editor draws it rather
+than showing you its bytes. It is rendered at the pane's width, out of the same
+half-block glyphs the chat's picture preview uses, with no line-number gutter —
+there are no lines in it to number. The caption underneath names the file, its
+dimensions, its format, and for an animation which frame you are on:
+
+```
+shot.png  800×600 png
+anim.gif  320×240 gif  2/17
+```
+
+A **GIF animates**, at the speed the file declares. Every frame is composited the
+way the format means — a frame is the rectangle that changed, drawn over the one
+before it — so a partial frame shows the picture with the change in it, not an
+empty cell. It stops by itself when it is not what you are looking at: switch
+tabs, or go back to the chat, and the animation stops rather than drawing frames
+behind the screen.
+
+A picture tab is **read-only**, because there is nothing to edit and `ctrl+s`
+would write an empty document over the file you opened. Typing, `enter`,
+`backspace`, paste and `ctrl+s` say so instead of doing it. What still works is
+what is about the workspace rather than the file: `alt+←`/`alt+→` switch tabs,
+and the wheel, `↑`/`↓` and `pgup`/`pgdn` scroll a picture taller than the pane.
+
+If a file is *named* like a picture but is not one — a `.png` holding text — it
+opens as that text with the reason on the status line, and a picture overwritten
+with text reloads as text rather than going on showing the frame of a file that
+is no longer there. WebP has no decoder in this build and says so by name.
 
 ## Selecting with the mouse
 
@@ -577,9 +612,10 @@ internal/ask         the ask_user broker and its timer
 internal/clipimg     reads a picture off the system clipboard (Windows)
 internal/config      .env, endpoints, the setup wizard
 internal/discover    finds the providers that actually answer
-internal/editor      the workspace editor: tree, git, terminal, splits, LSP
+internal/editor      the workspace editor: tree, git, terminal, splits, LSP, picture view
 internal/i18n        English source strings and the Russian catalog
-internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire
+internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire,
+                     and decodes an animation frame by frame for the editor
 internal/llm         OpenAI-compatible wire, failover, retries
 internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence

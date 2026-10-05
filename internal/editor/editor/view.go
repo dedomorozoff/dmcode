@@ -86,6 +86,9 @@ var helpEntries = []helpEntry{
 	{"Ctrl+W / Ctrl+X", "help.tab_close"},
 	{"", ""},
 	{"Arrows/Home/End/PgUp/PgDn", "help.move"},
+	// A picture tab answers only these: the wheel and the paging keys scroll a
+	// tall image, and nothing on this list edits it.
+	{"↑↓/PgUp/PgDn/Wheel (picture)", "help.image_scroll"},
 	{"Enter/Backspace/Delete/Tab", "help.edit"},
 	{"Ctrl+Space", "help.complete"},
 	{"Ctrl+/", "help.comment"},
@@ -280,6 +283,13 @@ func (m Model) contextBottomRow() string {
 }
 
 func (m Model) gutterWidthForTab(t *tab) int {
+	// A picture has no lines. The gutter would number an empty buffer's single
+	// line "1" down the side of a rendered image, which is a document that does
+	// not exist — and paneContentWidth subtracts this, so returning a real width
+	// here would also make the art narrower than the pane for no reason.
+	if t.img != nil {
+		return 0
+	}
 	// Line number + one shared marker column (breakpoint ● / bookmark ◆).
 	w := len(strconv.Itoa(t.buf.LineCount())) + 3
 	if w < 6 {
@@ -527,6 +537,13 @@ func (m Model) renderPaneRows(paneIdx, h, totalW int) []string {
 	// that fill it.
 	if t.scratch() {
 		return m.nothingOpenRows(h, totalW)
+	}
+	// A picture is drawn where the lines would be. It comes before the gutter
+	// because a gutter over a picture is a column of line numbers for a document
+	// that has none — and the buffer behind it is empty, so the numbers would
+	// all be "1" anyway.
+	if t.img != nil {
+		return m.imageRows(t, h, totalW)
 	}
 	gw := m.gutterWidthForTab(t)
 	contentW := totalW - gw
@@ -1848,12 +1865,20 @@ func (m Model) statusBar() string {
 	right := ""
 	// The scratch buffer has no file to report on, so it reports no line either:
 	// "Ln 1, Col 1" on an empty screen is a cursor that is nowhere.
+	//
+	// A picture has no cursor either, and its line endings are not a question
+	// anyone asks about a PNG, so it reports its size instead — which is the one
+	// fact about the file the status bar is in a position to state.
 	if !perPane && !m.Chat && !t.scratch() {
-		right = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+		if t.img != nil {
+			right = " " + t.img.caption("") + " "
+		} else {
+			right = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+		}
 	}
 	fileInfo := ""
 	langTag := ""
-	if !perPane && !m.Chat && t.path != "" {
+	if !perPane && !m.Chat && t.path != "" && t.img == nil {
 		endings := map[string]string{"lf": "LF", "crlf": "CRLF"}
 		enc := strings.ToUpper(t.encoding)
 		fileInfo = endings[t.lineEnding] + " " + enc + " "
