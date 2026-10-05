@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 func chdir(t *testing.T, dir string) {
@@ -69,7 +71,9 @@ func TestFinderOpensAndRefocuses(t *testing.T) {
 		t.Fatalf("sel after down = %d", m.finderSel)
 	}
 	m = press(m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.finderOpen || len(m.tabs) != 2 || m.activeTab().path != filepath.Join(dir, "b.txt") {
+	// By identity, not by spelling: the finder resolves the directory it walks,
+	// so on macOS the tab holds /private/var/... where t.TempDir said /var/...
+	if m.finderOpen || len(m.tabs) != 2 || !pathnorm.Same(m.activeTab().path, filepath.Join(dir, "b.txt")) {
 		t.Fatalf("enter: open=%v tabs=%d active=%q", m.finderOpen, len(m.tabs), m.activeTab().path)
 	}
 	m = press(m, tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})

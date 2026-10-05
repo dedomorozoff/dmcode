@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 func TestTabBarClickSwitchesTab(t *testing.T) {
@@ -92,7 +94,10 @@ func TestFinderItemClickOpensFile(t *testing.T) {
 	if m.finderOpen {
 		t.Fatal("finder must close after clicking an item")
 	}
-	if m.activeTab().path != f2 {
+	// Identity, not spelling: a click on a row resolves the directory it came
+	// from, so on macOS the tab holds /private/var/... where the test wrote
+	// /var/... — one file, and the click did open it.
+	if !pathnorm.Same(m.activeTab().path, f2) {
 		t.Fatalf("active path = %q, want %q", m.activeTab().path, f2)
 	}
 }

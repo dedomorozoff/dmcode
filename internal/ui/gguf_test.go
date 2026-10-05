@@ -90,12 +90,11 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	if m.setup.open || m.setup.gguf.open {
 		t.Fatalf("a pick did not close the dialog (wizard=%v browser=%v)", m.setup.open, m.setup.gguf.open)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, ".env"))
-	if err != nil {
+	if _, err := os.Stat(filepath.Join(dir, ".env")); err != nil {
 		t.Fatalf(".env was not written: %v", err)
 	}
-	if !strings.Contains(string(data), "DMCODE_GGUF="+ggufPath) {
-		t.Errorf(".env is missing the picked path:\n%s", data)
+	if got := envValue(t, "DMCODE_GGUF"); !pathnorm.Same(got, ggufPath) {
+		t.Errorf(".env holds %q, want the picked file %q", got, ggufPath)
 	}
 
 	if run := d.cmd; run == nil {
@@ -106,6 +105,28 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	if m.prov.Model != "qwen.gguf" {
 		t.Errorf("the picked model did not go live: %+v", m.prov)
 	}
+}
+
+// envValue reads one key out of the .env the wizard just wrote, through the
+// parser the app uses to read it back. Looking for the value as a substring
+// instead asks a different question — whether the exact spelling the test
+// happened to write appears somewhere in the file — and the browser resolves the
+// directory it walks, so on macOS the value lands as /private/var/... where the
+// test said /var/..., and the substring is not found on the machine where the
+// assertion is worth most.
+func envValue(t *testing.T, key string) string {
+	t.Helper()
+	lines, err := config.ReadDotEnv()
+	if err != nil {
+		t.Fatalf("reading .env: %v", err)
+	}
+	for _, line := range lines {
+		if k, v, ok := config.DotEnvPair(line); ok && k == key {
+			return v
+		}
+	}
+	t.Fatalf(".env has no %s", key)
+	return ""
 }
 
 // The browser's esc must back out to the path prompt, not close /setup, and
