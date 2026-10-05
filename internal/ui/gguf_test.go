@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 // ggufOptionIndex is where the GGUF option sits in the wizard list.
@@ -68,8 +69,14 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	}
 
 	d = d.down().enter() // descend into models
-	if m.setup.gguf.dir != filepath.Join(dir, "models") {
-		t.Fatalf("the browser is at %q, want %q", m.setup.gguf.dir, filepath.Join(dir, "models"))
+	// By identity, not by spelling. The browser descends into the directory the
+	// listing gave it, which is the resolved name — /private/var/... where
+	// t.TempDir said /var/... on macOS, the expanded name where the runner's
+	// TMPDIR was a short one. Both spellings open the same directory, so a
+	// string comparison here reports a mismatch on exactly the machines where
+	// this test is most worth running.
+	if !pathnorm.Same(m.setup.gguf.dir, filepath.Join(dir, "models")) {
+		t.Fatalf("the browser is at %q, want the models directory in %q", m.setup.gguf.dir, dir)
 	}
 	view = m.View().Content
 	if !strings.Contains(view, "qwen.gguf") {

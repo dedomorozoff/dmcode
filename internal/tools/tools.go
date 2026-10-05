@@ -20,6 +20,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 	"github.com/dedomorozoff/dmcode/internal/todo"
 )
 
@@ -117,6 +118,15 @@ var ErrOutsideRoot = fmt.Errorf("outside the working directory")
 // resolve. A symlink inside the tree is therefore the known soft spot — the
 // alternative is refusing to create any file that does not exist yet, which
 // would break write_file outright.
+//
+// A *failed* lexical check is not final, because the root is stored with its
+// links followed and the argument may not be: SetRoot canonicalises its side and
+// nothing canonicalises this one, so a path spelled /var/... against a root
+// spelled /private/var/... — or an 8.3 short name against its long form — reads
+// as a stranger to a boundary that is looking at the very same directory. So a
+// refusal is retried with both sides in one spelling, which is pathnorm's whole
+// job. The path handed back is still the caller's: canonical is only ever
+// something to compare, never something to open.
 func resolve(p string) (string, error) {
 	if p == "" {
 		p = "."
@@ -133,6 +143,9 @@ func resolve(p string) (string, error) {
 		return abs, nil
 	}
 	if err := insideRoot(base, abs); err != nil {
+		if real := pathnorm.Canonical(abs); real != abs && insideRoot(base, real) == nil {
+			return abs, nil
+		}
 		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
 	}
 	return abs, nil

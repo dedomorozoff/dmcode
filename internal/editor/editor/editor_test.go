@@ -833,3 +833,62 @@ func TestDoubleShiftIgnoresHeldRepeat(t *testing.T) {
 		t.Fatal("double shift after held repeat must open the palette")
 	}
 }
+
+// linkTwoSpellings lays out one directory under two names and returns both, so
+// a test can hand the editor the same file twice in the spellings it really gets
+// them in: /var against /private/var on macOS, RUNNER~1 against the expanded
+// name on a Windows runner, a symlinked checkout against its target. Every
+// developer machine spells its own directories the one way, so without this the
+// tests pass and the platform builds fail.
+func linkTwoSpellings(t *testing.T) (real, link string) {
+	t.Helper()
+	real = t.TempDir()
+	link = filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	return real, link
+}
+
+// TestFocusOrOpenTreatsTwoSpellingsOfOneFileAsOneTab is that bug in the place
+// it bit: a file already open, asked for by the other name of its directory.
+// Compared as strings these are two files, so the editor opened the same file a
+// second time and every "what is open" question answered from there counted it
+// twice. It is the reason TestFinderOpensAndRefocuses failed on macOS CI, where
+// the tab held the /var path the test passed and the finder produced /private/var.
+func TestFocusOrOpenTreatsTwoSpellingsOfOneFileAsOneTab(t *testing.T) {
+	real, link := linkTwoSpellings(t)
+	f := writeTemp(t, real, "a.txt", "alpha\n")
+	chdir(t, real)
+
+	m := New(f)
+	m.focusOrOpen(filepath.Join(link, "a.txt"))
+
+	if len(m.tabs) != 1 {
+		for i := range m.tabs {
+			t.Logf("tab %d: %q", i, m.tabs[i].path)
+		}
+		t.Fatalf("tabs = %d, want 1: one file opened under two names is one tab", len(m.tabs))
+	}
+}
+
+// TestAFileChangedEventReloadsTheTabWhateverItCallsTheFile is the same
+// comparison on the other side. The tab holds the name the editor was opened
+// with; the watcher reports the name the operating system gave it. Neither is
+// wrong, so a reload has to match on identity or the file on disk quietly stops
+// being what the buffer shows.
+func TestAFileChangedEventReloadsTheTabWhateverItCallsTheFile(t *testing.T) {
+	real, link := linkTwoSpellings(t)
+	f := writeTemp(t, real, "a.txt", "alpha\n")
+	chdir(t, real)
+
+	m := New(f)
+	if err := os.WriteFile(f, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m2, _ := m.Update(FileChangedMsg{Path: filepath.Join(link, "a.txt")})
+
+	if got := m2.(Model).activeTab().buf.Text(); got != "alpha\nbeta\n" {
+		t.Fatalf("buffer = %q, want the file as it now is on disk", got)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,6 +297,79 @@ func TestGitBlame(t *testing.T) {
 	// New untracked file has no commit yet: blame must return an error.
 	if _, err := repo.Blame(filepath.Join(dir, "missing.txt")); err == nil {
 		t.Fatal("blame of a non-existent file must fail")
+	}
+}
+
+// TestRepoRelJudgesTheSameFileTheSameWayUnderEitherSpelling is the bug, reduced
+// to the one thing it is. The worktree root comes from go-git and the path comes
+// from the caller, and they are routinely two spellings of one directory:
+// /var against /private/var on macOS, RUNNER~1 against runneradmin on a Windows
+// runner, a symlinked checkout anywhere. Compared as they stand, a file in the
+// tree looks like it is eight directories above the repository, and the relative
+// path that says so is refused by go-git as `cannot use ".."` — staging, blame,
+// unstaging and head content all failing on files that are plainly there.
+func TestRepoRelJudgesTheSameFileTheSameWayUnderEitherSpelling(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	// Whichever spelling the root arrives in, and however the file is spelled,
+	// the answer is the same path inside the repository.
+	for _, root := range []string{real, link} {
+		for _, path := range []string{
+			filepath.Join(real, "sub", "sample.txt"),
+			filepath.Join(link, "sub", "sample.txt"),
+		} {
+			rel, err := repoRel(root, path)
+			if err != nil {
+				t.Errorf("repoRel(%q, %q) = %v, want sub/sample.txt", root, path, err)
+				continue
+			}
+			if rel != "sub/sample.txt" {
+				t.Errorf("repoRel(%q, %q) = %q, want sub/sample.txt", root, path, rel)
+			}
+		}
+	}
+}
+
+// TestRepoRelRefusesAPathOutsideTheRepository is the other half of the same
+// decision, and the reason the check is not just "resolve and retry". A file
+// that really is outside must be refused here, where the error can name both
+// directories — not handed to go-git as a ../../.. string and reported back as
+// invalid path, which says nothing about which of the two paths was wrong.
+func TestRepoRelRefusesAPathOutsideTheRepository(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := repoRel(root, outside)
+	if err == nil {
+		t.Fatalf("repoRel(%q, %q) = %q, want an error", root, outside, rel)
+	}
+	if strings.HasPrefix(rel, "..") {
+		t.Errorf("repoRel returned %q, want no ../../.. for go-git to choke on", rel)
+	}
+	for _, want := range []string{outside, root} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// TestRepoRelPassesARelativePathThrough covers the other kind of caller: Stage
+// and Unstage document that a path relative to the repository root is fine, and
+// there is nothing to resolve about one.
+func TestRepoRelPassesARelativePathThrough(t *testing.T) {
+	rel, err := repoRel(filepath.Join("some", "root"), filepath.Join("sub", "sample.txt"))
+	if err != nil {
+		t.Fatalf("repoRel = %v, want it accepted", err)
+	}
+	if rel != "sub/sample.txt" {
+		t.Errorf("repoRel = %q, want sub/sample.txt", rel)
 	}
 }
 

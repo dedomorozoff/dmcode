@@ -17,6 +17,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	httptransport "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/sergi/go-diff/diffmatchpatch"
+
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 // DiffType indicates the Git change status of a line in the buffer.
@@ -46,6 +48,53 @@ type FileDiff struct {
 type Repo struct {
 	Root string
 	r    *git.Repository
+}
+
+// repoRel expresses path relative to the repository root, in the slash form
+// git wants. A path that is already relative is returned as it stands.
+//
+// The two sides are routinely two spellings of one directory, and the difference
+// is not cosmetic. go-git hands back the worktree root it opened, and a caller
+// holds the path it asked with: /var/folders/... against /private/var/folders/...
+// on macOS, RUNNER~1 against runneradmin on a Windows runner, a symlinked
+// checkout anywhere. Compared as they stand that is a path outside the
+// repository, and the ../../.. that follows is not a wrong answer but a refused
+// one — go-git's path validation rejects ".." outright, so staging, unstaging,
+// blame and head content all fail on files that are plainly in the tree, and
+// report it as `invalid path "../../..": cannot use ".."`. The failure arrives
+// in git's plumbing vocabulary, several layers from the spelling that caused it.
+//
+// So: try the paths as given, and if the result climbs out of the root, try
+// again with both sides resolved. What is left after that genuinely is outside
+// the repository, and saying so here names the two directories — which is the
+// one thing the go-git error never does.
+func repoRel(root, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		return filepath.ToSlash(path), nil
+	}
+	if rel, err := relBelow(root, path); err == nil {
+		return rel, nil
+	}
+	rel, err := relBelow(pathnorm.Canonical(root), pathnorm.Canonical(path))
+	if err != nil {
+		return "", fmt.Errorf("vcs: %s is outside the repository at %s", path, root)
+	}
+	return rel, nil
+}
+
+// relBelow is filepath.Rel for the one use this package has of it: it treats a
+// relative result that climbs out of base as a failure. filepath.Rel returns
+// that happily — it is a correct answer to "what is the relative path" — and
+// handing it on is how a file in the tree turns into a request git rejects.
+func relBelow(base, path string) (string, error) {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("vcs: %s is outside %s", path, base)
+	}
+	return filepath.ToSlash(rel), nil
 }
 
 // Open finds and opens the Git repository containing path.
@@ -339,11 +388,10 @@ func (repo *Repo) Unstage(path string) error {
 	if err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(repo.Root, path)
+	rel, err := repoRel(repo.Root, path)
 	if err != nil {
-		rel = path
+		return err
 	}
-	rel = filepath.ToSlash(rel)
 	return wt.Restore(&git.RestoreOptions{
 		Staged: true,
 		Files:  []string{rel},
@@ -394,11 +442,10 @@ func (repo *Repo) StatusSummary() string {
 
 // HeadContent returns the content of the file at HEAD.
 func (repo *Repo) HeadContent(absPath string) (string, error) {
-	rel, err := filepath.Rel(repo.Root, absPath)
+	rel, err := repoRel(repo.Root, absPath)
 	if err != nil {
 		return "", err
 	}
-	rel = filepath.ToSlash(rel)
 
 	head, err := repo.r.Head()
 	if err != nil {
@@ -583,11 +630,10 @@ func (repo *Repo) Stage(path string) error {
 	if err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(repo.Root, path)
+	rel, err := repoRel(repo.Root, path)
 	if err != nil {
-		rel = path
+		return err
 	}
-	rel = filepath.ToSlash(rel)
 	_, err = wt.Add(rel)
 	return err
 }
@@ -669,11 +715,10 @@ type BlameLine struct {
 // Blame returns the authorship of every line of the file at the current HEAD.
 // Lines without a commit (new files, not yet committed) are absent.
 func (repo *Repo) Blame(absPath string) ([]BlameLine, error) {
-	rel, err := filepath.Rel(repo.Root, absPath)
+	rel, err := repoRel(repo.Root, absPath)
 	if err != nil {
-		rel = absPath
+		return nil, err
 	}
-	rel = filepath.ToSlash(rel)
 	head, err := repo.r.Head()
 	if err != nil {
 		return nil, err

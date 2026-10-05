@@ -23,6 +23,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/editor/syntax"
 	"github.com/dedomorozoff/dmcode/internal/editor/vcs"
 	"github.com/dedomorozoff/dmcode/internal/editor/watcher"
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 type tab struct {
@@ -949,8 +950,14 @@ func (m Model) helpMaxScroll() int {
 
 func (m *Model) focusOrOpen(rawPath string) {
 	path := normalizePath(m.baseDir(), rawPath)
+	// Two spellings of one file are one file. A tab opened from a path the user
+	// typed, a restored session, and a row clicked in the finder arrive spelled
+	// differently — /var against /private/var, a long name against RUNNER~1, a
+	// symlinked checkout against its target — and compared as strings they are
+	// two files, so the editor opens the second tab for a file already open and
+	// every "is this file already open" question downstream is wrong.
 	for i := range m.tabs {
-		if m.tabs[i].path == path {
+		if pathnorm.Same(m.tabs[i].path, path) {
 			m.setActiveTab(i)
 			return
 		}
@@ -1170,8 +1177,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if t.path == "" {
 				continue
 			}
-			absT, _ := filepath.Abs(t.path)
-			if absT == path || t.path == path {
+			// The watcher reports the name the operating system gave it and the
+			// tab holds the name the editor was opened with; both absolute, not
+			// both the same string.
+			if pathnorm.Same(t.path, path) {
 				if !t.buf.Dirty() {
 					if data, err := os.ReadFile(t.path); err == nil {
 						t.buf = buffer.Load(strings.ReplaceAll(string(data), "\r\n", "\n"))
