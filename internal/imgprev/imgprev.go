@@ -414,13 +414,30 @@ func renderRamp(img image.Image, cols, rows int) string {
 	for row := 0; row < rows; row++ {
 		for x := 0; x < cols; x++ {
 			c := sample(img, sw, sh, x, row, cols, rows)
-			lum := (0.299*float64(c.R) + 0.587*float64(c.G) + 0.114*float64(c.B)) / 255
-			i := int(lum * float64(len(Ramp)-1))
-			out.WriteByte(Ramp[min(i, len(Ramp)-1)])
+			out.WriteByte(Ramp[rampIndex(c)])
 		}
 		out.WriteByte('\n')
 	}
 	return strings.TrimSuffix(out.String(), "\n")
+}
+
+// rampIndex is where a colour sits on the ramp, and it is integer arithmetic
+// because the obvious float version was not the same function everywhere. Go
+// fuses multiply-add into a single fused multiply-add on arm64, rounding once
+// where an x86 build rounds three times, and for pure white that lands the sum a
+// hair under 255. int() truncates rather than rounds, so the cell short of the
+// ramp's end: the brightest thing in the picture drawn as the second-darkest
+// glyph, and an all-white image rendered as a field of dots.
+//
+// The weights are the usual 0.299/0.587/0.114 scaled by 1000 so they sum to a
+// round thousand. The ramp length is folded into the numerator rather than
+// dividing twice, because dividing the luminance to an integer first throws away
+// the fractional part that decides the cell — it is the same one-rounding
+// mistake in a different place, and it moves greys to the neighbouring glyph.
+func rampIndex(c color.RGBA) int {
+	const maxLuminance = 255 * 1000 // 0.255 and 0.587 and 0.114, of 255
+	i := (299*int(c.R) + 587*int(c.G) + 114*int(c.B)) * (len(Ramp) - 1) / maxLuminance
+	return min(i, len(Ramp)-1)
 }
 
 // Caption is the line printed under the picture. It is built here rather than

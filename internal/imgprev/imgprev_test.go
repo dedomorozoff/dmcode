@@ -548,3 +548,53 @@ func TestTheRampIsLeftAlone(t *testing.T) {
 		t.Errorf("the ramp carries escapes it has no colour to need:\n%q", a.Art)
 	}
 }
+
+// TestRampIndexEndsAtTheLightestGlyph tests the arithmetic directly, because
+// the failure it guards is arithmetic that misbehaves on an architecture the
+// test is not running on. Go fuses multiply-add into a single fused
+// multiply-add on arm64, rounding once where an x86 build rounds three times,
+// and for pure white that lands the luminance a hair under full. int()
+// truncates, so the cell short of the end: the brightest thing in the picture
+// drawn as the second-darkest glyph, and a white image rendered as a field of
+// dots. The endpoint is only visible on the machine that has the fused
+// multiply-add, so what is pinned here is the arithmetic behind it.
+func TestRampIndexEndsAtTheLightestGlyph(t *testing.T) {
+	first := Ramp[0]
+	last := Ramp[len(Ramp)-1]
+	if first == last {
+		t.Fatal("the ramp's two ends are the same glyph, so brightness cannot separate")
+	}
+
+	for _, tc := range []struct {
+		name string
+		c    color.RGBA
+		want byte
+	}{
+		{"black is the first glyph", color.RGBA{A: 255}, first},
+		{"white is the last glyph", color.RGBA{R: 0xff, G: 0xff, B: 0xff, A: 255}, last},
+	} {
+		if got := Ramp[rampIndex(tc.c)]; got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// One division, one rounding, at the end. A version that rounds the
+	// luminance to an integer first throws away the fraction that decides the
+	// cell and moves a colour onto its neighbour's glyph, and that mistake is
+	// invisible except by counting through the whole range, which is what this
+	// loop is for. The sweep is one channel, because a grey's weighted sum is
+	// already a whole number and would agree with the rounding version
+	// everywhere; only a single channel has the fraction that gets thrown away.
+	prev := -1
+	for v := 0; v <= 0xff; v++ {
+		got := rampIndex(color.RGBA{R: uint8(v), A: 255})
+		want := (299 * v) * (len(Ramp) - 1) / (255 * 1000)
+		if got != want {
+			t.Errorf("rampIndex(red %d) = %d, want the exact ratio truncated, %d", v, got, want)
+		}
+		if got < prev {
+			t.Fatalf("rampIndex goes backwards at red %d: %d after %d", v, got, prev)
+		}
+		prev = got
+	}
+}
