@@ -1,6 +1,6 @@
 ﻿# Maintainer: dmcode
 pkgname=dmcode
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc="Terminal coding agent built on google/adk-go"
 arch=('x86_64')

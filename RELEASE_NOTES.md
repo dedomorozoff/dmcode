@@ -1,4 +1,4 @@
-# dmCode v0.2.1
+# dmCode v0.2.2
 
 dmcode is a workspace now. The chat is still the agent you know; the same
 window also holds a real code editor — project tree, git, a terminal, splits,
@@ -9,9 +9,10 @@ bookmarks and LSP — and switches between them with one key.
 > **The editor's keys and the terminal panel have been exercised, but not
 > driven for hours by a person.** The frames, the mouse arithmetic and the
 > chat-mode composition are covered by tests that assert the row counts and
-> the hit-testing; what is not proven is how the editor feels over a long
-> session, or how the panels behave on platforms other than the one this was
-> built on.
+> the hit-testing, and this release is the first whose test suite runs on
+> macOS and Windows as well as Linux — that run is what found the bugs below.
+> What is still unproven is how the editor feels over a long session, and
+> nothing here has been driven by a person for hours on any platform.
 >
 > **Sending a picture to a model is still unverified.** Attaching and
 > previewing are confirmed working on Windows against a live session; no
@@ -42,6 +43,131 @@ Or with Go 1.26+:
 ```bash
 go install github.com/dedomorozoff/dmcode@latest
 ```
+
+## What's new since v0.2.1
+
+A patch release, and most of it is one bug wearing four hats.
+
+### One file has more than one name
+
+CI grew macOS and Windows runners in this release, and on the first run eight
+tests failed. All eight were the same thing: **the same file arrived under two
+names, and the code compared the names.** On a developer's machine those names
+are the same string — the temp directory, the checkout and the home directory
+are all spelled the one way the process already spells them — so nothing here
+was ever visible locally. Change where either side comes from, and it appears:
+
+- `t.TempDir()` says `/var/folders/...`, `os.Getwd()` says
+  `/private/var/folders/...`.
+- A Windows runner's `%TEMP%` is `C:\Users\RUNNER~1`, and the repository it
+  walks up into is `C:\Users\runneradmin`.
+- A symlinked checkout is not the directory it points at.
+
+What that cost, before this release:
+
+- **The workspace refused its own files.** `write_file` into a path inside your
+  project could be turned away as outside the working directory, naming a
+  directory the file was in. On macOS and on a Windows runner, this was
+  constant rather than occasional.
+- **Git operations failed on files that were plainly in the tree.** Staging,
+  unstaging, blame and the gutter's HEAD content all computed
+  `/private/var/.../a.go` against a root of `/var/...`, got `../../..`, and go-git
+  refused it: `invalid path "../../..": cannot use ".."`. The error arrives in
+  plumbing vocabulary, several layers from the spelling that caused it. It now
+  names both directories, in dmcode's words.
+- **The editor opened the same file twice.** A path typed by hand, a restored
+  session and a row clicked in the finder all spell it differently, so
+  `ctrl+o` on a file already open gave you a second tab, and every "is this
+  already open" question downstream was wrong along with it.
+- **Saving a file did not reload its tab.** The watcher reports the name the
+  operating system gave it; the tab holds the name the editor was opened with.
+
+`internal/pathnorm` is the answer in two functions — `Canonical` puts a path in
+the spelling this machine agrees on (links followed, 8.3 short name and letter
+case on Windows, missing tail appended for a file that does not exist yet), and
+`Same` is the comparison. The workspace boundary, the git layer, and the
+editor's tab list and file watcher all ask it now, and the boundary still refuses
+a symlink that leaves the tree — the retry is a fix for the spelling, not a way
+out of the check.
+
+### Closing a terminal now ends the shell
+
+`ClosePseudoConsole` signals the console and returns; it does not terminate the
+attached process. Closing the process handle straight afterwards only drops our
+reference to something still running. The shell lives on, a shell holds its
+working directory open, and a directory with a live handle in it cannot be
+deleted — so quitting the editor could leave a `cmd.exe` behind holding your
+project directory. The child is now terminated by pid and waited for, with a
+bounded wait: a shell that somehow refuses to die must not hang the UI on
+shutdown.
+
+### A white picture stopped drawing as a field of dots
+
+The ASCII preview picked its cell with three float multiplies, and Go fuses
+multiply-add on arm64 — one rounding where an x86 build does three. For pure
+white the fused sum lands a hair under 255, `int()` truncates rather than
+rounds, and the brightest pixel in the picture drew as the second-darkest glyph
+on a ramp that ends in space. An all-white image rendered as the emptiest
+possible picture on a Mac; a pale photograph came out one step too dark. It is
+integer arithmetic now, and the ramp length is folded into the numerator rather
+than dividing twice.
+
+### One more provider, and `/setup` fits a small terminal
+
+- **Cline** is a first-class option in `/setup`. It is a gateway rather than a
+  client-gated service: `api.cline.bot` serves plain OpenAI `/chat/completions`
+  with tool calling, and wants an ordinary key from `app.cline.bot`. Nothing
+  about it is faked, which is why it sits next to the others. The default model
+  is `anthropic/claude-sonnet-4-6`, because that is what Cline's docs name for
+  coding.
+- **`/setup` no longer outgrows the screen.** The panel's height budget counted
+  its header as three rows when the header is one row that wraps to two at 72
+  columns, so on a 22-row terminal the bottom border fell off. The header is
+  measured now rather than counted — which fixes the palette and the model
+  picker too, since all three go through the same helper. Sixteen providers
+  cannot each be visible on a 22-row terminal however they are drawn, so what is
+  asserted is the invariant that does hold: every option is on screen or counted
+  by the overflow marker, and the panel fits.
+- **OpenCode Zen's default model is `big-pickle`**, not
+  `nemotron-3-ultra-free`. Both places that name it — the wizard's option list
+  and the keyed preset — have to agree, or the wizard sets up a different model
+  than the key alone selects.
+
+### Every list marks the row under the cursor the same way
+
+The command list, `ctrl+p`, the model picker and the GGUF browser already drew
+the selected row with a triangle, so entering `/setup` from the palette changed
+the marker on the way in. The provider list, `/proxy`, `/lang`, `/sessions` and
+the `ask_user` options did the same. All of them use the triangle now, and the
+rule lives on the helper they all render through, so the next list inherits it
+instead of inventing a glyph. A question mark stays where it means something
+else — the prefix of a prompt title, as in `? provider key`.
+
+### The installers verify what they downloaded
+
+Every release publishes a `sha256sums.txt` over its assets, and both installers
+check their download against it before installing: a mismatch stops with both
+digests printed, and a release that predates the file — or a machine with no
+`sha256` tool — is told so and continues. This is integrity against a corrupt
+download, not a signature; **releases are still unsigned.**
+
+### CI now runs where the code branches
+
+The suite runs on macOS and Windows as well as Linux, and under `-race` on the
+two images with a C toolchain cgo can find. This is what found everything in the
+first section, and it will keep finding what a developer's machine cannot show.
+`golangci-lint` runs the set named in `.golangci.yml` — govet, ineffassign,
+misspell, staticcheck's SA checks — plus a `gofmt` pass over tracked files, and
+it gates the push. Turning it on caught two pieces of dead code in the editor
+along with the style findings.
+
+### Also in this release
+
+The v0.2.1 follow-ups are listed under *What's new since v0.2.0* below and
+shipped in this tag: `/image` is reachable again, resuming a session no longer
+loses the code, `dmcode -s` reopens a session, clicking a change in the
+transcript opens the file at that line, and the editor stops showing an
+`[untitled]` tab it did not open.
 
 ## What's new since v0.2.0
 
