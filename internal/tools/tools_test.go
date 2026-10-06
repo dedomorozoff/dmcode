@@ -65,6 +65,53 @@ func TestReadFileOffsetLimit(t *testing.T) {
 	}
 }
 
+// TestReadFilePagesPastTheByteCap pins the capability read_file advertises:
+// offset_line must reach lines beyond the byte cap, and total_lines must count
+// the real file, not the truncated tail. Before this test existed, a file over
+// the cap was cut before paging, so "offset_line for large files" could never
+// read past its first 256 KB — a promise the tool made for exactly the files
+// it did not keep.
+func TestReadFilePagesPastTheByteCap(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big.txt")
+	var b strings.Builder
+	for i := 0; i < 10_000; i++ {
+		b.WriteString("a fairly long line that pushes the file past the cap\n")
+	}
+	content := b.String()
+	if len(content) <= maxReadBytes {
+		t.Fatalf("fixture is only %d bytes, need more than %d", len(content), maxReadBytes)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := readFile(nil, readFileArgs{Path: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The trailing newline is a trailing empty element, the same accounting
+	// TestReadFileOffsetLimit pins: total counts the split, not the lines.
+	want := len(strings.Split(content, "\n"))
+	if res.TotalLines != want {
+		t.Errorf("TotalLines = %d, want %d (the real file, not the cap)", res.TotalLines, want)
+	}
+	if !res.Truncated {
+		t.Error("a file over the byte cap did not report truncation")
+	}
+
+	// The tail of the file is reachable: the first 256 KB cover far fewer than
+	// 9000 lines, so a window there lands on content the old code could not
+	// produce at any offset.
+	res, err = readFile(nil, readFileArgs{Path: p, Offset: 9000, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TotalLines != want || !strings.Contains(res.Content, "long line") {
+		t.Errorf("the tail page is wrong: %+v", res)
+	}
+}
+
 func TestRunCommandEcho(t *testing.T) {
 	res, err := runCommand(nil, runCommandArgs{Command: "echo hi"})
 	if err != nil {

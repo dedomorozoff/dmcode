@@ -440,6 +440,9 @@ type uiModel struct {
 	// sessionsList is the /sessions overlay. It lives on the model rather than
 	// being rebuilt per frame so the highlight and the filter survive redraws.
 	sessionsList sessionsState
+	// dirPick is the /cd folder browser, open while the user navigates to the
+	// folder the next turn should work in.
+	dirPick dirPickState
 	// ask is the choice overlay, open while the agent waits for an answer.
 	// Answers to it go back over a channel, so the field also carries the
 	// pending reply.
@@ -987,8 +990,8 @@ func (m *uiModel) commands() []command {
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
 		}},
-		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
-			return m.changeDir("")
+		{name: "cd", desc: i18n.T("change the working folder (/cd opens a folder browser)"), run: func(m *uiModel) tea.Cmd {
+			return m.openDirPick()
 		}},
 		{name: "image", takesArg: true, desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
 			return m.attachImageCmd("")
@@ -1428,6 +1431,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.sessionsKey(msg)
 			return model, cmd
 		}
+		if m.dirPick.open {
+			model, cmd := m.dirPickKey(msg)
+			return model, cmd
+		}
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
 			return model, cmd
@@ -1760,6 +1767,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if arg, ok := strings.CutPrefix(text, "/cd"); ok {
 				if m.busy {
 					return m, nil
+				}
+				// Bare /cd opens the folder browser; /cd <path> keeps the typed
+				// fast path, like /proxy's split between dialog and syntax.
+				if strings.TrimSpace(arg) == "" {
+					return m, m.openDirPick()
 				}
 				return m, m.changeDir(strings.TrimSpace(arg))
 			}
@@ -5173,7 +5185,7 @@ func (m *uiModel) View() tea.View {
 // test could name is a row that is not on screen.
 func (m *uiModel) modalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
-		m.proxy.open || m.sessionsList.open || m.ask.open
+		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open
 }
 
 // chatOverlayUp reports whether anything is drawn over the transcript, so that
@@ -5204,6 +5216,8 @@ func (m *uiModel) buildFrame() string {
 			box = m.proxyBox()
 		case m.sessionsList.open:
 			box = m.sessionsBox()
+		case m.dirPick.open:
+			box = m.dirPickBox()
 		case m.ask.open:
 			box = m.askBox()
 		}
