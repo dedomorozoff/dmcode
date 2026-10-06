@@ -287,7 +287,12 @@ type modelSwitchedMsg struct {
 	name   string
 	runner *runner.Runner
 	pool   []config.Provider
-	err    error
+	// prov is the provider the runner was actually built for, carrying the
+	// window the endpoint reported for the picked model when it reported one.
+	// It is what applyWindow reads in the handler, so the meter cannot describe
+	// the previous model's window while the runner compacts for the new one.
+	prov config.Provider
+	err  error
 }
 
 type errMsg string
@@ -1144,7 +1149,7 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 	// the model, so every reader wants the same answer, and a lookup repeated
 	// at the sidebar and again in the compaction threshold is two chances for
 	// them to disagree.
-	m.applyWindow(p.Model)
+	m.applyWindow(p)
 	if len(yolo) > 0 {
 		m.yoloTools = yolo[0]
 	}
@@ -1251,7 +1256,7 @@ func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	// re-read: a backup picked for being available is frequently a smaller
 	// model, and the meter continuing to describe the one that just failed
 	// would make a nearly-full context look like a nearly-empty one.
-	m.applyWindow(msg.to.Model)
+	m.applyWindow(msg.to)
 	m.timing.Prompt = 0
 	rest := make([]config.Provider, 0, len(m.pool))
 	rest = append(rest, msg.to)
@@ -1899,12 +1904,18 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.history = append(m.history, line{kindErr, "Model: " + msg.err.Error()})
 		} else {
-			m.prov.Model = msg.name
+			if msg.prov.Model != "" {
+				m.prov = msg.prov
+			} else {
+				// A message built without its provider (a test, or an older
+				// caller) must not wipe the one that is serving.
+				m.prov.Model = msg.name
+			}
 			m.runner = msg.runner
 			// The window travels with the model that was actually built, so the
 			// sidebar's meter cannot describe the previous model's size while
 			// the runner is compacting for the new one.
-			m.applyWindow(msg.name)
+			m.applyWindow(m.prov)
 			// The prompt count belonged to the old model's window too, and a
 			// percentage is only meaningful against the window it was measured
 			// in — so the meter starts empty rather than reading a number that
@@ -3941,6 +3952,14 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 // nowhere to go.
 func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	p := m.prov
+	// The endpoint-reported window belongs to the model it was measured for. A
+	// different id may run at a different cap, so the number is not usable for
+	// the picked model until the endpoint says something about THIS one — which
+	// the goroutine below asks for and this synchronous half may not (it would
+	// freeze the loop on an HTTP call).
+	if p.Model != id {
+		p.Context = 0
+	}
 	p.Model = id
 	// Retain this session's ordering: active host first, the one that just
 	// failed last. The pool member being edited is the one currently answering.
@@ -3959,16 +3978,25 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	}
 	svc, ts := m.svc, m.activeTools()
 	// The window is read before the goroutine starts: it is a pure function of
-	// the model name, and doing it inside would mean reading m.prov on another
+	// the provider, and doing it inside would mean reading m.prov on another
 	// thread while the loop is free to change it. Compaction is built from the
-	// exact figure, which is zero for an unrecognised model and therefore
-	// disables it rather than guessing a threshold.
-	exactWindow := config.ContextWindow(p.Model)
+	// exact figure, which is zero for an unknown window and therefore disables
+	// it rather than guessing a threshold.
+	exactWindow := config.WindowFor(p)
 	return func() tea.Msg {
 		ctx := context.Background()
 		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode(), m.mcpToolsets...)
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
+		}
+		// The model just picked may be served with a different cap than the one
+		// detection measured. Ask the endpoint — the one that enforces the limit
+		// is the one that knows it — and rebuild both the threshold and the
+		// message around the fresher figure. Best-effort: a host that will not
+		// say keeps the window already settled above.
+		if ctx := config.ModelContext(p.BaseURL, p.APIKey, id); ctx > 0 {
+			p.Context = ctx
+			exactWindow = ctx
 		}
 		// Built through the same helper as the first runner, so a /model switch
 		// cannot land a session whose compaction settings differ from the ones
@@ -3986,7 +4014,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
-		return modelSwitchedMsg{name: id, runner: r, pool: pool}
+		return modelSwitchedMsg{name: id, runner: r, pool: pool, prov: p}
 	}
 }
 
@@ -5452,18 +5480,25 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 // applyWindow re-reads the context size for a model and records whether it was
 // a real figure or the display fallback.
 //
+// The window now belongs to the provider, not to the bare model name: an
+// endpoint that reports its own cap in /v1/models (an Ollama num_ctx, a vLLM
+// limit) is answered with that number, which is what the meter and the
+// compaction threshold actually ask — "how much will THIS host accept". Only
+// when the endpoint said nothing does the name-to-tokens table speak.
+//
 // Two numbers fall out of it and they are deliberately kept apart. The meter
 // needs a denominator or it prints a count with nothing to compare against,
 // which was the complaint behind "tokens out of what?". Compaction needs a
 // real one, because a threshold invented from a guess decides when to rewrite
-// the user's conversation — so an unrecognised model gets compaction off and a
+// the user's conversation — so an unknown window gets compaction off and a
 // meter marked with "~".
-func (m *uiModel) applyWindow(model string) {
-	display, guess := config.ContextWindowForDisplay(model)
+func (m *uiModel) applyWindow(p config.Provider) {
+	display, guess := config.WindowForDisplay(p)
 	m.window = display
 	m.windowGuess = guess
-	// The exact figure, which is zero when the model is unrecognised.
-	m.exactWindow = config.ContextWindow(model)
+	// The exact figure, which is zero when neither the endpoint nor the table
+	// knows the model.
+	m.exactWindow = config.WindowFor(p)
 }
 
 // compactionConfig decides when the conversation is summarized instead of

@@ -27,6 +27,12 @@ type Provider struct {
 	Model   string
 	API     string // apiResponses (default) or apiChat
 	Label   string // human-readable provider name for the UI
+	// Context is the model's context window in tokens as the endpoint itself
+	// reported it (/v1/models), zero when the endpoint said nothing. It wins
+	// over the heuristic table because it is the server's own answer, which
+	// knows its actual cap (an Ollama num_ctx, a vLLM limit, a proxy ceiling)
+	// where a name-to-tokens guess can only be right some of the time.
+	Context int
 	// reasoning is the OpenAI `reasoning_effort` to request on the chat wire.
 	// Empty means the field is not sent. Reasoning models spend the output
 	// budget on their analysis channel first, which on endpoints with a modest
@@ -113,6 +119,7 @@ func ContextWindow(model string) int {
 		{"claude", 200_000},
 		{"gpt-5", 400_000},
 		{"gpt-4.1", 1_000_000},
+		{"gpt-oss", 128_000},
 		{"gpt-4o", 128_000},
 		{"gpt-4", 128_000},
 		{"gpt-3.5", 16_385},
@@ -162,6 +169,33 @@ func ContextWindowForDisplay(model string) (window int, approximate bool) {
 	return DefaultContextWindow, true
 }
 
+// WindowFor is the context window for a provider: the size the endpoint itself
+// reported in /v1/models when it reported one, and the heuristic table's guess
+// for the model name otherwise. The endpoint's figure wins because it is the
+// answer to the question the meter and the compaction threshold actually ask —
+// "how much will this host accept" — which no name-to-tokens guess can know
+// (an Ollama num_ctx and a vLLM limit are set by the operator, not the model).
+//
+// Zero means neither source knows, and a caller must then show a bare count
+// rather than divide by a guess.
+func WindowFor(p Provider) int {
+	if p.Context > 0 {
+		return p.Context
+	}
+	return ContextWindow(p.Model)
+}
+
+// WindowForDisplay is the denominator the meter divides by, provider-aware:
+// the endpoint's own number when it gave one, the table's when it did not, and
+// DefaultContextWindow marked as the guess it is when even the table has no
+// answer.
+func WindowForDisplay(p Provider) (window int, approximate bool) {
+	if p.Context > 0 {
+		return p.Context, false
+	}
+	return ContextWindowForDisplay(p.Model)
+}
+
 // AskTimeout is how long a question from the agent waits for an answer before
 // the recommended option is chosen for the user. DMCODE_ASK_TIMEOUT sets it in
 // seconds.
@@ -178,12 +212,61 @@ func AskTimeout() time.Duration {
 }
 
 func ListModels(p Provider) ([]string, error) {
-	client := Client(15 * time.Second)
-	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(p.BaseURL, "/")+"/models", nil)
+	served, err := fetchServedModels(p.BaseURL, p.APIKey, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+p.APIKey)
+	ids := make([]string, 0, len(served))
+	for _, m := range served {
+		ids = append(ids, m.ID)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// ModelContext asks the endpoint how many prompt tokens it will accept for one
+// model id. It is the authoritative window: the server that enforces the limit
+// is the one that states it. Zero when the endpoint cannot or does not say,
+// which is most of them — only some servers (vLLM among them) report a context
+// length on /v1/models — and a caller then falls back to the heuristic table.
+//
+// Best-effort by construction: the meter and the compaction threshold both have
+// a table fallback, so a probe that fails must not fail the call.
+func ModelContext(baseURL, apiKey, model string) int {
+	if model == "" {
+		return 0
+	}
+	served, err := fetchServedModels(baseURL, apiKey, 5*time.Second)
+	if err != nil {
+		return 0
+	}
+	for _, m := range served {
+		if m.ID == model {
+			return m.Context
+		}
+	}
+	return 0
+}
+
+// servedModel is one entry of an OpenAI-compatible /v1/models listing, with the
+// context window the server stated for it. Different servers name the field
+// differently, so several aliases are read rather than betting on one.
+type servedModel struct {
+	ID      string
+	Context int
+}
+
+// fetchServedModels lists what one endpoint serves and, where it says so, how
+// many tokens each model accepts. The window fields are best-effort: a server
+// that omits them yields entries with Context zero, which the callers treat as
+// "unknown" and resolve from the heuristic table instead.
+func fetchServedModels(baseURL, apiKey string, timeout time.Duration) ([]servedModel, error) {
+	client := Client(timeout)
+	req, err := http.NewRequest(http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -195,18 +278,27 @@ func ListModels(p Provider) ([]string, error) {
 	}
 	var body struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID               string `json:"id"`
+			MaxModelLen      int    `json:"max_model_len"`
+			ContextLength    int    `json:"context_length"`
+			MaxContextLength int    `json:"max_context_length"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(body.Data))
+	out := make([]servedModel, 0, len(body.Data))
 	for _, m := range body.Data {
-		ids = append(ids, m.ID)
+		ctx := m.MaxModelLen
+		if ctx <= 0 {
+			ctx = m.ContextLength
+		}
+		if ctx <= 0 {
+			ctx = m.MaxContextLength
+		}
+		out = append(out, servedModel{ID: m.ID, Context: ctx})
 	}
-	sort.Strings(ids)
-	return ids, nil
+	return out, nil
 }
 
 func LoadDotEnv() {

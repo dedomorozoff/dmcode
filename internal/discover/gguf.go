@@ -125,10 +125,11 @@ func startGGUF() (*ggufServer, error) {
 		return nil, fmt.Errorf("%w; the server's output is in %s", err, logPath)
 	}
 
-	model := ggufModelName(abs, ggufBaseURL(port))
+	model, context := ggufModelName(abs, ggufBaseURL(port))
 	prov := config.Provider{
 		BaseURL: ggufBaseURL(port),
 		Model:   model,
+		Context: context,
 		API:     config.APIChat,
 		Label:   i18n.T("llama.cpp GGUF"),
 	}
@@ -216,12 +217,14 @@ func waitReady(base string, timeout time.Duration, died <-chan error) error {
 
 // ggufModelName prefers the id the server itself reports — llama-server knows
 // the model's real name — and falls back to the file's stem, which is what a
-// /v1/models that answers unusually would leave us with.
-func ggufModelName(ggufPath, base string) string {
-	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0] != "" {
-		return served[0]
+// /v1/models that answers unusually would leave us with. The context length the
+// server stated travels back too, so a GGUF session's meter and compaction
+// threshold use the cap llama-server was actually started with.
+func ggufModelName(ggufPath, base string) (string, int) {
+	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0].ID != "" {
+		return served[0].ID, served[0].Context
 	}
-	return fileStem(ggufPath)
+	return fileStem(ggufPath), 0
 }
 
 // fileStem strips a model file's directory and extension. The path may name a

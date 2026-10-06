@@ -117,7 +117,7 @@ func TestWaitReadyTimesOutOnSilence(t *testing.T) {
 // ggufModelName prefers what the server reports and falls back to the file
 // stem, so an endpoint with an unusual /models still gets a usable id.
 func TestGGUFModelNameFallsBackToTheFileStem(t *testing.T) {
-	if got := ggufModelName(`C:\models\Qwen2.5-Coder-7B-Q4_K_M.gguf`, "http://127.0.0.1:1/v1"); got != "Qwen2.5-Coder-7B-Q4_K_M" {
+	if got, _ := ggufModelName(`C:\models\Qwen2.5-Coder-7B-Q4_K_M.gguf`, "http://127.0.0.1:1/v1"); got != "Qwen2.5-Coder-7B-Q4_K_M" {
 		t.Errorf("stem fallback gave %q", got)
 	}
 
@@ -125,7 +125,7 @@ func TestGGUFModelNameFallsBackToTheFileStem(t *testing.T) {
 		w.Write([]byte(`{"data":[{"id":"model-id-from-server"}]}`))
 	}))
 	defer srv.Close()
-	if got := ggufModelName("whatever.gguf", srv.URL); got != "model-id-from-server" {
+	if got, _ := ggufModelName("whatever.gguf", srv.URL); got != "model-id-from-server" {
 		t.Errorf("server id gave %q, want model-id-from-server", got)
 	}
 }

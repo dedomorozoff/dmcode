@@ -784,7 +784,15 @@ func (s *Service) ApproxChars(appName, userID, sessionID string) int {
 			case p.Text != "":
 				total += len(p.Text)
 			case p.FunctionCall != nil:
-				total += len(p.FunctionCall.Name) + len(p.FunctionCall.Args)
+				// The args are a map, so len() would count keys, not the size of
+				// the call — a write_file carrying a whole file would count as
+				// two or three. Marshalled, it is what the next request will
+				// actually carry, which is the one number this estimate exists
+				// to produce.
+				total += len(p.FunctionCall.Name)
+				if b, err := json.Marshal(p.FunctionCall.Args); err == nil {
+					total += len(b)
+				}
 			case p.FunctionResponse != nil:
 				// The response is the whole point of the size here: a
 				// read_file can return more than everything said so far.
