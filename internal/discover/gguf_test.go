@@ -86,7 +86,7 @@ func TestWaitReadyAnswersWhenTheServerIsUp(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := waitReady(srv.URL, 2*time.Second, make(chan error, 1)); err != nil {
+	if err := waitReady(srv.URL, 2*time.Second, make(chan error, 1), nil); err != nil {
 		t.Errorf("a live server timed out: %v", err)
 	}
 }
@@ -96,7 +96,7 @@ func TestWaitReadyReportsADeadProcessAtOnce(t *testing.T) {
 	died <- http.ErrServerClosed // any non-nil: the process is gone
 
 	start := time.Now()
-	err := waitReady("http://127.0.0.1:1/v1", 30*time.Second, died)
+	err := waitReady("http://127.0.0.1:1/v1", 30*time.Second, died, nil)
 	if err == nil || !strings.Contains(err.Error(), "exited") {
 		t.Errorf("a dead process gave %v, want an exited complaint", err)
 	}
@@ -109,7 +109,7 @@ func TestWaitReadyTimesOutOnSilence(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	if err := waitReady(srv.URL, 300*time.Millisecond, make(chan error, 1)); err == nil {
+	if err := waitReady(srv.URL, 300*time.Millisecond, make(chan error, 1), nil); err == nil {
 		t.Error("a server that never answers /models was accepted")
 	}
 }

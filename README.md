@@ -93,10 +93,19 @@ The binary is looked up in this order: `DMCODE_LLAMA_SERVER`, then
 `./llama/llama-server(.exe)` — unpack a llama.cpp release into the project's
 `llama/` folder and it is found with no configuration — then `PATH`.
 
-The server is started on a free loopback port, dmCode waits for the model to
-load (up to `DMCODE_GGUF_STARTUP` seconds, 180 by default) and then talks to it
-over the ordinary OpenAI-compatible wire; the server's own output goes to
-`~/.dmcode/llama-server.log`, and the process is taken down when dmCode exits.
+The server is started on a free loopback port and the model loads **in the
+background**: the interface is up and usable while the weights are read, the
+status bar reads `LOADING`, and the progress line counts the seconds and shows
+llama-server's own last line (`load_tensors: 42%`). A message typed meanwhile is
+kept in the input rather than sent to a port nothing is listening on — press
+enter again when the model is up. `esc` gives up on the load and shuts the server
+down.
+
+The load is given `DMCODE_GGUF_STARTUP` seconds, 180 by default; give up sooner
+with `esc`. A missing `.gguf` or a missing `llama-server` is reported at once,
+before the interface is drawn, because those are instant to check. The server's
+output goes to `~/.dmcode/llama-server.log`, and the process is taken down when
+dmCode exits — including when it exits during the load.
 
 ## Tools
 
@@ -611,15 +620,18 @@ Everything is optional; the defaults work without any of it.
 | `DMCODE_REASONING_EFFORT` | caps the reasoning channel |
 | `DMCODE_MAX_OUTPUT` | the answer budget in tokens (`max_tokens`), default 16384 |
 | `DMCODE_CONTEXT` | the model's real window in tokens, when the built-in table gets it wrong |
+| `DMCODE_GGUF` | a `.gguf` file to serve through llama-server, loaded in the background |
+| `DMCODE_LLAMA_SERVER` | the llama-server binary (default: `./llama/llama-server`, then `PATH`) |
+| `DMCODE_LLAMA_ARGS` | extra llama-server flags, split on spaces |
+| `DMCODE_GGUF_STARTUP` | seconds a local model may take to load (default 180; `esc` gives up sooner) |
 
 Both of the last two are about a limit dmcode cannot otherwise see. A request
 with no `max_tokens` leaves the output ceiling to the endpoint, so a model
-writing a long calculation stops mid-sentence — and dmcode says so rather than
-leaving you to read the context meter, which has nothing to do with it.
-`DMCODE_MAX_OUTPUT` raises the ceiling for a model the default overshoots.
-`DMCODE_CONTEXT` names a window for a model the built-in table does not
-recognise, which also switches automatic context compaction on, because that
-needs a real figure rather than a guess.
+writing a long calculation stops mid-sentence and dmcode says so rather than
+leaving you to read the context meter; `DMCODE_MAX_OUTPUT` raises the ceiling
+for a model the default overshoots. `DMCODE_CONTEXT` names a window for a model
+the built-in table does not recognise — which also switches automatic context
+compaction on, because that needs a real figure rather than a guess.
 
 ## Roadmap
 

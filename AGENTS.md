@@ -63,7 +63,7 @@
 - **Key Modules:** the code is already split into `internal/` packages:
   - `main.go`: startup only — flag parsing, `-C` relocation, then chaining the packages below.
   - `internal/config`: provider config and the `.env` file.
-  - `internal/discover`: which providers the session can run on.
+  - `internal/discover`: which providers the session can run on, and the llama-server around a local `.gguf`.
   - `internal/llm`: the OpenAI-compatible wire and the failover pool.
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
   - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`, `project_map`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
@@ -384,6 +384,40 @@ next. `retryable()` answers "is another host worth trying" and so allows a 401;
 `sameEndpointRetryable()` answers "is asking this host again worth it" and does
 not. Keeping them separate is the point — a rejected key is another endpoint's
 problem, not a reason to repeat the same request twice.
+
+### A local model loads behind the interface
+
+`discover.StartGGUF` starts llama-server and returns; the wait is somebody else's
+job. `main` no longer blocks — `DetectProviders` returns a `Session` carrying the
+pool **and** the in-flight `Launch`, because a pool alone would claim the model is
+available when nothing is listening on its port yet.
+
+Four things about it are not obvious, and each is one that reads fine until it is
+wrong:
+
+- **The split is spawn / wait, not slow / fast.** Everything checkable in a
+  millisecond — the file exists, the binary exists — is checked *before* the
+  interface is drawn, because a mistyped path should be reported in milliseconds
+  rather than after the load timeout. Only loading the weights is deferred.
+- **`ggufState` is set at spawn, not after the wait.** That is the whole difference
+  between a load that can be abandoned and one that cannot: `StopGGUF` reaching the
+  child mid-load is what stops quitting from leaving an orphan holding a large
+  model in memory. The state is also what makes a second `/setup` pick *share* the
+  in-flight load instead of serialising on a mutex for its whole duration, on the
+  event loop.
+- **The UI holds an interface, not `*discover.Launch`** (`ggufLoad`). Every
+  behaviour worth testing here — refusing a message, cancelling, swapping the
+  provider in — needs a load that is not a real model, and the only way to have a
+  load without one is the seam. `internal/discover` tests spawn the test binary
+  itself as a fake llama-server, because "the caller is not blocked" and "the child
+  is killed" are only provable against a real process.
+- **A cancelled load is not a failed load** (`discover.ErrCancelled`). The user
+  ended it; a report naming a timeout they caused is the tool arguing with them.
+
+`handleGGUFReady` sets `m.pool` as well as `m.prov`. A runner rebuilt from a stale
+pool — `Tab`, `shift+tab`, `/cd` all do — would otherwise put the session back on
+the endpoint the user just switched away from, so the swap would hold for one turn
+and be quietly undone.
 
 ### Workspace boundary
 

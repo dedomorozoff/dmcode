@@ -181,11 +181,14 @@ func run(dir string, want resumeFlag) error {
 	i18n.Init()
 	ctx := context.Background()
 
-	pool, err := discover.DetectProviders()
+	session, err := discover.DetectProviders()
 	if err != nil {
 		return err
 	}
-	// A GGUF session runs its own llama-server; it must not outlive the TUI.
+	pool := session.Pool
+	// A GGUF session runs its own llama-server; it must not outlive the TUI. The
+	// deferred call covers quitting during the load as well as after it, which is
+	// the case that used to leave an orphan holding a large model in memory.
 	defer discover.StopGGUF()
 
 	agentTools, err := tools.MakeTools()
@@ -254,7 +257,9 @@ func run(dir string, want resumeFlag) error {
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID})
+	// A GGUF load is still running when the interface appears; the UI shows it
+	// loading and swaps the provider in when it answers.
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to
