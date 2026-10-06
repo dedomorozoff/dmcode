@@ -609,6 +609,17 @@ Everything is optional; the defaults work without any of it.
 | `DMCODE_LANG` | `en` or `ru` for one run |
 | `DMCODE_API` | `chat` to force the `/chat/completions` wire |
 | `DMCODE_REASONING_EFFORT` | caps the reasoning channel |
+| `DMCODE_MAX_OUTPUT` | the answer budget in tokens (`max_tokens`), default 16384 |
+| `DMCODE_CONTEXT` | the model's real window in tokens, when the built-in table gets it wrong |
+
+Both of the last two are about a limit dmcode cannot otherwise see. A request
+with no `max_tokens` leaves the output ceiling to the endpoint, so a model
+writing a long calculation stops mid-sentence — and dmcode says so rather than
+leaving you to read the context meter, which has nothing to do with it.
+`DMCODE_MAX_OUTPUT` raises the ceiling for a model the default overshoots.
+`DMCODE_CONTEXT` names a window for a model the built-in table does not
+recognise, which also switches automatic context compaction on, because that
+needs a real figure rather than a guess.
 
 ## Roadmap
 

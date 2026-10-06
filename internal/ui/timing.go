@@ -5,6 +5,9 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
+
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
@@ -29,6 +32,13 @@ type turnTiming struct {
 	// tool loop costs more than one and the per-call speed is only
 	// meaningful once it is divided by this.
 	Calls int
+	// Truncated is the endpoint saying the answer ran into its output limit
+	// (finish_reason=length) rather than finishing. It is not an error — the
+	// turn did end cleanly — but the answer on screen is a half sentence, and
+	// without this the only number a user can read is the context meter, which
+	// invites the wrong conclusion entirely: a long calculation has nothing to
+	// do with how full the window is.
+	Truncated bool
 }
 
 // TokensPerSecond is the answer's own rate: the completion tokens over the time
@@ -63,6 +73,37 @@ func (t turnTiming) percentUsed(window int) int {
 		return 999
 	}
 	return p
+}
+
+// observe folds one model response into the turn's numbers. It is a method
+// rather than a block inside the turn loop so the two facts it reads — what the
+// endpoint charged for, and whether it finished — are stated once and can be
+// driven from a test without a runner behind them.
+//
+// Two rules, both about which event wins:
+//
+//   - Usage is read from every response and the largest count kept. A streaming
+//     endpoint reports the running total on the final chunk, but some report it
+//     only on an intermediate one and leave the last empty — taking the most
+//     recent instead of the most complete is how the number ends up zero on a
+//     turn that plainly used tokens.
+//   - A cut is latched and never cleared. The adapter reports finish_reason on
+//     the response that closed the stream, and a wrapper above it may follow
+//     with a synthesised one saying "stop"; an answer that has been cut cannot be
+//     un-cut, and letting a later event clear the mark is exactly how a cut
+//     answer would end up reported as a finished one.
+func (t *turnTiming) observe(resp model.LLMResponse) {
+	if u := resp.UsageMetadata; u != nil {
+		if int(u.PromptTokenCount) > t.Prompt {
+			t.Prompt = int(u.PromptTokenCount)
+		}
+		if int(u.CandidatesTokenCount) > t.Completion {
+			t.Completion = int(u.CandidatesTokenCount)
+		}
+	}
+	if resp.FinishReason == genai.FinishReasonMaxTokens {
+		t.Truncated = true
+	}
 }
 
 // sessionTotal is what the whole session has cost so far.
@@ -130,6 +171,13 @@ func timingLine(t turnTiming, window int) string {
 	if t.Completion > 0 {
 		parts = append(parts, fmt.Sprintf("%s %s %s",
 			i18n.T("answer:"), formatCount(t.Completion), i18n.T("tokens")))
+	}
+	if t.Truncated {
+		// On the same row as the token count it qualifies, rather than as a row
+		// of its own: "answer: 4096 tokens · cut at the output limit" reads as
+		// one fact about one number, where a separate line below reads as a
+		// separate problem that happened afterwards.
+		parts = append(parts, i18n.T("cut at the output limit"))
 	}
 	if t.Prompt > 0 {
 		if window > 0 {

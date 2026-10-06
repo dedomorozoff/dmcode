@@ -1970,6 +1970,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.timing.Elapsed > 0 {
 				m.history = append(m.history, line{kindSys, timingLine(msg.timing, m.window)})
 			}
+			// A cut answer says so, and says what to do about it. The claim that
+			// "continue" works is not a guess: the half answer was streamed and
+			// stored as a model event, so it is in the conversation the next turn
+			// is built from, and the model picks up from where it stopped rather
+			// than starting over.
+			if msg.timing.Truncated {
+				note := i18n.T("⚠ the answer hit the output limit — say «continue» and it will pick up from there")
+				if msg.timing.Completion > 0 {
+					note = fmt.Sprintf("%s (%s %s)", note,
+						formatCount(msg.timing.Completion), i18n.T("tokens"))
+				}
+				m.history = append(m.history, line{kindSys, note})
+			}
 		}
 		// A session file that could not be written is reported here, at the end
 		// of the turn that hit it, rather than from inside the write.
@@ -4074,20 +4087,9 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 			// the request, and counting only the replies would report a
 			// tool loop as a single fast call.
 			tm.Calls++
-			// The usage block is read from every event, not just the last.
-			// A streaming endpoint reports the running total on the final
-			// chunk, but some report it only on an intermediate one and leave
-			// the last empty — so the most complete report seen wins rather
-			// than the most recent, which is how the number would otherwise
-			// end up zero on a turn that plainly used tokens.
-			if u := ev.LLMResponse.UsageMetadata; u != nil {
-				if int(u.PromptTokenCount) > tm.Prompt {
-					tm.Prompt = int(u.PromptTokenCount)
-				}
-				if int(u.CandidatesTokenCount) > tm.Completion {
-					tm.Completion = int(u.CandidatesTokenCount)
-				}
-			}
+			// The usage block and the output limit are both read here, by the
+			// turn's own tally: two fields read in two places drift apart.
+			tm.observe(ev.LLMResponse)
 			// The text of one event is dispatched as a unit, before the tool
 			// parts it shares the event with: the accumulator has to be reset
 			// once per event, and a finalised response carrying both text and
