@@ -482,6 +482,10 @@ type uiModel struct {
 	// dirPick is the /cd folder browser, open while the user navigates to the
 	// folder the next turn should work in.
 	dirPick dirPickState
+	// help is the F1 reference: the keybindings and the slash commands in one
+	// scrollable box. Its content is static, so the state is only where the
+	// user is looking, not a filter or a draft.
+	help helpState
 	// ask is the choice overlay, open while the agent waits for an answer.
 	// Answers to it go back over a channel, so the field also carries the
 	// pending reply.
@@ -1574,6 +1578,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.askKey(msg)
 			return model, cmd
 		}
+		if m.help.open {
+			model, cmd := m.helpKey(msg)
+			return model, cmd
+		}
 		// Before the switch, and matched through the binding rather than a
 		// literal: /help prints the binding's own help text, and a key written
 		// out in two places is a key that will be wrong in one of them. alt+g is
@@ -1680,6 +1688,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.newSession("")
+			return m, nil
+		case "f1":
+			// F1 is help in the chat, exactly as it is inside the editor — the
+			// editor owns the key while it is open, so the two never compete.
+			if m.help.open {
+				m.help.open = false
+				m.help.top = 0
+			} else {
+				m.openHelp()
+			}
 			return m, nil
 		case "pgup":
 			m.scrollBy(-10)
@@ -4760,6 +4778,7 @@ func (m *uiModel) sidebarView(height int) string {
 
 		if hotkeys {
 			row(styleSidebarLabel, i18n.T("HOTKEYS"))
+			row(styleHint, i18n.T(" f1     help"))
 			row(styleHint, i18n.T(" ctrl+e  editor"))
 			row(styleHint, i18n.T(" ctrl+p  commands"))
 			row(styleHint, i18n.T(" ctrl+b  project panel"))
@@ -5397,7 +5416,8 @@ func (m *uiModel) View() tea.View {
 // test could name is a row that is not on screen.
 func (m *uiModel) modalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
-		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open
+		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
+		m.help.open
 }
 
 // chatOverlayUp reports whether anything is drawn over the transcript, so that
@@ -5432,6 +5452,8 @@ func (m *uiModel) buildFrame() string {
 			box = m.dirPickBox()
 		case m.ask.open:
 			box = m.askBox()
+		case m.help.open:
+			box = m.helpBox()
 		}
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 	}
