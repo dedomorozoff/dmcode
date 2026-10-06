@@ -864,12 +864,20 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 			msg.X, msg.Y = msg.X-x0, msg.Y-y0
 			return m.chatRelease(msg)
 		},
+		// Wrapped like Key is, and for the same reason: Init builds this
+		// workspace on the first frame, so every paste enters through the editor
+		// block at the top of Update and never reaches the chat's own PasteMsg
+		// case or the textinput behind it. A copy that answered only the
+		// picture question dropped the text on the floor — the clipboard read
+		// below returned ErrNoImage, the message was nil, and a paste of three
+		// lines into the prompt did nothing at all, silently. Handing the text
+		// back to Update is what keeps one code path for pasted text instead of
+		// three that answer different questions.
 		Paste: func(text string) tea.Cmd {
-			if m.pasteTarget() != nil {
-				m.pasteInto(text)
-				return nil
-			}
-			return m.pasteImageCmd()
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			_, cmd := m.Update(tea.PasteMsg{Content: text})
+			return cmd
 		},
 		View:         m.chatFrame,
 		ChangedFiles: func() []string { return tools.ChangedFiles() },
