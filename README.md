@@ -102,7 +102,14 @@ over the ordinary OpenAI-compatible wire; the server's own output goes to
 
 The agent works on files and a shell, rather than just talking:
 
-`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command`
+`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `project_map`
+
+`project_map` is the one to reach for first. It answers "what is this project"
+in a single call — the directory tree, the languages it is written in, and the
+build files, entry points and manuals it contains — so the agent orients itself
+before it starts guessing at filenames. Its language share and file counts cover
+the whole tree however shallow the tree it shows, and it says so when a bound
+stopped it early.
 
 It can also reach past the workspace on purpose:
 
@@ -286,8 +293,9 @@ readable.
 
 Plan mode is enforced by withholding the write tools, not by asking the model in
 the prompt. `run_command` is withheld too, because a shell can write a file
-through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `grep`, `glob`,
-`web_search`, the plan tools, `ask_user`, `sub_agent` and `switch_mode` — a plan
+through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `project_map`,
+`grep`, `glob`, `web_search`, the plan tools, `ask_user`, `sub_agent` and
+`switch_mode` — a plan
 is a document and a question is a question, so a mode whose whole output is a
 plan should not be unable to publish one. The current mode is shown as a badge
 in the status bar and the sidebar lists only the tools actually reachable.

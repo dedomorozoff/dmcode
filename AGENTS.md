@@ -66,7 +66,7 @@
   - `internal/discover`: which providers the session can run on.
   - `internal/llm`: the OpenAI-compatible wire and the failover pool.
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
-  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
+  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`, `project_map`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
   - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `List` is the one eager pass: names for the sidebar, notes for the servers that did not come up.
   - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar),
     `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending

@@ -649,9 +649,19 @@ func fuzzyReplace(src, oldS, newS string, replaceAll bool) (int, string, error) 
 }
 
 // isIgnoredDir returns true if directory should be skipped (VCS / vendor / caches).
+//
+// The list is deliberately short and every entry is a directory no project keeps
+// source in. `build`, `bin` and `obj` are the obvious omissions and stay out on
+// purpose: all three hold real code in enough projects that skipping them would
+// hide the very code a reader was sent to find. Generated output — dist, target,
+// out, the virtualenvs and the tool caches — is unambiguous in a way, and a
+// single checked-in .exe in dist/ was enough to make a Go project's map claim it
+// was twelve percent executable.
 func isIgnoredDir(name string) bool {
 	switch name {
-	case ".git", ".crush", ".hg", ".svn", "node_modules", ".idea", ".vscode", "vendor":
+	case ".git", ".crush", ".hg", ".svn", "node_modules", ".idea", ".vscode", "vendor",
+		"dist", "target", "out", ".next", ".nuxt", ".turbo", ".cache", ".gradle",
+		".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
 		return true
 	default:
 		return false
@@ -1219,6 +1229,10 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	projectMapTool, err := makeProjectMapTool()
+	if err != nil {
+		return nil, err
+	}
 	webSearchTool, err := MakeWebSearchTool()
 	if err != nil {
 		return nil, err
@@ -1232,7 +1246,7 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	out := []tool.Tool{
 		readFileTool, writeFileTool, editFileTool, listDirTool,
-		grepTool, globTool2, runCommandTool, webSearchTool,
+		grepTool, globTool2, runCommandTool, webSearchTool, projectMapTool,
 	}
 	return append(out, todoTools...), nil
 }
@@ -1246,14 +1260,15 @@ func MakeTools() ([]tool.Tool, error) {
 // is a document, not an edit. Withholding them from plan mode would leave the
 // mode whose entire output is a plan unable to publish one.
 var readOnlyNames = map[string]bool{
-	"read_file":  true,
-	"list_dir":   true,
-	"grep":       true,
-	"glob":       true,
-	"web_search": true,
-	"todo_write": true,
-	"todo_set":   true,
-	"todo_read":  true,
+	"read_file":   true,
+	"list_dir":    true,
+	"project_map": true,
+	"grep":        true,
+	"glob":        true,
+	"web_search":  true,
+	"todo_write":  true,
+	"todo_set":    true,
+	"todo_read":   true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the
