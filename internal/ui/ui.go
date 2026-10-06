@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math/rand"
@@ -313,13 +314,42 @@ type setupCheckMsg struct {
 	forced bool
 }
 
-// launchGGUF is the launcher behind the GGUF setup option. It is a variable so
-// the tests can stand in for a model load, which no test wants to wait out.
-var launchGGUF = discover.LaunchGGUF
+// startGGUF starts llama-server for the .gguf file DMCODE_GGUF names, without
+// waiting for the model. A variable so the tests can stand in for a load, which
+// no test wants to wait out — and it is the non-blocking half that matters: the
+// whole point of loading behind the interface is that this returns immediately.
+var startGGUF = func() (ggufLoad, error) { return discover.StartGGUF() }
 
-// ggufReadyMsg reports the outcome of starting llama-server on the .gguf file
-// the user named in /setup. The load happens off the event loop because it can
-// take minutes; the message is how the loop learns it is done.
+// stopGGUF takes down a load in progress. A variable for the same reason as
+// startGGUF, and for a second one: a test must be able to watch the loading
+// state end without a real llama-server behind it.
+var stopGGUF = discover.StopGGUF
+
+// ggufLoad is what the interface needs from a model being loaded: whether it
+// finished, which provider to switch to, and what the server is printing.
+//
+// It is an interface rather than *discover.Launch because every behaviour worth
+// testing here — refusing a message, cancelling, swapping the provider in — is
+// about what the UI does while a load runs, and none of it can be driven from a
+// test if the only way to have a load is to start a real llama-server. The
+// interface is the seam; the real launch satisfies it unchanged.
+type ggufLoad interface {
+	// Wait blocks until the model answers or the load fails.
+	Wait() error
+	// Provider is the provider to run on. Meaningful after Wait.
+	Provider() config.Provider
+	// Tail is the last thing the server printed, for a wait that needs progress.
+	Tail() string
+}
+
+// ggufReadyMsg reports the outcome of a llama-server load. The load happens off
+// the event loop because it can take minutes; the message is how the loop learns
+// it is done.
+//
+// It carries two paths: the /setup one, where the user is switching to a local
+// model mid-session, and the start-up one, where the session was built around a
+// model that had not finished loading. Both end in the same place — a provider to
+// run on — so they arrive as the same message.
 type ggufReadyMsg struct {
 	prov config.Provider
 	err  error
@@ -368,11 +398,20 @@ type uiModel struct {
 	mcpToolsets []tool.Toolset
 	prog        *tea.Program
 	toolNames   []string
-	palette     paletteState
-	picker      modelPicker
-	setup       setupState
-	lang        langState
-	suggest     []suggestion
+	// ggufLoad is a local model loading in the background, if one is. Non-nil
+	// means the model is not answering yet: the session is fully usable, the
+	// provider in it is a name and a port, and a message sent now would go to a
+	// port nothing is listening on. Nothing about it blocks the interface, which
+	// is the entire change from waiting for the load before drawing a frame.
+	ggufLoad ggufLoad
+	// ggufLoadStart is when the wait began, so the note counts seconds against a
+	// clock the user can watch rather than against the 180s timeout.
+	ggufLoadStart time.Time
+	palette       paletteState
+	picker        modelPicker
+	setup         setupState
+	lang          langState
+	suggest       []suggestion
 	// suggestSel is the highlighted row of the command list. It is reset on every
 	// keystroke, so a narrowed list always starts at the top.
 	suggestSel int
@@ -1178,7 +1217,103 @@ func (m *uiModel) Init() tea.Cmd {
 	// The workspace exists from the first frame — the terminal, the tree and
 	// the git panel are one key (or one status-bar icon) away — but every
 	// panel starts closed: the first screen is the chat, not furniture.
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor())
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd())
+}
+
+// ggufLoadCmd waits for the background model load and reports the outcome.
+//
+// It is a command and not something done during construction because the load
+// can take minutes and the interface has to be on screen throughout. The wait
+// happens on Bubble Tea's goroutine, so the user is typing into a live session
+// while the weights are read — which is the whole point: before this, the two
+// lines on stderr were the entire feedback available for those minutes.
+func (m *uiModel) ggufLoadCmd() tea.Cmd {
+	l := m.ggufLoad
+	if l == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		err := l.Wait()
+		// The provider is read after the wait, not before: a struct literal
+		// evaluates its fields in order, and asking first would ask a server
+		// that cannot answer yet and keep the file's stem for ever.
+		return ggufReadyMsg{prov: l.Provider(), err: err}
+	}
+}
+
+// beginGGUFLoad puts the session into its loading state and says so.
+//
+// The transcript lines are the caller's because there are two callers and they
+// have different things to say: at start-up the model was chosen before the
+// interface existed, and in /setup the user is watching the switch they just
+// made. What they share is the state, and the state is set here so it cannot be
+// set without the clock starting — a note counting from zero is a note that
+// looks stuck.
+func (m *uiModel) beginGGUFLoad(l ggufLoad, lines []line) {
+	m.ggufLoad = l
+	m.ggufLoadStart = time.Now()
+	m.history = append(m.history, lines...)
+	m.historyDirty = true
+	m.followVP()
+}
+
+// ggufLoadNote is the live text shown while a local model is loading.
+//
+// It carries the three things a wait needs: that it is happening, how long it has
+// been going, and what the server is actually doing. The last one is llama-server's
+// own last line of output — a model load is silent from the outside for minutes
+// otherwise, and "silent for four minutes" and "hung" look identical until you
+// can see it counting layers.
+func (m *uiModel) ggufLoadNote() string {
+	if m.ggufLoad == nil {
+		return ""
+	}
+	note := i18n.T("loading the local model — the interface is ready, messages will not send until it is")
+	if !m.ggufLoadStart.IsZero() {
+		note += "  " + formatWait(time.Since(m.ggufLoadStart))
+	}
+	if tail := m.ggufLoad.Tail(); tail != "" {
+		note += " · " + truncate(tail, 64)
+	}
+	return note
+}
+
+// cancelGGUFLoad gives up on a background load and takes the server down with it.
+//
+// Without it a 180-second wait is a wait nobody can escape: the load was moved off
+// the startup path precisely so the session is usable while it runs, and a wait
+// that can only be suffered is a wait that has to be shown. Esc is the right key
+// because there is no turn to stop while a model loads, so nothing else claims it.
+func (m *uiModel) cancelGGUFLoad() tea.Cmd {
+	if m.ggufLoad == nil {
+		return nil
+	}
+	m.ggufLoad = nil
+	stopGGUF()
+	m.statusText = i18n.T("model load cancelled")
+	m.history = append(m.history, line{kindSys, i18n.T("⏹ stopped loading the local model — llama-server was shut down")})
+	m.historyDirty = true
+	m.followVP()
+	return nil
+}
+
+// replaceProvider puts p at the head of the pool, replacing the entry it
+// supersedes.
+//
+// It replaces by URL rather than by position because that is what actually
+// identifies an endpoint: a switch keeps the URL and changes the model, a
+// failover keeps the URL and changes neither. A GGUF load is a third case, where
+// both change, so the old entry has to go or the pool would offer a dead port as
+// a reserve — and a failover to a port nothing is listening on is a failure that
+// looks like a network problem.
+func replaceProvider(pool []config.Provider, p config.Provider) []config.Provider {
+	out := []config.Provider{p}
+	for _, q := range pool {
+		if q.BaseURL != p.BaseURL {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // upgradeColorProfile asks the terminal what it actually supports.
@@ -1486,6 +1621,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
+			}
+			// No turn means nothing to stop, so a model still loading takes the
+			// key. It is the only other thing escape can mean here, and a wait that
+			// cannot be left would make the background load worse than the
+			// blocking one it replaced.
+			if m.ggufLoad != nil {
+				return m, m.cancelGGUFLoad()
 			}
 		case "ctrl+c":
 			if m.busy {
@@ -1798,6 +1940,27 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.switchModelCmd(id)
 			}
+			// A model still loading cannot answer, and sending anyway produces a
+			// connection error the user cannot act on: the endpoint is not broken,
+			// it is not up yet, and "connection refused" says nothing about which of
+			// those it is.
+			//
+			// The prompt goes back into the input rather than being held or dropped.
+			// Holding it would need a queue the pictures have to be threaded
+			// through; dropping it loses a sentence the user already typed. The cost
+			// is one more enter, and the text is in the one place they can see it.
+			//
+			// It sits after the command dispatch, because /help and /quit are not
+			// messages to the model and a session waiting on a load should still
+			// answer them.
+			if m.ggufLoad != nil {
+				m.input.SetValue(text)
+				m.statusText = i18n.T("the model is still loading")
+				m.history = append(m.history, line{kindSys, i18n.T("⏳ kept your prompt — the model is still loading, press enter again when it is ready")})
+				m.historyDirty = true
+				m.followVP()
+				return m, nil
+			}
 			// A picture dropped into the prompt as a path is taken out of the text
 			// and attached, so what the model reads is the question without a
 			// filename in it. A path that is not an image stays in the prompt:
@@ -1992,6 +2155,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// an endpoint that sends no usage does not get a row reading zero.
 			if msg.timing.Elapsed > 0 {
 				m.history = append(m.history, line{kindSys, timingLine(msg.timing, m.window)})
+			}
+			// A cut answer says so, and says what to do about it. The claim that
+			// "continue" works is not a guess: the half answer was streamed and
+			// stored as a model event, so it is in the conversation the next turn
+			// is built from, and the model picks up from where it stopped rather
+			// than starting over.
+			if msg.timing.Truncated {
+				note := i18n.T("⚠ the answer hit the output limit — say «continue» and it will pick up from there")
+				if msg.timing.Completion > 0 {
+					note = fmt.Sprintf("%s (%s %s)", note,
+						formatCount(msg.timing.Completion), i18n.T("tokens"))
+				}
+				m.history = append(m.history, line{kindSys, note})
 			}
 		}
 		// A session file that could not be written is reported here, at the end
@@ -3803,9 +3979,17 @@ func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
 	return m.toolCheckCmd()
 }
 
-// startGGUFSetup saves the GGUF configuration and kicks off llama-server in
-// the background. The provider is not known until the model has loaded, so
-// nothing is committed to m.prov here — ggufReadyMsg finishes the job.
+// startGGUFSetup saves the GGUF configuration and starts llama-server in the
+// background.
+//
+// It goes through the same load state as a start-up load rather than a private
+// one, because the two are the same situation: a model that will exist in a
+// minute and is not answering now. Two paths meant one of them was missing
+// whatever the other had — the badge, the progress note, esc — and the one that
+// misses them is the one nobody tests.
+//
+// The provider is not known until the model has loaded, so nothing is committed
+// to m.prov here — ggufReadyMsg finishes the job.
 func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
 	status, err := m.persistSetup(vars)
 	if err != nil {
@@ -3817,22 +4001,44 @@ func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
 		return nil
 	}
 	m.setup.reset()
-	m.statusText = i18n.T("starting the GGUF model — llama-server is loading it…")
-	m.history = append(m.history,
-		line{kindSys, i18n.T("starting llama-server on ") + vars["DMCODE_GGUF"]},
-		line{kindSys, i18n.T("this can take a while — the model loads before the first reply")})
-	m.historyDirty = true
-	m.followVP()
-	return func() tea.Msg {
-		p, lerr := launchGGUF()
-		return ggufReadyMsg{prov: p, err: lerr}
+
+	// The fast failures — a missing .gguf, a llama-server that is not on disk —
+	// are reported here, before a second of waiting, which is the same order
+	// start-up uses: the things that can be known instantly are known instantly.
+	l, lerr := startGGUF()
+	if lerr != nil {
+		m.statusText = i18n.T("failed")
+		m.history = append(m.history,
+			line{kindErr, i18n.T("llama-server did not start: ") + lerr.Error()},
+			line{kindSys, i18n.T(".env keeps DMCODE_GGUF — fix DMCODE_LLAMA_SERVER or the path, then restart dmcode.")})
+		m.historyDirty = true
+		m.followVP()
+		return nil
 	}
+
+	m.beginGGUFLoad(l, []line{
+		{kindSys, i18n.T("starting llama-server on ") + vars["DMCODE_GGUF"]},
+		{kindSys, i18n.T("this can take a while — the model loads before the first reply")},
+	})
+	return m.ggufLoadCmd()
 }
 
-// handleGGUFReady completes the GGUF setup: on success the provider goes live
+// handleGGUFReady completes a GGUF load: on success the provider goes live
 // without a restart; on failure the saved configuration stays in .env so the
 // user can fix the path or the binary and restart.
+//
+// A cancellation is reported in one line and nothing else. The load did not fail,
+// the user asked for it to stop, and a failure report naming a timeout they
+// themselves caused is the tool arguing with them.
 func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
+	m.ggufLoad = nil
+	if errors.Is(msg.err, discover.ErrCancelled) {
+		m.statusText = i18n.T("model load cancelled")
+		m.history = append(m.history, line{kindSys, i18n.T("⏹ stopped loading the local model")})
+		m.historyDirty = true
+		m.followVP()
+		return nil
+	}
 	if msg.err != nil {
 		m.history = append(m.history,
 			line{kindErr, i18n.T("llama-server did not start: ") + msg.err.Error()},
@@ -3843,6 +4049,12 @@ func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
 		return nil
 	}
 	m.prov = msg.prov
+	// The pool follows, not just the current provider. A runner rebuilt from a
+	// stale pool — which is what Tab, shift+tab and /cd do — would silently put
+	// the session back on the endpoint the user switched away from, so the swap
+	// would hold for one turn and then be undone with nothing on screen to say so.
+	m.pool = replaceProvider(m.pool, msg.prov)
+	m.applyWindow(msg.prov)
 	m.statusText = i18n.T("provider: ") + msg.prov.Label
 	m.history = append(m.history,
 		line{kindSys, i18n.T("GGUF model is up: ") + msg.prov.Model + " — " + msg.prov.BaseURL})
@@ -4114,20 +4326,9 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 			// the request, and counting only the replies would report a
 			// tool loop as a single fast call.
 			tm.Calls++
-			// The usage block is read from every event, not just the last.
-			// A streaming endpoint reports the running total on the final
-			// chunk, but some report it only on an intermediate one and leave
-			// the last empty — so the most complete report seen wins rather
-			// than the most recent, which is how the number would otherwise
-			// end up zero on a turn that plainly used tokens.
-			if u := ev.LLMResponse.UsageMetadata; u != nil {
-				if int(u.PromptTokenCount) > tm.Prompt {
-					tm.Prompt = int(u.PromptTokenCount)
-				}
-				if int(u.CandidatesTokenCount) > tm.Completion {
-					tm.Completion = int(u.CandidatesTokenCount)
-				}
-			}
+			// The usage block and the output limit are both read here, by the
+			// turn's own tally: two fields read in two places drift apart.
+			tm.observe(ev.LLMResponse)
 			// The text of one event is dispatched as a unit, before the tool
 			// parts it shares the event with: the accumulator has to be reset
 			// once per event, and a finalised response carrying both text and
@@ -4603,6 +4804,12 @@ func (m *uiModel) sidebarView(height int) string {
 // travels with it — the bar no longer carries the note while a turn runs, so
 // the motion cue goes where the text went.
 func (m *uiModel) progressNote() string {
+	// A model loading is not a turn and has no status text of its own, but it is
+	// the one thing happening, and the same note and spinner carry it — a second
+	// progress row would be two spinners answering one question.
+	if load := m.ggufLoadNote(); load != "" {
+		return m.spin.View() + " " + load
+	}
 	note := m.statusText
 	if note == "" {
 		note = i18n.T("running…")
@@ -4641,6 +4848,11 @@ func (m *uiModel) stateBadge() string {
 	switch {
 	case m.busy:
 		return styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+	case m.ggufLoad != nil:
+		// Loading is not WORKING: WORKING means the agent has your message, and
+		// a user who reads it that way waits for a reply that was never sent. This
+		// one says the session is fine and the model is not here yet.
+		return styleBadgeBusy.Render(i18n.T("⏳ LOADING"))
 	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
 		return styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
 	default:
@@ -5357,7 +5569,7 @@ func (r Resume) sessionToOpen() string {
 	return r.ID
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -5369,6 +5581,16 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets
 	m.askTimeout = config.AskTimeout()
+	// A local model that is still loading is handed over here rather than waited
+	// for in main: the port and the model's name are already known, so the
+	// session can be built and drawn around them, and Init schedules the wait.
+	// Everything the user can do while it loads is unaffected.
+	if loading != nil {
+		m.beginGGUFLoad(loading, []line{
+			{kindSys, i18n.T("loading the local model in the background — ") + loading.Prov.Model},
+			{kindSys, i18n.T("the interface is ready; a message will send as soon as the model answers")},
+		})
+	}
 	// A server the eager listing could not ask is a real problem the user has
 	// to see: its tools will not exist until it comes up.
 	if len(mcpNotes) > 0 {

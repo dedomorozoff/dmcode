@@ -127,9 +127,9 @@ func TestKiloPresetSelected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DetectProviders: %v", err)
 	}
-	if len(provs) != 1 || provs[0].BaseURL != "https://api.kilo.ai/api/gateway" ||
-		provs[0].Model != "kilo-auto/free" || provs[0].Wire() != config.APIChat {
-		t.Errorf("KILO_API_KEY did not select the Kilo provider: %+v", provs)
+	if len(provs.Pool) != 1 || provs.Pool[0].BaseURL != "https://api.kilo.ai/api/gateway" ||
+		provs.Pool[0].Model != "kilo-auto/free" || provs.Pool[0].Wire() != config.APIChat {
+		t.Errorf("KILO_API_KEY did not select the Kilo provider: %+v", provs.Pool)
 	}
 }
 

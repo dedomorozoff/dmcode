@@ -10,6 +10,8 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"google.golang.org/adk/v2/model"
@@ -494,6 +496,7 @@ func (m *chatModel) buildChatRequest(req *model.LLMRequest, stream bool) (chatRe
 }
 
 func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Response, error) {
+	body.MaxOutputTokens = m.outputBudget(body.MaxOutputTokens)
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("dmcode: не удалось собрать тело запроса: %w", err)
@@ -512,6 +515,59 @@ func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Resp
 		req.Header.Set("Authorization", "Bearer dmcode")
 	}
 	return m.client.Do(req)
+}
+
+// defaultOutputTokens is the answer budget dmcode asks for when the caller named
+// none, which in a normal turn is every turn.
+//
+// It is not a taste decision. A request with no max_tokens leaves the wall
+// entirely to the endpoint, and the endpoints disagree: a hosted provider
+// defaults to the model's ceiling, a local server to whatever the GGUF's author
+// set, and some gateways to 4096. A model that writes a long calculation or a
+// long file then stops mid-sentence, reports finish_reason=length, and the user
+// is told nothing — the only number on screen is the context meter, so a cut
+// answer reads as a full context.
+//
+// DMCODE_MAX_OUTPUT overrides it for a model whose ceiling this overshoots.
+const defaultOutputTokens = 16384
+
+// outputBudget is the max_tokens that goes on the wire for one request.
+//
+// Four rules, each answering a case where the obvious version is wrong:
+//
+//   - A budget the caller chose is left alone. The tool probe asks for 64 on
+//     purpose, and the truncation re-ask already computed one.
+//   - It is applied here rather than in buildChatRequest because that function's
+//     output is what reAskable inspects. Filling the budget in there would make
+//     every request look deliberately budgeted and silently disable the re-ask.
+//   - A model whose window is known has the budget halved at most. Most
+//     endpoints count the answer against the same window as the prompt, so a
+//     16k answer on an 8k model is a request that fails before it starts — the
+//     fix for a cut answer must not introduce the length error it prevents.
+//   - A model this build does not recognise gets no budget at all, and the
+//     endpoint's default stands. Inventing a ceiling for a window we do not know
+//     is the same guess compaction is refused for, and here it can fail the very
+//     first request; DMCODE_CONTEXT is the escape hatch, since naming the window
+//     turns it back on.
+func (m *chatModel) outputBudget(requested int) int {
+	if requested > 0 {
+		return requested
+	}
+	window := config.ContextWindow(m.name)
+	if window <= 0 {
+		return 0
+	}
+	budget := defaultOutputTokens
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("DMCODE_MAX_OUTPUT"))); err == nil && v > 0 {
+		budget = v
+	}
+	if half := window / 2; budget > half {
+		budget = half
+	}
+	if budget < 1 {
+		budget = 1
+	}
+	return budget
 }
 
 // Why a call failed, in the terms the failover layer needs. The rendered

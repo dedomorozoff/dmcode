@@ -43,17 +43,38 @@ func setupTempModel(t *testing.T) (*uiModel, string, string) {
 	return m, dir, gguf
 }
 
+// fakeLoad is a model load with a known outcome. The UI depends on the
+// ggufLoad interface rather than on *discover.Launch precisely so this can
+// exist: the alternative is a test that waits out a real model load, which is
+// the one thing no test wants to do.
+type fakeLoad struct {
+	prov   config.Provider
+	err    error
+	tail   string
+	waited bool
+}
+
+func (f *fakeLoad) Wait() error               { f.waited = true; return f.err }
+func (f *fakeLoad) Provider() config.Provider { return f.prov }
+func (f *fakeLoad) Tail() string              { return f.tail }
+
+// stubStart makes startGGUF answer with l, and restores it afterwards.
+func stubStart(t *testing.T, l ggufLoad, err error) {
+	t.Helper()
+	orig := startGGUF
+	startGGUF = func() (ggufLoad, error) { return l, err }
+	t.Cleanup(func() { startGGUF = orig })
+}
+
 // TestSetupGGUFPickerSelectsAFile drives the dialog the way a user does:
 // enter on the empty path prompt opens it, enter descends into a directory,
 // enter on the .gguf file picks it and starts the setup.
 func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	m, dir, ggufPath := setupTempModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF"}, nil
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, &fakeLoad{prov: config.Provider{
+		BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF",
+	}}, nil)
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter()
 	if m.setup.stage != setupGGUF {
@@ -162,11 +183,9 @@ func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
 	dir := inTempDir(t)
 	m := newSetupModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF"}, nil
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, &fakeLoad{prov: config.Provider{
+		BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF",
+	}}, nil)
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter()
 	if m.setup.stage != setupGGUF {
@@ -214,15 +233,16 @@ func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
 
 // A failed launch keeps the saved configuration and says so, instead of
 // leaving the user with a provider that does not exist and no explanation.
+//
+// The failure here is the instant kind — a missing binary, a missing file —
+// because those are the ones worth reporting before a second of waiting. The
+// slow kind arrives through ggufReadyMsg instead, and is covered with the rest
+// of the loading behaviour.
 func TestSetupGGUFReportsAFailedLaunch(t *testing.T) {
 	inTempDir(t)
 	m := newSetupModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{}, errors.New("llama-server not found")
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, nil, errors.New("llama-server not found"))
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter().type_("models\\qwen.gguf").enter()
 	if run := d.cmd; run != nil {

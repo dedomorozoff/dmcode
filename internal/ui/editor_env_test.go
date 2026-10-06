@@ -26,6 +26,16 @@ import (
 func init() {
 	// Same shape as editor_test.go's pin for DMCODE_LANG: the whole package
 	// asserts one look, so it is set once for the binary rather than per test.
+	//
+	// The pin is load-bearing rather than tidiness. The editor picks its
+	// language from config.Load, whose order is defaults < global < project <
+	// env — and the global file is the legacy ~/.dmed.conf when
+	// ~/.dmcode/editor.conf is absent. A developer who once ran /lang in the
+	// old build carries `lang = ru` there, so "no file open" renders as
+	// "файл не открыт" and a test asserting the English text fails on their
+	// machine alone. The comment above used to promise this pin while only
+	// TERM was set; that is the machine being asked instead of the code.
+	_ = os.Setenv("DMCODE_LANG", "en")
 	_ = os.Setenv("TERM", "xterm-256color")
 }
 
