@@ -40,6 +40,7 @@ import (
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 )
@@ -264,7 +265,14 @@ type toolResMsg struct {
 	output string
 	diff   string
 }
-type turnDoneMsg struct{ err error }
+
+// turnDoneMsg ends a turn. timing is what the turn cost, measured on the
+// goroutine that ran it — the event loop cannot time it, because the loop is
+// what the clock would have to be read from.
+type turnDoneMsg struct {
+	err    error
+	timing turnTiming
+}
 
 // retryMsg reports an endpoint about to be tried again, so the wait shows up
 // as itself rather than as a spinner that looks hung.
@@ -512,6 +520,41 @@ type uiModel struct {
 	// would return the same change for ever.
 	jumpFrom   int
 	winW, winH int
+
+	// turnStart is when the turn in flight began, and timing is what the last
+	// finished one cost. They are separate because the two are read at
+	// different times: turnStart by the live counter on every frame while a
+	// turn runs, timing by the sidebar and /stats after it ends. Overwriting
+	// timing mid-turn would make the sidebar's reading move under the user
+	// while they were still watching the turn that produced it.
+	turnStart time.Time
+	timing    turnTiming
+	// total is the session's running cost, kept beside the last turn's figures
+	// because "how long was that one" and "what has this session cost me" are
+	// different questions and only the first of them survives a single line in
+	// the transcript.
+	total sessionTotal
+	// shownSecond is the elapsed second the progress note last drew. It is what
+	// makes the spinner tick a redraw trigger rather than a repaint: without
+	// it, either the timer never advances or the transcript is rebuilt ten
+	// times a second. Reset at the start of a turn, or the first second of the
+	// next one would be suppressed by the previous turn's last value.
+	shownSecond int
+	// window is the model's context size for the endpoint now answering, and
+	// windowGuess whether that size is a real figure or the fallback. Zero
+	// means compaction is off: an invented threshold is a decision made on a
+	// guess, which is not one worth making, even though the meter can show one.
+	window      int
+	windowGuess bool
+	// exactWindow is the real context size, zero when the model is not one this
+	// build recognises. Compaction reads this rather than window: the meter may
+	// draw an assumed denominator, a compaction threshold may not.
+	exactWindow int
+	// compacted records that the context has been summarized at least once in
+	// this session, so the sidebar can say so. Compaction is invisible
+	// otherwise: the model's answers keep coming, only the history behind them
+	// got shorter.
+	compacted bool
 }
 
 // diffHighlighter returns the highlighter the transcript's change blocks are
@@ -927,6 +970,15 @@ func (m *uiModel) commands() []command {
 		{name: "changes", desc: fmt.Sprintf("%s (%s)", i18n.T("open the next change in the editor"), jumpKey.Help().Key), run: func(m *uiModel) tea.Cmd {
 			return m.jumpToNextChange()
 		}},
+		{name: "stats", desc: i18n.T("how long the last turn took and how full the context is"), run: func(m *uiModel) tea.Cmd {
+			// Printed into the transcript rather than the status bar, for the
+			// reason the per-turn timing line is: these are numbers about a turn
+			// that has ended, and a bar can only hold the newest of them.
+			m.history = append(m.history, line{kindSys, m.statsLine()})
+			m.historyDirty = true
+			m.followVP()
+			return nil
+		}},
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
 		}},
@@ -1088,6 +1140,11 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		// Starting in yolo would be a session the user never asked for.
 		beforeYolo: modeAct,
 	}
+	// Resolved once here rather than at each use: the window is a property of
+	// the model, so every reader wants the same answer, and a lookup repeated
+	// at the sidebar and again in the compaction threshold is two chances for
+	// them to disagree.
+	m.applyWindow(p.Model)
 	if len(yolo) > 0 {
 		m.yoloTools = yolo[0]
 	}
@@ -1190,6 +1247,12 @@ func (m *uiModel) toolCheckCmd() tea.Cmd {
 // that just failed.
 func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	m.prov = msg.to
+	// The new endpoint is a different model as often as not, so its window is
+	// re-read: a backup picked for being available is frequently a smaller
+	// model, and the meter continuing to describe the one that just failed
+	// would make a nearly-full context look like a nearly-empty one.
+	m.applyWindow(msg.to.Model)
+	m.timing.Prompt = 0
 	rest := make([]config.Provider, 0, len(m.pool))
 	rest = append(rest, msg.to)
 	for _, p := range m.pool {
@@ -1782,6 +1845,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// The spinner already ticks for as long as the program lives, so it is
+		// the one clock a turn can borrow to redraw its own timer without
+		// scheduling a second ticker that would have to be cancelled when the
+		// turn ends.
+		//
+		// Only when the displayed second has actually changed: the tick is ten
+		// times a second, and re-rendering the transcript ten times a second to
+		// show the same "3s" is work the user would pay for in a stalled
+		// interface on a long session.
+		if m.busy && !m.turnStart.IsZero() {
+			secs := int(time.Since(m.turnStart).Seconds())
+			if secs != m.shownSecond {
+				m.shownSecond = secs
+				m.syncVP()
+				m.followVP()
+			}
+		}
 		return m, cmd
 	case deltaMsg:
 		m.applyAgentText(msg)
@@ -1821,6 +1901,15 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.prov.Model = msg.name
 			m.runner = msg.runner
+			// The window travels with the model that was actually built, so the
+			// sidebar's meter cannot describe the previous model's size while
+			// the runner is compacting for the new one.
+			m.applyWindow(msg.name)
+			// The prompt count belonged to the old model's window too, and a
+			// percentage is only meaningful against the window it was measured
+			// in — so the meter starts empty rather than reading a number that
+			// no longer describes anything.
+			m.timing.Prompt = 0
 			if len(msg.pool) > 0 {
 				m.pool = msg.pool
 			}
@@ -1853,6 +1942,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
+		// The timer is cleared before anything is printed from it, so the live
+		// counter stops where the turn stopped instead of continuing to run
+		// against the wall clock and reporting a turn that is already over.
+		m.turnStart = time.Time{}
+		// A stopped turn's numbers are kept, not thrown away: a user who
+		// cancelled at 90% wants to know how big the turn had grown, which is
+		// exactly when compaction matters most.
+		if msg.timing.Elapsed > 0 {
+			m.timing = msg.timing
+			m.total.record(msg.timing)
+		}
 		if msg.err != nil {
 			if msg.err == context.Canceled {
 				m.statusText = i18n.T("stopped")
@@ -1863,6 +1963,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		} else {
 			m.statusText = i18n.T("ready")
+			// The report goes under the answer, not into the status bar: it is
+			// a fact about this turn, and a bar would replace it with the next
+			// turn's. It is skipped for a turn that reported nothing at all, so
+			// an endpoint that sends no usage does not get a row reading zero.
+			if msg.timing.Elapsed > 0 {
+				m.history = append(m.history, line{kindSys, timingLine(msg.timing, m.window)})
+			}
 		}
 		// A session file that could not be written is reported here, at the end
 		// of the turn that hit it, rather than from inside the write.
@@ -3851,17 +3958,30 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		pool = append([]config.Provider{p}, pool...)
 	}
 	svc, ts := m.svc, m.activeTools()
+	// The window is read before the goroutine starts: it is a pure function of
+	// the model name, and doing it inside would mean reading m.prov on another
+	// thread while the loop is free to change it. Compaction is built from the
+	// exact figure, which is zero for an unrecognised model and therefore
+	// disables it rather than guessing a threshold.
+	exactWindow := config.ContextWindow(p.Model)
 	return func() tea.Msg {
 		ctx := context.Background()
 		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode(), m.mcpToolsets...)
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
+		// Built through the same helper as the first runner, so a /model switch
+		// cannot land a session whose compaction settings differ from the ones
+		// it started with: a runner rebuilt without them would silently stop
+		// compacting at exactly the moment the user switched away from a small
+		// model, where it mattered most.
+		comp := (&uiModel{exactWindow: exactWindow}).compactionConfig()
 		r, err := runner.New(runner.Config{
 			AppName:           "dmcode",
 			Agent:             a,
 			SessionService:    svc,
 			AutoCreateSession: true,
+			Compaction:        comp,
 		})
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
@@ -3922,20 +4042,51 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
 	m.turnCount++
+	// Stamped here, on the loop, rather than inside the command: the send
+	// happens the moment the key is handled, and a counter started by the
+	// goroutine would leave a gap between the prompt appearing on screen and
+	// the clock starting.
+	m.turnStart = time.Now()
+	m.shownSecond = 0
 	m.statusText = i18n.T("generating a reply…")
 	return func() tea.Msg {
 		userMsg := userContent(text, imgs)
-		// The accumulator is per LLM round, and a round ends at every
-		// finalised response — see turnText.
+		// tt accumulates one round's text; tm does the same job for the
+		// numbers, and is reported back in the turnDoneMsg rather than sent as
+		// a message of its own — the UI needs it exactly once, when the turn
+		// ends, and a stream of usage messages would only produce a row of
+		// numbers the user watches change.
 		var tt turnText
+		var tm turnTiming
+		first := true
 		for ev, err := range r.Run(turnCtx, userID, sessionID, userMsg, adkagent.RunConfig{
 			StreamingMode: adkagent.StreamingModeSSE,
 		}) {
 			if err != nil {
-				return turnDoneMsg{err}
+				tm.Elapsed = time.Since(m.turnStart)
+				return turnDoneMsg{err: err, timing: tm}
 			}
 			if ev.LLMResponse.Content == nil {
 				continue
+			}
+			// Every model response is one round trip, whether or not it
+			// carries text — a turn that is nothing but tool calls still cost
+			// the request, and counting only the replies would report a
+			// tool loop as a single fast call.
+			tm.Calls++
+			// The usage block is read from every event, not just the last.
+			// A streaming endpoint reports the running total on the final
+			// chunk, but some report it only on an intermediate one and leave
+			// the last empty — so the most complete report seen wins rather
+			// than the most recent, which is how the number would otherwise
+			// end up zero on a turn that plainly used tokens.
+			if u := ev.LLMResponse.UsageMetadata; u != nil {
+				if int(u.PromptTokenCount) > tm.Prompt {
+					tm.Prompt = int(u.PromptTokenCount)
+				}
+				if int(u.CandidatesTokenCount) > tm.Completion {
+					tm.Completion = int(u.CandidatesTokenCount)
+				}
 			}
 			// The text of one event is dispatched as a unit, before the tool
 			// parts it shares the event with: the accumulator has to be reset
@@ -3953,6 +4104,15 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 					parts = append(parts, toolPart{resp: part.FunctionResponse})
 				}
 			}
+			// The first token is the first text that reaches the user, not the
+			// first event: a turn whose opening move is a tool call has already
+			// been answered by the time its prose arrives, and timing that
+			// prose from the send would fold the tool's own duration into the
+			// number meant to measure the endpoint.
+			if said.Len() > 0 && first {
+				first = false
+				tm.FirstToken = time.Since(m.turnStart)
+			}
 			if s := tt.add(said.String(), ev.LLMResponse.Partial); s.text != "" {
 				p.Send(deltaMsg(s))
 			}
@@ -3966,7 +4126,8 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 				}
 			}
 		}
-		return turnDoneMsg{nil}
+		tm.Elapsed = time.Since(m.turnStart)
+		return turnDoneMsg{timing: tm}
 	}
 }
 
@@ -4289,6 +4450,14 @@ func (m *uiModel) sidebarView(height int) string {
 		row(styleHint, " "+truncate(m.sessionID, sbInner-1))
 		row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
 		row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
+		// What the whole session has cost, next to the counts it produced. It is
+		// the one row that answers "is this session still worth continuing",
+		// and it is here rather than in the transcript because it changes on
+		// every turn and a line per turn in the chat would be noise.
+		if m.total.Elapsed > 0 {
+			row(styleHint, fmt.Sprintf(i18n.T(" time: %s (%s %s)"),
+				formatWait(m.total.Elapsed), i18n.T("average"), formatWait(m.total.Average(m.total.Turns))))
+		}
 		// What the agent actually changed. The counts come from the tools, which are
 		// the only place that knows a file's before and after, so this is the real
 		// diff of the session rather than a sum of the write calls that produced it.
@@ -4297,6 +4466,27 @@ func (m *uiModel) sidebarView(height int) string {
 		if cs := dmtools.Changes(); cs.Files > 0 {
 			row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
 			row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
+		}
+		b.WriteString("\n")
+
+		// The context meter sits with the session counters, because it answers
+		// the same question from the other side: not "how much has happened"
+		// but "how much of the window that is". It appears only once the
+		// endpoint has reported a prompt size — before that there is nothing
+		// to draw, and a bar at zero on a session that has not run yet reads
+		// as a measurement rather than as an absence.
+		if lines := m.contextLines(); len(lines) > 0 {
+			row(styleSidebarLabel, i18n.T("CONTEXT"))
+			for _, l := range lines {
+				row(styleHint, l)
+			}
+			// Compaction is invisible while it works: the model answers exactly
+			// as before, only the history behind it is shorter. Saying so once
+			// is what turns "the agent forgot that" into a thing the user was
+			// told about.
+			if m.compacted {
+				row(styleHint, " "+truncate(i18n.T("compressed — older turns summarized"), sbInner-1))
+			}
 		}
 		b.WriteString("\n")
 
@@ -4373,10 +4563,18 @@ func (m *uiModel) sidebarView(height int) string {
 // travels with it — the bar no longer carries the note while a turn runs, so
 // the motion cue goes where the text went.
 func (m *uiModel) progressNote() string {
-	if m.statusText != "" {
-		return m.spin.View() + " " + m.statusText
+	note := m.statusText
+	if note == "" {
+		note = i18n.T("running…")
 	}
-	return m.spin.View() + " " + i18n.T("running…")
+	// The elapsed clock rides on the note the turn is already showing, rather
+	// than on a row of its own: a second line for a counter would push the
+	// conversation down the panel every second, and the note is the one thing
+	// the user is already looking at while waiting.
+	if el := m.elapsedNote(); el != "" {
+		note += "  " + el
+	}
+	return m.spin.View() + " " + note
 }
 
 // statusBarView renders the single-row footer.
@@ -5247,7 +5445,67 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 		Agent:             a,
 		SessionService:    m.svc,
 		AutoCreateSession: true,
+		Compaction:        m.compactionConfig(),
 	})
+}
+
+// applyWindow re-reads the context size for a model and records whether it was
+// a real figure or the display fallback.
+//
+// Two numbers fall out of it and they are deliberately kept apart. The meter
+// needs a denominator or it prints a count with nothing to compare against,
+// which was the complaint behind "tokens out of what?". Compaction needs a
+// real one, because a threshold invented from a guess decides when to rewrite
+// the user's conversation — so an unrecognised model gets compaction off and a
+// meter marked with "~".
+func (m *uiModel) applyWindow(model string) {
+	display, guess := config.ContextWindowForDisplay(model)
+	m.window = display
+	m.windowGuess = guess
+	// The exact figure, which is zero when the model is unrecognised.
+	m.exactWindow = config.ContextWindow(model)
+}
+
+// compactionConfig decides when the conversation is summarized instead of
+// running the model out of window.
+//
+// Tail retention only, with no sliding window beside it. The window summarises
+// whole invocations on a fixed interval, which bounds nothing on its own — it
+// divides prompt growth by a constant and then keeps growing — and, worse, it
+// eats the events the tail would have summarised, so with a small interval and
+// a large retention size the bounded strategy sits permanently idle while the
+// user watches the prompt climb. Tail retention needs no such arithmetic: past
+// the threshold it keeps the most recent events raw and summarizes everything
+// before them.
+//
+// The threshold is a fraction of the window rather than a fixed number,
+// because dmcode does not ask the endpoint how big its window is and a guess
+// that is right for a 200k model is catastrophic for an 8k one — it would
+// compact nothing and then fail with a length error. A model this build does
+// not recognise gets compaction switched off rather than given a guess: an
+// invented threshold could compact a conversation that was never near full.
+func (m *uiModel) compactionConfig() *compaction.Config {
+	// The exact size, never the display fallback: a threshold decides when the
+	// user's own conversation gets rewritten, and that is not a decision to
+	// make from an assumed number.
+	if m.exactWindow <= 0 {
+		return nil
+	}
+	// 70% rather than 90%: the summary itself has to fit in what is left, and
+	// the turn that triggered compaction still has to fit its own answer.
+	threshold := m.exactWindow * 7 / 10
+	if threshold < 1000 {
+		return nil
+	}
+	return &compaction.Config{
+		TokenThreshold: threshold,
+		// The raw tail. Large enough to hold the turn in progress and the tool
+		// result it is waiting on — the question being answered is summarised
+		// away otherwise, which is the one failure this setting exists to
+		// prevent — and small enough that the summary is the bulk of the
+		// prompt rather than a decoration on top of it.
+		EventRetentionSize: 8,
+	}
 }
 
 // rebuildRunner re-creates the agent for the current mode and directory, keeping

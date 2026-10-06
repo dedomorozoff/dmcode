@@ -9,6 +9,7 @@ package memsession
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"maps"
@@ -749,6 +750,51 @@ func (s *Service) view(st *stored, win *window) session.Session {
 type window struct {
 	numRecent int
 	after     time.Time
+}
+
+// ApproxChars is roughly how many characters of conversation this session
+// holds — the size the next request will carry, counted without a tokenizer.
+//
+// It is an estimate and is used only where an endpoint has reported no token
+// count of its own. The ratio it stands in for is the ordinary one for
+// OpenAI-style tokenizers, where a token is about four characters of English
+// or half that of Cyrillic; the caller marks the number as approximate rather
+// than presenting it as the model's own count.
+//
+// Whole events are walked, not just the newest: a session whose size is
+// measured at its tail is measured wrong the moment a tool result lands, and a
+// tool result is usually the largest thing in the turn.
+func (s *Service) ApproxChars(appName, userID, sessionID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load(appName, userID, sessionID)
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, ev := range st.events {
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p == nil {
+				continue
+			}
+			switch {
+			case p.Text != "":
+				total += len(p.Text)
+			case p.FunctionCall != nil:
+				total += len(p.FunctionCall.Name) + len(p.FunctionCall.Args)
+			case p.FunctionResponse != nil:
+				// The response is the whole point of the size here: a
+				// read_file can return more than everything said so far.
+				if b, err := json.Marshal(p.FunctionResponse.Response); err == nil {
+					total += len(b)
+				}
+			}
+		}
+	}
+	return total
 }
 
 // filterEvents applies the two optional filters a Get may carry. Neither can be

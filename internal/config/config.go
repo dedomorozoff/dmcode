@@ -87,6 +87,81 @@ func SessionsDir() string {
 // at "dev", which is the honest answer for a binary nobody tagged.
 var Version = "dev"
 
+// ContextWindow is how many prompt tokens the model will accept, which is the
+// number a compaction threshold and a usage bar are both fractions of.
+//
+// It is an estimate, and is treated as one everywhere it is used: no endpoint
+// dmcode talks to is asked. DMCODE_CONTEXT states the real figure for a model
+// the heuristic gets wrong, which is why an override beats the table rather
+// than the other way round. Zero means the model is not recognised, and a
+// caller must then show the token count without a percentage rather than
+// divide by a guess.
+func ContextWindow(model string) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("DMCODE_CONTEXT"))); err == nil && v > 0 {
+		return v
+	}
+	name := strings.ToLower(model)
+	if name == "" {
+		return 0
+	}
+	// Longest name first: "gpt-4o-mini" has to reach the 4o rule rather than
+	// stopping at a shorter prefix that happens to match another family.
+	for _, r := range []struct {
+		needle string
+		tokens int
+	}{
+		{"claude", 200_000},
+		{"gpt-5", 400_000},
+		{"gpt-4.1", 1_000_000},
+		{"gpt-4o", 128_000},
+		{"gpt-4", 128_000},
+		{"gpt-3.5", 16_385},
+		{"o1", 200_000},
+		{"o3", 200_000},
+		{"deepseek", 65_536},
+		{"qwen", 32_768},
+		{"llama", 32_768},
+		{"mistral", 32_768},
+		{"gemma", 8_192},
+		{"phi", 16_384},
+	} {
+		if strings.Contains(name, r.needle) {
+			return r.tokens
+		}
+	}
+	return 0
+}
+
+// DefaultContextWindow is the window assumed for a model this build does not
+// recognise, used for display only.
+//
+// It is not used to decide when to compact. Guessing a compaction threshold is
+// a decision with consequences — a wrong one either compacts a conversation
+// that was never near full, or fails to compact one that is — while guessing a
+// number for the meter only has to be visibly a guess. Showing a denominator
+// marked "~" answers "out of how much?" far better than showing a bare count
+// with no denominator at all, which is what an unknown window used to produce.
+//
+// 128k is the middle of the range real models sit in: high enough that the
+// meter does not read as nearly full on a short conversation, low enough that
+// a small local model does not look like it has room to spare.
+const DefaultContextWindow = 128_000
+
+// ContextWindowForDisplay is the denominator the meter divides by: the real
+// figure when it is known, and DefaultContextWindow marked as the guess it is
+// when it is not.
+//
+// The two answers are deliberately different types. A caller that decides
+// something — when to compact, when to warn — wants the exact value and must
+// check it is non-zero. A caller that draws a number wants a denominator, and
+// is handed a flag telling it to mark the guess.
+func ContextWindowForDisplay(model string) (window int, approximate bool) {
+	if w := ContextWindow(model); w > 0 {
+		return w, false
+	}
+	return DefaultContextWindow, true
+}
+
 // AskTimeout is how long a question from the agent waits for an answer before
 // the recommended option is chosen for the user. DMCODE_ASK_TIMEOUT sets it in
 // seconds.

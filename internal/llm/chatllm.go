@@ -472,6 +472,14 @@ func (m *chatModel) buildChatRequest(req *model.LLMRequest, stream bool) (chatRe
 		return chatRequest{}, fmt.Errorf("dmcode: в запросе нет ни одного сообщения")
 	}
 	out := chatRequest{Model: name, Messages: msgs, Stream: stream, ReasoningEffort: m.reasoningEffort}
+	if stream {
+		// Only on a streaming request, and only because a server that does not
+		// implement the field rejects the request outright with a 400 — which
+		// would break every turn against that endpoint to fix a counter. The
+		// failure is caught by the ordinary error path: a server that ignores
+		// the field costs the usage numbers, and nothing else.
+		out.StreamOptions = &chatStreamOptions{IncludeUsage: true}
+	}
 	if cfg := req.Config; cfg != nil {
 		if cfg.Temperature != nil {
 			t := float32(*cfg.Temperature)
@@ -583,6 +591,47 @@ func httpError(op string, resp *http.Response) error {
 	}
 }
 
+// rejectsStreamOptions reports whether this response is a server refusing the
+// body rather than failing to answer it.
+//
+// A 4xx is that refusal by definition. A 5xx is not — but a gateway that
+// validates the payload itself and reports its own rejection through a
+// different code is still describing the same thing, and Pollinations does
+// exactly this: HTTP 500 with `{"error":"400 Bad Request"}` inside. Matching
+// the status alone therefore breaks that provider outright, which is worse than
+// never sending the field at all.
+//
+// The payload is read and put back, because the caller still has to report the
+// error this describes; consuming it here would turn a readable diagnosis into
+// a bare status line.
+func rejectsStreamOptions(resp *http.Response) bool {
+	switch {
+	case resp.StatusCode == http.StatusBadRequest,
+		resp.StatusCode == http.StatusUnprocessableEntity,
+		resp.StatusCode == http.StatusNotImplemented:
+		return true
+	case resp.StatusCode < 500:
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return false
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	// Matched against a lowercase copy of a fixed handful of phrases, because
+	// "bad request" is the portable one: a gateway that wrapped its own
+	// validation complaint used that word in every case seen, while the
+	// alternatives (a field-name list, an "unknown field") come in shapes
+	// worth enumerating.
+	msg := strings.ToLower(string(body))
+	for _, phrase := range []string{"bad request", "unknown field", "unrecognized", "unsupported"} {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // toolCallBuffer accumulates streamed tool calls. The chat API splits one call
 // across chunks: the first carries the id and name, later ones carry only
 // argument fragments keyed by the call's `index`.
@@ -646,6 +695,27 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 		if err != nil {
 			yield(nil, transportError(m.BaseURL, err))
 			return
+		}
+		// Some OpenAI-compatible servers reject the whole request the moment
+		// they meet a field they do not know, and stream_options is recent
+		// enough that some do. Retried once without it: the turn then costs its
+		// token counters, which is a far smaller loss than a provider that
+		// refuses to answer at all.
+		//
+		// The status alone does not identify this failure, and getting that
+		// wrong is worse than not trying: Pollinations answers a rejected body
+		// with a 500 whose payload reads "400 Bad Request", so a retry keyed on
+		// 400 alone never fired and every turn against it failed outright.
+		// rejectsStreamOptions therefore also reads the payload, and restores
+		// the body so the caller can still report the error it describes.
+		if body.StreamOptions != nil && rejectsStreamOptions(resp) {
+			resp.Body.Close()
+			body.StreamOptions = nil
+			resp, err = m.doRequest(ctx, body)
+			if err != nil {
+				yield(nil, transportError(m.BaseURL, err))
+				return
+			}
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -908,6 +978,15 @@ type chatRequest struct {
 	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 	Temperature     *float32      `json:"temperature,omitempty"`
 	MaxOutputTokens int           `json:"max_tokens,omitempty"`
+	// StreamOptions asks for the usage block to arrive with the stream. Without
+	// it an OpenAI-compatible server sends usage only on a non-streaming
+	// request, so a streamed turn reports nothing and every token counter in
+	// the UI stays at zero — the meter is not broken, it is never told.
+	StreamOptions *chatStreamOptions `json:"stream_options,omitempty"`
+}
+
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type chatUsage struct {

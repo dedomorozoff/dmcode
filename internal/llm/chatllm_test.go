@@ -46,6 +46,145 @@ func fakeChatServer(t *testing.T, chunks []string, final string) *httptest.Serve
 	return srv
 }
 
+// A streamed turn has to ask for its usage explicitly. Without the field an
+// OpenAI-compatible server sends usage only on a non-streaming request, so
+// every token counter in the UI stays at zero — which is not a display bug but
+// a number the endpoint was never asked for.
+func TestAStreamedTurnAsksForUsage(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	m := NewChatModel(srv.URL, "", "m")
+	for range m.GenerateContent(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "q"}}}},
+	}, true) {
+	}
+
+	opts, ok := body["stream_options"].(map[string]any)
+	if !ok || opts["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage was not requested: %v", body)
+	}
+}
+
+// A server that rejects the field outright must not break the turn: the retry
+// costs the token counters, which is a far smaller loss than a provider that
+// refuses to answer at all.
+func TestARejectedStreamOptionsFieldIsRetriedWithoutIt(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["stream_options"]; ok {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"error":{"message":"unknown field"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	m := NewChatModel(srv.URL, "", "m")
+	var text string
+	for resp, err := range m.GenerateContent(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "q"}}}},
+	}, true) {
+		if err != nil {
+			t.Fatalf("the turn failed against a server that rejects the field: %v", err)
+		}
+		// Only the aggregated final response is the answer: the deltas before it
+		// carry the same text, and counting both would say the model replied
+		// twice — which is the shape a broken retry actually produces, so the
+		// test would pass on the bug it exists to catch.
+		if resp != nil && resp.TurnComplete && resp.Content != nil {
+			for _, p := range resp.Content.Parts {
+				text += p.Text
+			}
+		}
+	}
+	if text != "hi" {
+		t.Errorf("the retry produced %q, want the answer", text)
+	}
+	if calls < 2 {
+		t.Errorf("the request was not retried (%d calls)", calls)
+	}
+}
+
+// A gateway may validate the payload itself and report its own rejection under
+// a different code. Pollinations answers with HTTP 500 carrying
+// `{"error":"400 Bad Request"}`, so a retry keyed on the 400 alone never fires
+// and every turn against that provider fails — which is exactly the regression
+// this case was found in.
+func TestARejectedStreamOptionsWrappedInA500IsStillRetried(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["stream_options"]; ok {
+			// The real shape: a 5xx whose payload describes a 400.
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprint(w, `{"error":"400 Bad Request","status":500}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	m := NewChatModel(srv.URL, "", "m")
+	var text string
+	for resp, err := range m.GenerateContent(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "q"}}}},
+	}, true) {
+		if err != nil {
+			t.Fatalf("the turn failed against a gateway that rejects the field: %v", err)
+		}
+		if resp != nil && resp.TurnComplete && resp.Content != nil {
+			for _, p := range resp.Content.Parts {
+				text += p.Text
+			}
+		}
+	}
+	if text != "hi" {
+		t.Errorf("the retry produced %q, want the answer", text)
+	}
+	if calls < 2 {
+		t.Errorf("the request was not retried (%d calls)", calls)
+	}
+}
+
+// A 5xx that is an actual server failure must not trigger the retry: retrying a
+// rate limit or an outage without the field would double every such request for
+// no reason.
+func TestAGenuineServerErrorIsNotRetriedAsAFieldRejection(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprint(w, `{"error":{"message":"upstream is overloaded"}}`)
+	}))
+	defer srv.Close()
+
+	m := NewChatModel(srv.URL, "", "m")
+	for range m.GenerateContent(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "q"}}}},
+	}, true) {
+	}
+	if calls != 1 {
+		t.Errorf("a real 500 was retried %d times; the field is not the cause", calls)
+	}
+}
+
 // TestChatModelStreamingToolCall covers the hard case: one tool call whose id
 // and name arrive in the first chunk and whose arguments are split across the
 // next two, which must be reassembled into a single call.
