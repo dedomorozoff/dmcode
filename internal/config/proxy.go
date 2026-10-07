@@ -2,9 +2,12 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -50,6 +53,166 @@ type ProxySettings struct {
 	Active bool
 }
 
+// Spec is a proxy address as its parts. The URL is the shape the wire wants;
+// the parts are the shape a person fills in, one field at a time — and the shape
+// a settings dialog can show without a password sitting in plain text.
+//
+// It exists because a single free-text field hides the one part that decides
+// whether the proxy works. Go fills an absent port from the scheme, and for
+// socks5 that means 1080, so "socks5://host" is a well-formed address that
+// dials a port nobody chose: the request is refused, and refused at 1080 it
+// reads as "the proxy is down" rather than as "a number is missing". Asking for
+// the port as a field is what turns that into a visible omission.
+type Spec struct {
+	Scheme string
+	Host   string
+	Port   string
+	User   string
+	Pass   string
+}
+
+// Schemes are the proxy types offered, in menu order. socks5h is beside socks5
+// because it is the same wire with the name resolved at the proxy end, which is
+// the difference between a request that leaks the hostname being dialled and one
+// that does not.
+var Schemes = []string{"http", "https", "socks5", "socks5h"}
+
+// DefaultPort is the port a scheme gets when the form leaves it empty. It is the
+// port that scheme listens on in the overwhelming majority of setups, so a user
+// who skipped the field is far likelier to want it than to want silence.
+func DefaultPort(scheme string) string {
+	switch scheme {
+	case "https":
+		return "443"
+	case "socks5", "socks5h":
+		return "1080"
+	default:
+		return "8080"
+	}
+}
+
+// URL assembles the parts into an address. The credentials go through url.User
+// rather than string concatenation, so a password containing @, : or / cannot
+// split the URL into a different host and a different password than the user
+// typed.
+func (s Spec) URL() string {
+	u := url.URL{Scheme: s.Scheme, Host: s.Host}
+	if s.Port != "" {
+		u.Host = net.JoinHostPort(s.Host, s.Port)
+	}
+	if s.User != "" {
+		u.User = url.UserPassword(s.User, s.Pass)
+	}
+	return u.String()
+}
+
+// Validate reports what is wrong with the parts, for a form that must not close
+// on a value that will not work.
+//
+// The port is required rather than defaulted. Defaulting it here would put the
+// mistake back: a socks5 proxy on 21001 typed as "socks5://vpn.example.com"
+// would be reported as valid and then dialed on 1080. The form fills the port
+// in for the user (DefaultPort), so an empty field means the form's own default
+// is already on screen and there is nothing to ask about.
+func (s Spec) Validate() error {
+	if s.Scheme == "" {
+		return fmt.Errorf("pick a proxy type")
+	}
+	if !slices.Contains(Schemes, s.Scheme) {
+		return fmt.Errorf("%q is not a proxy type — use %s", s.Scheme, strings.Join(Schemes, ", "))
+	}
+	if strings.TrimSpace(s.Host) == "" {
+		return fmt.Errorf("the proxy needs a host")
+	}
+	if strings.ContainsAny(s.Host, " \t/") {
+		return fmt.Errorf("%q is not a host — no spaces or slashes", s.Host)
+	}
+	port := strings.TrimSpace(s.Port)
+	if port == "" {
+		return fmt.Errorf("the proxy needs a port — %s would assume %d",
+			s.Scheme, portNumber(DefaultPort(s.Scheme)))
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%q is not a port number", port)
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("%d is not a port (1–65535)", n)
+	}
+	if s.User == "" && s.Pass != "" {
+		return fmt.Errorf("a password without a login goes nowhere — fill in the login too")
+	}
+	return nil
+}
+
+// ParseSpec takes an address apart into the parts a form edits, so reopening the
+// dialog shows what is configured rather than an empty set of fields. Values it
+// cannot use are left empty for the user to fill in; nothing is invented.
+func ParseSpec(raw string) Spec {
+	s := Spec{}
+	p := strings.TrimSpace(raw)
+	if p == "" || strings.EqualFold(p, "off") || strings.EqualFold(p, "none") {
+		return s
+	}
+	if !strings.Contains(p, "://") {
+		p = "http://" + p
+	}
+	u, err := url.Parse(p)
+	if err != nil {
+		return s
+	}
+	s.Scheme = strings.ToLower(u.Scheme)
+	if !slices.Contains(Schemes, s.Scheme) {
+		s.Scheme = ""
+	}
+	s.Host = u.Hostname()
+	s.Port = u.Port()
+	if u.User != nil {
+		s.User = u.User.Username()
+		s.Pass, _ = u.User.Password()
+	}
+	return s
+}
+
+// RedactProxy masks the password in an address so it can be shown in the
+// transcript, the dialog title and a status line. A proxy address almost always
+// carries credentials, and every one of those places is a screen someone else can
+// see, a screenshot, or a scrollback buffer kept past exit.
+func RedactProxy(raw string) string {
+	if !strings.Contains(raw, "@") {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.User == nil {
+		return raw
+	}
+	if _, hasPass := u.User.Password(); !hasPass {
+		return raw
+	}
+	schemeEnd := strings.Index(raw, "://")
+	if schemeEnd < 0 {
+		return raw
+	}
+	schemeEnd += len("://")
+	at := strings.LastIndex(raw, "@")
+	if at <= schemeEnd {
+		return raw
+	}
+	// The userinfo is spliced rather than reassembled through url.URL.String. That
+	// call percent-encodes the mask, because the mask is not a legal password
+	// character — so a "redacted" address would come back as
+	// "dedo:%E2%80%A2%E2%80%A2..." and no longer resemble what it redacts.
+	// Splicing leaves every other byte alone, which is also what makes this safe
+	// to call on anything: it cannot change an address, only hide a field of it.
+	login, _, _ := strings.Cut(raw[schemeEnd:at], ":")
+	return raw[:schemeEnd] + login + ":••••" + raw[at:]
+}
+
+func portNumber(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
 // CurrentProxy reports the proxy in effect.
 func CurrentProxy() ProxySettings {
 	s := ProxySettings{
@@ -59,6 +222,36 @@ func CurrentProxy() ProxySettings {
 	}
 	s.Active = s.HTTPS != "" || s.HTTP != ""
 	return s
+}
+
+// Effective returns the address provider calls actually go through. Almost every
+// provider is https, so HTTPS wins; HTTP is the fallback for a user who set only
+// that one. showProxy reports through this rather than through CurrentProxy so
+// the address on screen is the one in use and not a variable that happens to be
+// populated.
+func (s ProxySettings) Effective() string {
+	if s.HTTPS != "" {
+		return s.HTTPS
+	}
+	return s.HTTP
+}
+
+// ProxyVars is the map .env is written from, so the variables a proxy can live
+// in and the ones persisted are one list. It exists because they were two: a
+// variable SetProxy cleared but persistProxy never wrote back would be written
+// by the next save from a list that had drifted from the one being cleared.
+func (s ProxySettings) ProxyVars() map[string]string {
+	vars := map[string]string{}
+	if s.HTTP != "" {
+		vars[EnvHTTPProxy] = s.HTTP
+	}
+	if s.HTTPS != "" {
+		vars[EnvHTTPSProxy] = s.HTTPS
+	}
+	if s.NoProxy != "" {
+		vars[EnvNoProxy] = s.NoProxy
+	}
+	return vars
 }
 
 // ValidateProxy checks that proxy would be accepted as a proxy address without

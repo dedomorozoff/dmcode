@@ -288,7 +288,12 @@ type modelSwitchedMsg struct {
 	name   string
 	runner *runner.Runner
 	pool   []config.Provider
-	err    error
+	// prov is the provider the runner was actually built for, carrying the
+	// window the endpoint reported for the picked model when it reported one.
+	// It is what applyWindow reads in the handler, so the meter cannot describe
+	// the previous model's window while the runner compacts for the new one.
+	prov config.Provider
+	err  error
 }
 
 type errMsg string
@@ -474,6 +479,13 @@ type uiModel struct {
 	// sessionsList is the /sessions overlay. It lives on the model rather than
 	// being rebuilt per frame so the highlight and the filter survive redraws.
 	sessionsList sessionsState
+	// dirPick is the /cd folder browser, open while the user navigates to the
+	// folder the next turn should work in.
+	dirPick dirPickState
+	// help is the F1 reference: the keybindings and the slash commands in one
+	// scrollable box. Its content is static, so the state is only where the
+	// user is looking, not a filter or a draft.
+	help helpState
 	// ask is the choice overlay, open while the agent waits for an answer.
 	// Answers to it go back over a channel, so the field also carries the
 	// pending reply.
@@ -711,14 +723,26 @@ type ggufEntry struct {
 	dir   bool
 }
 
-// proxyState drives the /proxy dialog: a short menu of actions, then a text
-// stage for whichever one needs a value. It exists because "set one with:
-// /proxy <url>" asked the user to remember a command syntax on top of the
-// proxy address itself, and to know in advance whether the address worked.
+// proxyState drives the /proxy dialog: a short menu of actions, then a form for
+// whichever one needs a value. It exists because "set one with: /proxy <url>"
+// asked the user to remember a command syntax on top of the proxy address
+// itself, and to know in advance whether the address worked.
 const (
 	proxyPick = iota
 	proxyURL
 	proxyNo
+)
+
+// The address form's fields, in the order they are shown and tabbed through.
+// The type comes first because it decides the port's default, and the password
+// last because it is the only field whose value must never reach the screen.
+const (
+	pfScheme = iota
+	pfHost
+	pfPort
+	pfUser
+	pfPass
+	pfCount
 )
 
 type proxyState struct {
@@ -726,10 +750,88 @@ type proxyState struct {
 	stage    int
 	selected int
 	buf      string
+	// fields holds the address form's values, one string per pf* index. It is a
+	// slice rather than five named fields so that typing, backspace, paste and
+	// rendering can all be written once against "the focused field" instead of
+	// five times against five fields — the repetition is where a form like this
+	// rots, because the fifth copy is the one nobody edits.
+	fields [pfCount]string
+	// focus is which field the form is on.
+	focus int
+}
+
+// field returns a pointer to the focused field, so a handler can append to it
+// without knowing which field that is.
+func (s *proxyState) field() *string {
+	if s.focus < 0 || s.focus >= pfCount {
+		return nil
+	}
+	return &s.fields[s.focus]
+}
+
+// spec reads the form out as the parts it describes.
+//
+// An unrecognised scheme is passed through rather than replaced with http. The
+// type field is stepped through Schemes and so cannot hold anything else, but
+// substituting a scheme here would turn a value Validate is about to reject into
+// a valid-looking one — the rejection and the fix would be in different places.
+func (s *proxyState) spec() config.Spec {
+	scheme := strings.ToLower(strings.TrimSpace(s.fields[pfScheme]))
+	if !slices.Contains(config.Schemes, scheme) {
+		return config.Spec{Scheme: scheme}
+	}
+	return config.Spec{
+		Scheme: scheme,
+		Host:   strings.TrimSpace(s.fields[pfHost]),
+		Port:   strings.TrimSpace(s.fields[pfPort]),
+		User:   strings.TrimSpace(s.fields[pfUser]),
+		Pass:   s.fields[pfPass],
+	}
+}
+
+// setSpec fills the form from a configured address, so reopening the dialog shows
+// what is set instead of five empty boxes.
+func (s *proxyState) setSpec(sp config.Spec) {
+	s.fields[pfScheme] = sp.Scheme
+	s.fields[pfHost] = sp.Host
+	s.fields[pfPort] = sp.Port
+	s.fields[pfUser] = sp.User
+	s.fields[pfPass] = sp.Pass
+}
+
+// schemeIndex is the form's type field as an index into config.Schemes, and -1
+// when it holds something that is not a scheme. left and right step through the
+// list rather than typing into it: a type is one of four names, and letting the
+// user type one is how it becomes "socks" — which SetProxy accepts as a bare host
+// and then dials on port 80.
+func (s *proxyState) schemeIndex() int {
+	return slices.Index(config.Schemes, strings.ToLower(strings.TrimSpace(s.fields[pfScheme])))
 }
 
 func (s *proxyState) reset() {
 	*s = proxyState{}
+}
+
+// openForm seeds the address form from the proxy already in effect, so "turn on
+// or change it" starts from the current value instead of blank — a user editing
+// one field should not have to retype the four they are keeping.
+func (s *proxyState) openForm() {
+	s.stage = proxyURL
+	s.focus = pfScheme
+	s.buf = ""
+	if cur := config.CurrentProxy().Effective(); cur != "" {
+		s.setSpec(config.ParseSpec(cur))
+	}
+	// An unset proxy still opens with a type and a port on screen, not with two
+	// empty fields the user has to guess at: the defaults are what most setups
+	// want, and a value already filled in can be read, corrected or cleared —
+	// where an empty one has to be understood first.
+	if s.fields[pfScheme] == "" {
+		s.fields[pfScheme] = config.Schemes[0]
+	}
+	if s.fields[pfPort] == "" {
+		s.fields[pfPort] = config.DefaultPort(s.fields[pfScheme])
+	}
 }
 
 type command struct {
@@ -1029,8 +1131,8 @@ func (m *uiModel) commands() []command {
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
 		}},
-		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
-			return m.changeDir("")
+		{name: "cd", desc: i18n.T("change the working folder (/cd opens a folder browser)"), run: func(m *uiModel) tea.Cmd {
+			return m.openDirPick()
 		}},
 		{name: "image", takesArg: true, desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
 			return m.attachImageCmd("")
@@ -1191,7 +1293,7 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 	// the model, so every reader wants the same answer, and a lookup repeated
 	// at the sidebar and again in the compaction threshold is two chances for
 	// them to disagree.
-	m.applyWindow(p.Model)
+	m.applyWindow(p)
 	if len(yolo) > 0 {
 		m.yoloTools = yolo[0]
 	}
@@ -1394,7 +1496,7 @@ func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	// re-read: a backup picked for being available is frequently a smaller
 	// model, and the meter continuing to describe the one that just failed
 	// would make a nearly-full context look like a nearly-empty one.
-	m.applyWindow(msg.to.Model)
+	m.applyWindow(msg.to)
 	m.timing.Prompt = 0
 	rest := make([]config.Provider, 0, len(m.pool))
 	rest = append(rest, msg.to)
@@ -1501,6 +1603,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// as a field of wrong-coloured blocks, and the ramp is the fallback that
 		// still carries the picture.
 		m.profile = msg.Profile
+		// The editor draws pictures too — a picture opened in a tab is rendered
+		// with the same renderer as the transcript's preview — and it has no other
+		// way to learn the profile: it never sees the terminal. Handing it over
+		// here is the whole of the wiring, and it has to happen before the first
+		// picture is drawn or the tab opens in the wrong palette.
+		if m.ed != nil {
+			nm, _ := m.ed.Update(msg)
+			if em, ok := nm.(editor.Model); ok {
+				m.ed = &em
+			}
+		}
 		// The renderer has already adopted the reported profile; all that is left
 		// is to ask for the finer capabilities when this one is not enough.
 		return m, upgradeColorProfile(msg.Profile)
@@ -1566,8 +1679,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.sessionsKey(msg)
 			return model, cmd
 		}
+		if m.dirPick.open {
+			model, cmd := m.dirPickKey(msg)
+			return model, cmd
+		}
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
+			return model, cmd
+		}
+		if m.help.open {
+			model, cmd := m.helpKey(msg)
 			return model, cmd
 		}
 		// Before the switch, and matched through the binding rather than a
@@ -1676,6 +1797,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.newSession("")
+			return m, nil
+		case "f1":
+			// F1 is help in the chat, exactly as it is inside the editor — the
+			// editor owns the key while it is open, so the two never compete.
+			if m.help.open {
+				m.help.open = false
+				m.help.top = 0
+			} else {
+				m.openHelp()
+			}
 			return m, nil
 		case "pgup":
 			m.scrollBy(-10)
@@ -1906,6 +2037,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.busy {
 					return m, nil
 				}
+				// Bare /cd opens the folder browser; /cd <path> keeps the typed
+				// fast path, like /proxy's split between dialog and syntax.
+				if strings.TrimSpace(arg) == "" {
+					return m, m.openDirPick()
+				}
 				return m, m.changeDir(strings.TrimSpace(arg))
 			}
 			if arg, ok := strings.CutPrefix(text, "/image"); ok {
@@ -2070,12 +2206,18 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.history = append(m.history, line{kindErr, "Model: " + msg.err.Error()})
 		} else {
-			m.prov.Model = msg.name
+			if msg.prov.Model != "" {
+				m.prov = msg.prov
+			} else {
+				// A message built without its provider (a test, or an older
+				// caller) must not wipe the one that is serving.
+				m.prov.Model = msg.name
+			}
 			m.runner = msg.runner
 			// The window travels with the model that was actually built, so the
 			// sidebar's meter cannot describe the previous model's size while
 			// the runner is compacting for the new one.
-			m.applyWindow(msg.name)
+			m.applyWindow(m.prov)
 			// The prompt count belonged to the old model's window too, and a
 			// percentage is only meaningful against the window it was measured
 			// in — so the meter starts empty rather than reading a number that
@@ -3283,7 +3425,7 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 		return fail(err)
 	}
 	if s.Active {
-		m.history = append(m.history, line{kindSys, "proxy: " + s.HTTPS})
+		m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
 	} else {
 		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
 	}
@@ -3311,17 +3453,7 @@ func (m *uiModel) persistProxy(s config.ProxySettings) error {
 		merged = dropEnvKey(merged, k)
 	}
 	if s.Active {
-		vars := map[string]string{}
-		if s.HTTP != "" {
-			vars[config.EnvHTTPProxy] = s.HTTP
-		}
-		if s.HTTPS != "" {
-			vars[config.EnvHTTPSProxy] = s.HTTPS
-		}
-		if s.NoProxy != "" {
-			vars[config.EnvNoProxy] = s.NoProxy
-		}
-		merged, _ = config.MergeDotEnv(merged, vars)
+		merged, _ = config.MergeDotEnv(merged, s.ProxyVars())
 	}
 	var sb strings.Builder
 	for _, l := range merged {
@@ -3383,8 +3515,7 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.proxy.selected {
 			case 0:
-				m.proxy.stage = proxyURL
-				m.proxy.buf = ""
+				m.proxy.openForm()
 			case 1:
 				m.proxy.stage = proxyNo
 				m.proxy.buf = ""
@@ -3400,21 +3531,59 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case proxyURL:
 		switch msg.String() {
-		case "enter":
-			val := strings.TrimSpace(m.proxy.buf)
-			if val == "" {
-				m.statusText = i18n.T("no proxy address entered")
+		case "up":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "down":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "left", "right":
+			// On the type, an arrow picks the scheme; everywhere else it moves
+			// the focus. Tab moves the focus too, so a type that could only be
+			// reached by tabbing away and back would be a value the form hides.
+			if m.proxy.focus == pfScheme {
+				if msg.String() == "right" {
+					m.proxy.stepScheme(1)
+				} else {
+					m.proxy.stepScheme(-1)
+				}
 				return m, nil
 			}
-			if err := config.ValidateProxy(val); err != nil {
+			if msg.String() == "right" {
+				if m.proxy.focus < pfCount-1 {
+					m.proxy.focus++
+				}
+			} else if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "tab":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "shift+tab":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "enter":
+			spec := m.proxy.spec()
+			if err := spec.Validate(); err != nil {
 				m.statusText = err.Error()
 				return m, nil
 			}
 			m.proxy.reset()
-			return m, m.applyProxy(val)
+			return m, m.applyProxy(spec.URL())
 		case "backspace":
-			if r := []rune(m.proxy.buf); len(r) > 0 {
-				m.proxy.buf = string(r[:len(r)-1])
+			if f := m.proxy.field(); f != nil {
+				if r := []rune(*f); len(r) > 0 {
+					*f = string(r[:len(r)-1])
+				}
 			}
 			return m, nil
 		}
@@ -3434,15 +3603,130 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if len(msg.Text) > 0 && m.proxy.stage != proxyPick {
+	// Text lands in the form's focused field, except on the type: there the same
+	// keys are what selects a scheme, and typing letters into a four-value list
+	// only produces values SetProxy will reject.
+	if len(msg.Text) > 0 && m.proxy.stage == proxyNo {
 		m.proxy.buf += msg.Text
 	}
+	if len(msg.Text) > 0 && m.proxy.stage == proxyURL {
+		if m.proxy.focus == pfScheme {
+			m.proxy.stepScheme(1)
+			return m, nil
+		}
+		if f := m.proxy.field(); f != nil {
+			*f += msg.Text
+		}
+	}
 	return m, nil
+}
+
+// stepScheme moves the type field through config.Schemes by delta, wrapping. An
+// empty or unrecognised field starts at the first scheme rather than refusing to
+// move: it is a field the user has not filled in, not a value to complain about.
+func (s *proxyState) stepScheme(delta int) {
+	i := s.schemeIndex()
+	if i < 0 {
+		if delta > 0 {
+			i = -1
+		} else {
+			i = len(config.Schemes)
+		}
+	}
+	i = (i + delta + len(config.Schemes)) % len(config.Schemes)
+	// The port follows the type, because the two default together: switching an
+	// 8080 http proxy to socks5 and leaving 8080 behind would dial a port the new
+	// scheme has no reason to be on. "Unchanged" is read as the port still holding
+	// *some* scheme's default rather than as the user having typed it, which needs
+	// no second field remembering what the type used to be — a field that can
+	// disagree with the one on screen. A port that is none of the defaults was
+	// typed, and typing wins.
+	if isDefaultPort(s.fields[pfPort]) {
+		s.fields[pfPort] = config.DefaultPort(config.Schemes[i])
+	}
+	s.fields[pfScheme] = config.Schemes[i]
+}
+
+// isDefaultPort reports whether p is empty or one of the scheme defaults, which
+// is what "the user has not chosen a port" looks like.
+func isDefaultPort(p string) bool {
+	if p == "" {
+		return true
+	}
+	for _, sc := range config.Schemes {
+		if config.DefaultPort(sc) == p {
+			return true
+		}
+	}
+	return false
 }
 
 // proxyActionCount is the number of rows the /proxy menu offers. It lives in
 // one place because the key handler and the renderer must agree on it.
 const proxyActionCount = 4
+
+// proxyFormRows draws the address form: one row per field, label and value side
+// by side, with the focused one marked.
+//
+// The labels are padded to one width so the values line up. A form whose values
+// start at a different column per row reads as a list of unrelated strings, and
+// the eye stops being able to scan a column — which is the whole reason the
+// fields are separate.
+//
+// The password is the one value drawn as dots. It is on screen, in a transcript
+// nobody chose to keep, and in whatever the terminal keeps in scrollback.
+func (m *uiModel) proxyFormRows(inner int) [][]string {
+	labels := []string{
+		i18n.T("type"),
+		i18n.T("host"),
+		i18n.T("port"),
+		i18n.T("login"),
+		i18n.T("password"),
+	}
+	values := make([]string, pfCount)
+	for i := range values {
+		values[i] = m.proxy.fields[i]
+	}
+	if m.proxy.fields[pfPass] != "" {
+		values[pfPass] = strings.Repeat("•", len([]rune(m.proxy.fields[pfPass])))
+	}
+	// A placeholder rather than an empty row, so a field that must be filled is
+	// visibly waiting for something instead of looking already done.
+	placeholders := map[int]string{
+		pfHost: "vpn.example.com",
+		pfPort: "1080",
+		pfUser: "optional",
+		pfPass: "optional",
+	}
+
+	// The gutter is " ▸ " on the focused row and "   " elsewhere, and the marker
+	// is what marks the focus — the same ▸ the menu uses, so one thing in this
+	// dialog means "you are here".
+	labelW := 0
+	for _, l := range labels {
+		labelW = max(labelW, ansi.StringWidth(l))
+	}
+
+	rows := make([][]string, 0, pfCount)
+	for i, l := range labels {
+		gutter := "   "
+		if i == m.proxy.focus {
+			gutter = " ▸ "
+		}
+		v := values[i]
+		if v == "" {
+			v = styleHint.Render(placeholders[i])
+		} else if i == m.proxy.focus {
+			v += "█"
+		}
+		row := gutter + l + strings.Repeat(" ", labelW-ansi.StringWidth(l)) + "  " + v
+		if i == m.proxy.focus {
+			row = styleTool.Render(gutter) + row[len(gutter):]
+		}
+		rows = append(rows, []string{truncate(row, inner)})
+	}
+	return rows
+}
 
 func (m *uiModel) proxyBox() string {
 	inner := m.floatingWidth() - panelBorder
@@ -3451,21 +3735,17 @@ func (m *uiModel) proxyBox() string {
 	// not have to remember whether a proxy is already on, or which one.
 	now := i18n.T("direct connection")
 	if s := config.CurrentProxy(); s.Active {
-		now = s.HTTPS
-		if now == "" {
-			now = s.HTTP
-		}
+		now = config.RedactProxy(s.Effective())
 	}
 	title := i18n.T("? proxy — now: ") + truncate(now, max(inner-ansi.StringWidth(i18n.T("? proxy — now: ")), 1))
 
 	switch m.proxy.stage {
 	case proxyURL:
-		rows := [][]string{
-			{styleHint.Render(i18n.T("proxy address, e.g. 127.0.0.1:8080 or socks5://host:1080"))},
-			{styleHint.Render(i18n.T("enter — apply, esc — cancel"))},
-			{m.proxy.buf + "█"},
-		}
-		return m.floatingPanel(title, "", rows, 0)
+		// The focus is passed as the selection so the panel's own overflow rule
+		// keeps the focused field when the terminal is too short for all five —
+		// the field being typed into is the one row that cannot be the one to go.
+		return m.floatingPanel(title+"  ("+i18n.T("tab — next field, ←→ — type, enter — apply, esc — cancel")+")",
+			"", m.proxyFormRows(inner), m.proxy.focus)
 
 	case proxyNo:
 		rows := [][]string{
@@ -3503,6 +3783,10 @@ func (m *uiModel) showProxy() tea.Cmd {
 	add := func(s string) {
 		m.history = append(m.history, line{kindSys, s})
 	}
+	// Every address goes out redacted. A proxy address usually carries the
+	// login, and this line lands in the transcript, which is written to disk and
+	// shown to whoever opens the session.
+	show := config.RedactProxy
 	if !s.Active {
 		add(i18n.T("proxy: none (direct connection)"))
 	} else {
@@ -3513,7 +3797,7 @@ func (m *uiModel) showProxy() tea.Cmd {
 			{"https", s.HTTPS}, {"http", s.HTTP},
 		} {
 			if p.val != "" {
-				add("proxy " + p.label + ": " + p.val)
+				add("proxy " + p.label + ": " + show(p.val))
 			}
 		}
 		if s.NoProxy != "" {
@@ -3576,8 +3860,10 @@ func (m *uiModel) pasteTarget() *string {
 		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
-	case m.proxy.open && m.proxy.stage != proxyPick:
+	case m.proxy.open && m.proxy.stage == proxyNo:
 		return &m.proxy.buf
+	case m.proxy.open && m.proxy.stage == proxyURL:
+		return m.proxy.field()
 	case m.picker.open:
 		return &m.picker.query
 	case m.palette.open:
@@ -4039,7 +4325,7 @@ func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
 	// the session back on the endpoint the user switched away from, so the swap
 	// would hold for one turn and then be undone with nothing on screen to say so.
 	m.pool = replaceProvider(m.pool, msg.prov)
-	m.applyWindow(msg.prov.Model)
+	m.applyWindow(msg.prov)
 	m.statusText = i18n.T("provider: ") + msg.prov.Label
 	m.history = append(m.history,
 		line{kindSys, i18n.T("GGUF model is up: ") + msg.prov.Model + " — " + msg.prov.BaseURL})
@@ -4161,6 +4447,14 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 // nowhere to go.
 func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	p := m.prov
+	// The endpoint-reported window belongs to the model it was measured for. A
+	// different id may run at a different cap, so the number is not usable for
+	// the picked model until the endpoint says something about THIS one — which
+	// the goroutine below asks for and this synchronous half may not (it would
+	// freeze the loop on an HTTP call).
+	if p.Model != id {
+		p.Context = 0
+	}
 	p.Model = id
 	// Retain this session's ordering: active host first, the one that just
 	// failed last. The pool member being edited is the one currently answering.
@@ -4179,16 +4473,25 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	}
 	svc, ts := m.svc, m.activeTools()
 	// The window is read before the goroutine starts: it is a pure function of
-	// the model name, and doing it inside would mean reading m.prov on another
+	// the provider, and doing it inside would mean reading m.prov on another
 	// thread while the loop is free to change it. Compaction is built from the
-	// exact figure, which is zero for an unrecognised model and therefore
-	// disables it rather than guessing a threshold.
-	exactWindow := config.ContextWindow(p.Model)
+	// exact figure, which is zero for an unknown window and therefore disables
+	// it rather than guessing a threshold.
+	exactWindow := config.WindowFor(p)
 	return func() tea.Msg {
 		ctx := context.Background()
 		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode(), m.mcpToolsets...)
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
+		}
+		// The model just picked may be served with a different cap than the one
+		// detection measured. Ask the endpoint — the one that enforces the limit
+		// is the one that knows it — and rebuild both the threshold and the
+		// message around the fresher figure. Best-effort: a host that will not
+		// say keeps the window already settled above.
+		if ctx := config.ModelContext(p.BaseURL, p.APIKey, id); ctx > 0 {
+			p.Context = ctx
+			exactWindow = ctx
 		}
 		// Built through the same helper as the first runner, so a /model switch
 		// cannot land a session whose compaction settings differ from the ones
@@ -4206,7 +4509,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
-		return modelSwitchedMsg{name: id, runner: r, pool: pool}
+		return modelSwitchedMsg{name: id, runner: r, pool: pool, prov: p}
 	}
 }
 
@@ -4583,6 +4886,34 @@ func truncate(s string, n int) string {
 // the left margin is applied after everything else, adding a column but no
 // row. So the body is wrapped and measured on its own, trimmed to the budget,
 // and only then framed.
+// proxyTag is the sidebar's short name for a proxy in effect: the type, the host
+// and the port — "socks5 vpn.example.com:21001".
+//
+// Two things are dropped from the address it is built from. The login goes
+// entirely rather than being masked, because the panel is 31 columns and
+// "socks5://dedo:••••@vpn.example.com:21001" does not fit: the host falls off the
+// end and the row ends up naming a scheme and a login with no host between them.
+// The row's job is to say which proxy this is, and the full address is one /proxy
+// away — that one masks.
+//
+// "://" goes too, for the same reason: it costs three cells and separates two
+// things the narrow row already puts side by side. The type stays as a word in
+// front, because telling an http proxy from a socks5 one at a glance is what the
+// row is for — that difference decides whether a connection problem is a DNS
+// question or a port one.
+func proxyTag(addr string) string {
+	s := addr
+	if i := strings.Index(s, "://"); i >= 0 {
+		if at := strings.LastIndex(s, "@"); at > i {
+			// The login, if any, is dropped rather than masked.
+			s = s[:i] + " " + s[at+1:]
+		} else {
+			s = s[:i] + " " + s[i+3:]
+		}
+	}
+	return s
+}
+
 func (m *uiModel) sidebarView(height int) string {
 	const (
 		sbPad   = 1 // horizontal padding
@@ -4653,6 +4984,59 @@ func (m *uiModel) sidebarView(height int) string {
 		if m.prov.Label != "" {
 			row(styleHint, truncate("via "+m.prov.Label, sbInner))
 		}
+
+		// The proxy is its own section, like MODEL and FOLDER, rather than another
+		// line under MODEL. The word has to be on screen: "socks5
+		// vpn.example.com:21001" on its own is a string, and the reader has no way
+		// to know it is a proxy rather than a provider or a leftover fragment —
+		// which is the whole reason to show it at all. It could not simply be
+		// prefixed to the address either: the panel is 31 columns, so "proxy " in
+		// front of it pushes the port off the end, and the row loses the half a
+		// reader came for.
+		//
+		// Read once: two calls could straddle a /proxy change and print an address
+		// from one setting next to a bypass list from the next.
+		//
+		// The section exists only when a proxy is set. "PROXY: none" on every
+		// direct session would spend a heading and a row proving that nothing is
+		// wrong with the connection.
+		if s := config.CurrentProxy(); s.Active {
+			// The separator goes before the section rather than after MODEL, so
+			// that a session with no proxy gets one blank line between its
+			// sections and a session with one gets them both. Writing it
+			// unconditionally on either side leaves a doubled blank in the case
+			// that is on screen far more often.
+			b.WriteString("\n")
+			tag := proxyTag(s.Effective())
+			// The type rides in the heading, which has the room for it, leaving the
+			// value row the full width for a host and a port. It is not decoration:
+			// telling an http proxy from a socks5 one at a glance is what decides
+			// whether a connection problem is a DNS question or a port one — and in
+			// the value row that word is the first thing a left-trim would eat.
+			kind := ""
+			if i := strings.IndexByte(tag, ' '); i > 0 {
+				kind, tag = tag[:i], tag[i+1:]
+			}
+			row(styleSidebarLabel, truncate(i18n.T("PROXY")+" "+kind, sbInner))
+			// Trimmed from the left, like a path and for the same reason: the tail
+			// is the part that identifies a proxy, and cutting the right would leave
+			// "vpn.example.com:…" — naming the host and hiding the port.
+			row(styleHint, trimLeft(" "+tag, sbInner))
+			// The bypass list only when it has entries: it says nothing about the
+			// proxy above it, and an empty one would print a label over an absence.
+			//
+			// Trimmed from the right, unlike the address above it. A list is read by
+			// its beginning — which hosts are exempt — and the entries that fall off
+			// the end are the ones a user can most afford not to see. Truncating
+			// from the left would leave "…pass: localhost,10.0.0.0/8", having spent
+			// the cells on hiding the word "bypass".
+			if s.NoProxy != "" {
+				row(styleHint, truncate(" "+i18n.T("bypass: ")+s.NoProxy, sbInner))
+			}
+		}
+		// And one after it, unconditionally, so turning a proxy on adds its section
+		// without shifting every section below it down a row — the panel would then
+		// reflow under a user who is reading it.
 		b.WriteString("\n")
 
 		row(styleSidebarLabel, i18n.T("SESSION"))
@@ -4728,6 +5112,7 @@ func (m *uiModel) sidebarView(height int) string {
 
 		if hotkeys {
 			row(styleSidebarLabel, i18n.T("HOTKEYS"))
+			row(styleHint, i18n.T(" f1     help"))
 			row(styleHint, i18n.T(" ctrl+e  editor"))
 			row(styleHint, i18n.T(" ctrl+p  commands"))
 			row(styleHint, i18n.T(" ctrl+b  project panel"))
@@ -5365,7 +5750,8 @@ func (m *uiModel) View() tea.View {
 // test could name is a row that is not on screen.
 func (m *uiModel) modalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
-		m.proxy.open || m.sessionsList.open || m.ask.open
+		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
+		m.help.open
 }
 
 // chatOverlayUp reports whether anything is drawn over the transcript, so that
@@ -5396,8 +5782,12 @@ func (m *uiModel) buildFrame() string {
 			box = m.proxyBox()
 		case m.sessionsList.open:
 			box = m.sessionsBox()
+		case m.dirPick.open:
+			box = m.dirPickBox()
 		case m.ask.open:
 			box = m.askBox()
+		case m.help.open:
+			box = m.helpBox()
 		}
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 	}
@@ -5682,18 +6072,25 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 // applyWindow re-reads the context size for a model and records whether it was
 // a real figure or the display fallback.
 //
+// The window now belongs to the provider, not to the bare model name: an
+// endpoint that reports its own cap in /v1/models (an Ollama num_ctx, a vLLM
+// limit) is answered with that number, which is what the meter and the
+// compaction threshold actually ask — "how much will THIS host accept". Only
+// when the endpoint said nothing does the name-to-tokens table speak.
+//
 // Two numbers fall out of it and they are deliberately kept apart. The meter
 // needs a denominator or it prints a count with nothing to compare against,
 // which was the complaint behind "tokens out of what?". Compaction needs a
 // real one, because a threshold invented from a guess decides when to rewrite
-// the user's conversation — so an unrecognised model gets compaction off and a
+// the user's conversation — so an unknown window gets compaction off and a
 // meter marked with "~".
-func (m *uiModel) applyWindow(model string) {
-	display, guess := config.ContextWindowForDisplay(model)
+func (m *uiModel) applyWindow(p config.Provider) {
+	display, guess := config.WindowForDisplay(p)
 	m.window = display
 	m.windowGuess = guess
-	// The exact figure, which is zero when the model is unrecognised.
-	m.exactWindow = config.ContextWindow(model)
+	// The exact figure, which is zero when neither the endpoint nor the table
+	// knows the model.
+	m.exactWindow = config.WindowFor(p)
 }
 
 // compactionConfig decides when the conversation is summarized instead of

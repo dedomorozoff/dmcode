@@ -317,9 +317,11 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 	if err != nil {
 		return readFileResult{}, err
 	}
-	if len(data) > maxReadBytes {
-		data = data[:maxReadBytes]
-	}
+	// The whole file is read so the line count is honest and offset_line can
+	// page across it. Capping before the split — as an earlier version did —
+	// made total_lines the count of the truncated tail and meant a file over
+	// the cap could never be read past its first 256 KB, which is exactly the
+	// "large file" the tool's own description points offset_line at.
 	lines := strings.Split(string(data), "\n")
 	total := len(lines)
 	start := max(in.Offset, 0)
@@ -332,11 +334,17 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 		end = start + in.Limit
 		trunc = true
 	}
-	if len(data) == maxReadBytes {
+	content := strings.Join(lines[start:end], "\n")
+	if len(content) > maxReadBytes {
+		// A single page can still be enormous when the model asks for a wide
+		// window; the cap keeps one response from becoming the whole context
+		// window. It cuts the page, not the file: the next offset_line still
+		// reaches what came after it.
+		content = content[:maxReadBytes]
 		trunc = true
 	}
 	return readFileResult{
-		Content:    strings.Join(lines[start:end], "\n"),
+		Content:    content,
 		TotalLines: total,
 		Truncated:  trunc,
 	}, nil
@@ -1182,7 +1190,7 @@ const pagingNote = "Results are paginated: pass offset to continue where next_of
 func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Reads a file. Optional offset_line and limit_lines for large files. Returns content, total line count and whether it was truncated.",
+		Description: "Reads a file. offset_line and limit_lines page through large files; when truncated is true, continue from the next line with offset_line. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
 	}, readFile)
 	if err != nil {
 		return nil, err
@@ -1224,7 +1232,7 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	runCommandTool, err := functiontool.New(functiontool.Config{
 		Name:        "run_command",
-		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600.",
+		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root.",
 	}, runCommand)
 	if err != nil {
 		return nil, err

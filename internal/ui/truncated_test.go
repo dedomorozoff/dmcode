@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dedomorozoff/dmcode/internal/config"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
@@ -31,7 +32,7 @@ func transcriptJoined(m *uiModel) string {
 // turn is built from and "continue" resumes rather than restarts.
 func TestACutAnswerNamesTheOutputLimitAndHowToContinue(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.Update(turnDoneMsg{timing: turnTiming{
 		Elapsed: 12 * time.Second, Completion: 4096, Prompt: 8000, Calls: 1, Truncated: true,
 	}})

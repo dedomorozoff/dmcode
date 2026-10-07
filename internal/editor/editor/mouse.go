@@ -606,6 +606,13 @@ func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
 	// Buffer scroll.
 	p := m.curPane()
 	t := &m.tabs[p.tabIdx]
+	// A picture has no lines to scroll to, so its range is the art's height. It
+	// is asked of the rendered art rather than guessed from the aspect ratio,
+	// because the two disagree once the caption row is taken off the pane.
+	if t.img != nil {
+		m.scrollImage(dir)
+		return nil
+	}
 	maxOff := t.buf.LineCount() - m.paneContentHeight(m.activePane)
 	if p.wordWrap {
 		w := m.paneContentWidth(m.activePane)

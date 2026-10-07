@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"google.golang.org/adk/v2/model"
@@ -79,7 +80,7 @@ func TestATurnWithNoProseReportsNoFirstToken(t *testing.T) {
 // The context reading is only meaningful against the window it was measured in.
 func TestTheContextIsAFractionOfTheWindow(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.timing.Prompt = 32_000
 	// A quarter full must read as a quarter: this is the number that tells a
 	// user compaction is coming, so a wrong fraction is worse than none.
@@ -118,7 +119,7 @@ func TestTheContextBarCannotOverflow(t *testing.T) {
 // which is what "I can't see the context being used" turned out to mean.
 func TestTheMeterFallsBackToAnEstimate(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.timing.Prompt = 0 // the endpoint reported nothing
 
 	svc := memsession.NewMemory()
@@ -155,7 +156,7 @@ func TestTheMeterFallsBackToAnEstimate(t *testing.T) {
 // the model reported is not a guess.
 func TestTheReportedCountWinsOverTheEstimate(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.timing.Prompt = 32_000
 	joined := strings.Join(m.contextLines(), " ")
 	if strings.Contains(joined, "~") {
@@ -168,7 +169,7 @@ func TestTheReportedCountWinsOverTheEstimate(t *testing.T) {
 // given an invented one.
 func TestCompactionFollowsTheWindow(t *testing.T) {
 	m := &uiModel{}
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	if c := m.compactionConfig(); c == nil {
 		t.Fatal("a known window gets no compaction")
 	} else if c.TokenThreshold >= m.exactWindow {
@@ -177,7 +178,7 @@ func TestCompactionFollowsTheWindow(t *testing.T) {
 	// The other half of the split: an unrecognised model may draw a guessed
 	// meter, but must never rewrite the conversation on the strength of it.
 	n := &uiModel{}
-	n.applyWindow("some-finetune-abc")
+	n.applyWindow(config.Provider{Model: "some-finetune-abc"})
 	if n.window == 0 {
 		t.Error("the meter lost its denominator for an unrecognised model")
 	}
@@ -190,8 +191,8 @@ func TestCompactionFollowsTheWindow(t *testing.T) {
 // reader to guess the window. An unrecognised model used to produce exactly
 // that, which is what "out of how much?" was about.
 func TestTheMeterAlwaysHasADenominator(t *testing.T) {
-	m := framedModel(120, 40, "openai/gpt-oss-120b") // not in the table
-	m.applyWindow(m.prov.Model)
+	m := framedModel(120, 40, "madeup/unknown-model-42b") // not in the table
+	m.applyWindow(m.prov)
 	m.timing.Prompt = 32_000
 
 	if m.window <= 0 {
@@ -211,7 +212,7 @@ func TestTheMeterAlwaysHasADenominator(t *testing.T) {
 // zero for the same model whose meter is showing a guess.
 func TestAnAssumedWindowNeverTriggersCompaction(t *testing.T) {
 	m := &uiModel{}
-	m.applyWindow("openai/gpt-oss-120b")
+	m.applyWindow(config.Provider{Model: "madeup/unknown-model-42b"})
 	if m.window == 0 {
 		t.Fatal("the display window was left empty")
 	}
@@ -266,7 +267,7 @@ func TestAStoppedTurnStillCountsTowardsTheTotal(t *testing.T) {
 // fmt's own diagnostics is a broken row, whichever language produced it.
 func TestNoUserFacingStringCarriesAFormatError(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.turnCount = 8
 	m.timing = turnTiming{Elapsed: 9 * time.Second, FirstToken: time.Second,
 		Completion: 800, Prompt: 32_000, Calls: 1}
@@ -320,7 +321,7 @@ func TestFormatCount(t *testing.T) {
 // window is and roughly how many more turns fit.
 func TestTheContextMeterSaysHowMuchIsLeft(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.turnCount = 8
 	m.timing.Prompt = 32_000 // a quarter of the window, over 8 turns
 
@@ -345,7 +346,7 @@ func TestTheContextMeterSaysHowMuchIsLeft(t *testing.T) {
 // A full window must not promise room that is not there.
 func TestAFullWindowPromisesNothing(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	m.applyWindow("gpt-4o")
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
 	m.turnCount = 8
 	m.timing.Prompt = 128_000
 	if got := m.contextRoom(128_000); got != 0 {

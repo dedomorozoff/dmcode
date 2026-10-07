@@ -248,11 +248,11 @@ func spawnGGUF() (*Launch, error) {
 		// llama-server serves one model per invocation, so the name it is sent
 		// with is not what decides anything — and a caller that needs the server's
 		// own id can wait and ask.
-		Prov:      ggufProvider(base, stem),
+		Prov:      ggufProvider(base, stem, 0),
 		LogPath:   logPath,
 		done:      make(chan struct{}),
 		logPath:   logPath,
-		finalProv: ggufProvider(base, stem),
+		finalProv: ggufProvider(base, stem, 0),
 		stop: func() {
 			stopOnce.Do(func() {
 				cancelOnce.Do(func() { close(cancelled) })
@@ -270,8 +270,11 @@ func spawnGGUF() (*Launch, error) {
 			// Reported as itself, so a caller can stay quiet about a load the user
 			// walked away from.
 		case err == nil:
-			// Now the server can be asked what it is serving.
-			l.finalProv = ggufProvider(base, ggufModelName(abs, base))
+			// Now the server can be asked what it is serving: the model id it
+			// reports, and the context window it was started with, which the
+			// meter and the compaction threshold run on.
+			model, context := ggufModelName(abs, base)
+			l.finalProv = ggufProvider(base, model, context)
 		default:
 			if logPath != "" {
 				err = fmt.Errorf("%w; the server's output is in %s", err, logPath)
@@ -283,10 +286,11 @@ func spawnGGUF() (*Launch, error) {
 	return l, nil
 }
 
-func ggufProvider(base, model string) config.Provider {
+func ggufProvider(base, model string, context int) config.Provider {
 	return config.Provider{
 		BaseURL: base,
 		Model:   model,
+		Context: context,
 		API:     config.APIChat,
 		Label:   i18n.T("llama.cpp GGUF"),
 	}
@@ -371,12 +375,14 @@ func waitReady(base string, timeout time.Duration, died <-chan error, cancelled 
 
 // ggufModelName prefers the id the server itself reports — llama-server knows
 // the model's real name — and falls back to the file's stem, which is what a
-// /v1/models that answers unusually would leave us with.
-func ggufModelName(ggufPath, base string) string {
-	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0] != "" {
-		return served[0]
+// /v1/models that answers unusually would leave us with. The context length the
+// server stated travels back too, so a GGUF session's meter and compaction
+// threshold use the cap llama-server was actually started with.
+func ggufModelName(ggufPath, base string) (string, int) {
+	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0].ID != "" {
+		return served[0].ID, served[0].Context
 	}
-	return fileStem(ggufPath)
+	return fileStem(ggufPath), 0
 }
 
 // fileStem strips a model file's directory and extension. The path may name a
