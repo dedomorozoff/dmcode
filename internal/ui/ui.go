@@ -641,10 +641,20 @@ type cachedLine struct {
 	rows  renderedRows
 }
 
+// modelPicker is /models: the endpoint's catalogue, narrowed by a filter and
+// by a free-only toggle. list is a value rather than two fields because the
+// highlight and the scroll offset are one piece of state — a window whose offset
+// outlives its cursor is the bug panelWindow exists to prevent.
 type modelPicker struct {
-	open     bool
-	query    string
-	selected int
+	open  bool
+	query string
+	// onlyFree keeps the rows this endpoint serves without a paid plan, which
+	// is a question about the endpoint and about the ids it hands out, and not
+	// something a filter string can answer: Groq's free tier has no ":free" in
+	// any of its names, and OpenRouter's paid half is named exactly like its
+	// free one.
+	onlyFree bool
+	list     listView
 	Models   []string
 }
 
@@ -664,9 +674,9 @@ type promptMark struct {
 }
 
 type paletteState struct {
-	open     bool
-	query    string
-	selected int
+	open  bool
+	query string
+	list  listView
 }
 
 // langState drives the /lang overlay: a short list with no text field, since
@@ -689,11 +699,11 @@ const (
 // stdin prompt, while the error message that points at it promised a command
 // that was never there; the two now share one option list and one apply path.
 type setupState struct {
-	open     bool
-	stage    int
-	selected int
-	opt      config.SetupOption
-	buf      string
+	open  bool
+	stage int
+	list  listView
+	opt   config.SetupOption
+	buf   string
 	// force saves the configuration even though the endpoint rejected the key.
 	// It is only set after a failed check, so a bad key is still one retry away
 	// from being saved on the first attempt.
@@ -711,10 +721,10 @@ func (s *setupState) reset() {
 // path prompt. Directories are entered with enter; a .gguf file is picked the
 // same way. It lives inside setupState so a wizard reset closes it too.
 type ggufPickState struct {
-	open     bool
-	dir      string
-	entries  []ggufEntry
-	selected int
+	open    bool
+	dir     string
+	entries []ggufEntry
+	list    listView
 }
 
 type ggufEntry struct {
@@ -1058,6 +1068,54 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	return nil
 }
 
+// overlayWheel moves the cursor of whichever list overlay is open, and reports
+// whether it took the wheel.
+//
+// The cursor moves rather than the window because a picker is a choice: a list
+// scrolled without moving the highlight leaves the row under enter somewhere off
+// screen, which is a scrollbar behaviour borrowed from a view the user is only
+// reading. Two entries per notch is a screenful on a short terminal and a couple
+// of rows on a tall one, which is what a wheel means in either.
+func (m *uiModel) overlayWheel(msg tea.MouseWheelMsg) bool {
+	if !m.mouseEnabled {
+		return false
+	}
+	step := 0
+	switch msg.Button {
+	case tea.MouseWheelDown:
+		step = 2
+	case tea.MouseWheelUp:
+		step = -2
+	default:
+		// A sideways wheel is meaningless over a list. Swallowing it keeps the
+		// transcript behind the box still, rather than panning a pane the user
+		// cannot see.
+		return m.modalUp()
+	}
+	var sel *int
+	n := 0
+	switch {
+	case m.picker.open:
+		sel, n = &m.picker.list.sel, len(m.filteredModels())
+	case m.palette.open:
+		sel, n = &m.palette.list.sel, len(m.filteredCommands())
+	case m.sessionsList.open:
+		sel, n = &m.sessionsList.list.sel, len(m.sessionsList.filtered)
+	case m.dirPick.open:
+		sel, n = &m.dirPick.list.sel, len(m.dirPick.entries)
+	case m.setup.open && m.setup.gguf.open:
+		sel, n = &m.setup.gguf.list.sel, len(m.setup.gguf.entries)
+	case m.setup.open && m.setup.stage == setupPick:
+		sel, n = &m.setup.list.sel, len(config.SetupOptions())
+	case m.lang.open:
+		sel, n = &m.lang.selected, len(i18n.Langs)
+	default:
+		return false
+	}
+	*sel = min(max(*sel+step, 0), max(n-1, 0))
+	return true
+}
+
 // chatWheel scrolls the transcript. The wheel is routed through the viewport's
 // own handler, which already knows the shift-modifier horizontal case; what it
 // cannot know is that scrolling up must release the follow-the-tail stick.
@@ -1393,7 +1451,7 @@ func (m *uiModel) cancelGGUFLoad() tea.Cmd {
 	m.ggufLoad = nil
 	stopGGUF()
 	m.statusText = i18n.T("model load cancelled")
-	m.history = append(m.history, line{kindSys, i18n.T("⏹ stopped loading the local model — llama-server was shut down")})
+	m.history = append(m.history, line{kindSys, i18n.T("stopped loading the local model — llama-server was shut down")})
 	m.historyDirty = true
 	m.followVP()
 	return nil
@@ -1465,7 +1523,7 @@ func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
 	}
 	m.statusText = i18n.T("provider without tools")
 	m.history = append(m.history, line{kindErr, fmt.Sprintf(
-		i18n.T("⚠ %s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another."),
+		i18n.T("%s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another."),
 		msg.Label, msg.Model)})
 	m.historyDirty = true
 }
@@ -1513,7 +1571,7 @@ func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	m.pool = rest
 	m.statusText = i18n.T("failover: ") + msg.to.Label
 	m.history = append(m.history, line{kindSys, fmt.Sprintf(
-		i18n.T("⚡ %s is unavailable (%s) — %s (%s) answered"),
+		i18n.T("%s is unavailable (%s) — %s (%s) answered"),
 		msg.from.Label, msg.reason, msg.to.Label, msg.to.Model)})
 	m.historyDirty = true
 	// The reserve has not been checked for tool calling, and a host that
@@ -1540,7 +1598,7 @@ func (m *uiModel) copyLastResponse() {
 		m.history = append(m.history, line{kindErr, i18n.T("clipboard error: ") + err.Error()})
 	} else {
 		m.statusText = i18n.T("reply copied to the clipboard!")
-		m.history = append(m.history, line{kindSys, i18n.T("📋 the last reply was copied to the clipboard")})
+		m.history = append(m.history, line{kindSys, i18n.T("the last reply was copied to the clipboard")})
 	}
 	m.historyDirty = true
 	m.followVP()
@@ -1653,6 +1711,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseReleaseMsg:
 		return m, m.chatRelease(msg)
 	case tea.MouseWheelMsg:
+		// A box owns the frame, so the wheel belongs to the box. Handed to the
+		// transcript instead, it scrolled a conversation that is not on screen
+		// while the list the user was pointing at stood still — the same
+		// reason the click hit test stops at an overlay.
+		if m.overlayWheel(msg) {
+			return m, nil
+		}
 		return m, m.chatWheel(msg)
 	case tea.KeyPressMsg:
 		if m.setup.open {
@@ -1734,7 +1799,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.busy = false
 				m.statusText = i18n.T("turn stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Esc)")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped by the user (Esc)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -1754,7 +1819,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.busy = false
 				m.statusText = i18n.T("turn stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Ctrl+C)")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped by the user (Ctrl+C)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -1920,7 +1985,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
-					line{kindSys, i18n.T("ctrl+e or the ▣ icon — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
+					line{kindSys, i18n.T("ctrl+e — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
@@ -2067,6 +2132,27 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, m.switchModelCmd(id)
 			}
+			// "/models <query>" opens the list already filtered, the same split
+			// /proxy and /cd make between their dialog and their one-line form.
+			// Bare "/models" keeps running the whole list above it.
+			//
+			// The one word that is not a filter is "free": it is the question a
+			// user with three hundred models on screen actually has, and typing it
+			// as a filter would only match the gateways whose ids say so. Asking the
+			// endpoint instead is the answer that holds for all of them.
+			if arg, ok := strings.CutPrefix(text, "/models "); ok {
+				if m.busy {
+					return m, nil
+				}
+				arg = strings.TrimSpace(arg)
+				m.picker = modelPicker{open: true}
+				if strings.EqualFold(arg, "free") {
+					m.picker.onlyFree = true
+				} else {
+					m.picker.query = arg
+				}
+				return m, m.fetchModelsCmd()
+			}
 			// A model still loading cannot answer, and sending anyway produces a
 			// connection error the user cannot act on: the endpoint is not broken,
 			// it is not up yet, and "connection refused" says nothing about which of
@@ -2083,7 +2169,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.ggufLoad != nil {
 				m.input.SetValue(text)
 				m.statusText = i18n.T("the model is still loading")
-				m.history = append(m.history, line{kindSys, i18n.T("⏳ kept your prompt — the model is still loading, press enter again when it is ready")})
+				m.history = append(m.history, line{kindSys, i18n.T("kept your prompt — the model is still loading, press enter again when it is ready")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -2180,7 +2266,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyDirty = true
 	case toolResMsg:
 		m.statusText = i18n.T("returned: ") + msg.name
-		// Stored raw: renderHistory owns the "⎿" gutter and the wrapping, so
+		// Stored raw: renderHistory owns the "⎟" gutter and the wrapping, so
 		// pre-wrapping here would both double the prefix and measure against a
 		// width that ignores it.
 		m.history = append(m.history, line{kindToolRes, msg.output})
@@ -2194,7 +2280,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyDirty = true
 			m.followVP()
 		} else {
-			m.picker = modelPicker{open: true, Models: msg.Models}
+			// The models land in the picker that asked for them rather than in a
+			// fresh one: "/models llama" has already set the filter, and replacing
+			// the state here would answer a different question than the one the
+			// user typed and hand back the whole catalogue.
+			m.picker.Models = msg.Models
+			m.picker.open = true
+			m.picker.list = listView{}
 		}
 	case setupCheckMsg:
 		cmd := m.handleSetupCheck(msg)
@@ -2228,6 +2320,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			// Preserve m.sessionID so conversation context is retained!
 			m.history = append(m.history, line{kindSys, i18n.T("model activated: ") + msg.name + i18n.T(" (context kept)")})
+			// A model chosen in a session that the next start does not remember is
+			// a choice the user has to make again every morning, which is what
+			// "switch the model" is supposed to stop being. Written only once the
+			// runner exists, so a switch that failed to build cannot leave .env
+			// naming a model nothing is serving.
+			m.persistModelChoice(msg.name)
 			// A different model may or may not support tools, so check again.
 			extra = m.toolCheckCmd()
 		}
@@ -2269,7 +2367,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if msg.err == context.Canceled {
 				m.statusText = i18n.T("stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped")})
 			} else {
 				m.statusText = i18n.T("error")
 				m.history = append(m.history, line{kindErr, "error: " + msg.err.Error()})
@@ -2289,7 +2387,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// is built from, and the model picks up from where it stopped rather
 			// than starting over.
 			if msg.timing.Truncated {
-				note := i18n.T("⚠ the answer hit the output limit — say «continue» and it will pick up from there")
+				note := i18n.T("the answer hit the output limit — say «continue» and it will pick up from there")
 				if msg.timing.Completion > 0 {
 					note = fmt.Sprintf("%s (%s %s)", note,
 						formatCount(msg.timing.Completion), i18n.T("tokens"))
@@ -2862,7 +2960,7 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 	case kindTool:
 		return transcriptRow{style: styleTool, first: "⏺ ", rest: "  "}
 	case kindToolRes:
-		return transcriptRow{style: styleToolRes, first: "  ⎿ ", rest: "    "}
+		return transcriptRow{style: styleToolRes, first: "  ⎟ ", rest: "    "}
 	case kindDiff:
 		// The diff colours its own rows: the styles are applied per row by
 		// diffRows in rowRows, so the block rides through as prestyled — but it
@@ -3344,19 +3442,31 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.palette.open = false
 		return m, nil
 	case "up":
-		if m.palette.selected > 0 {
-			m.palette.selected--
+		if m.palette.list.sel > 0 {
+			m.palette.list.sel--
 		}
 		return m, nil
 	case "down":
-		if m.palette.selected < len(filtered)-1 {
-			m.palette.selected++
+		if m.palette.list.sel < len(filtered)-1 {
+			m.palette.list.sel++
 		}
+		return m, nil
+	case "pgup":
+		m.palette.list.sel = max(m.palette.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		m.palette.list.sel = min(m.palette.list.sel+m.floatPage(), len(filtered)-1)
+		return m, nil
+	case "home":
+		m.palette.list.sel = 0
+		return m, nil
+	case "end":
+		m.palette.list.sel = max(len(filtered)-1, 0)
 		return m, nil
 	case "enter":
 		m.palette.open = false
-		if m.palette.selected < len(filtered) {
-			c := filtered[m.palette.selected]
+		if m.palette.list.sel < len(filtered) {
+			c := filtered[m.palette.list.sel]
 			m.history = append(m.history, line{kindSys, "· " + c.name})
 			m.historyDirty = true
 			cmd := c.run(m)
@@ -3367,13 +3477,13 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if q := []rune(m.palette.query); len(q) > 0 {
 			m.palette.query = string(q[:len(q)-1])
-			m.palette.selected = 0
+			m.palette.list = listView{}
 		}
 		return m, nil
 	}
 	if len(msg.Text) > 0 {
 		m.palette.query += msg.Text
-		m.palette.selected = 0
+		m.palette.list = listView{}
 	}
 	return m, nil
 }
@@ -3455,11 +3565,33 @@ func (m *uiModel) persistProxy(s config.ProxySettings) error {
 	if s.Active {
 		merged, _ = config.MergeDotEnv(merged, s.ProxyVars())
 	}
-	var sb strings.Builder
-	for _, l := range merged {
-		sb.WriteString(l + "\n")
+	// Through the shared writer: .env holds the provider key, so a half-written
+	// file after a crash is a session with no configuration and no way back to
+	// the one it had. Same reason the proxy write and the model write cannot be
+	// two different pieces of code.
+	return config.WriteDotEnv(merged)
+}
+
+// persistModelChoice writes the picked model into .env and says so when it did
+// not go through.
+//
+// The three outcomes are three different sentences on purpose. Silence would
+// read as "saved" and be wrong; an error the user cannot act on is noise. A
+// refusal because .env does not describe this endpoint is worth saying out loud,
+// because the alternative — writing the line anyway — is the thing that makes a
+// session fail to start days later with nothing on screen to explain it.
+func (m *uiModel) persistModelChoice(id string) {
+	switch err := config.SaveModel(m.prov, id); {
+	case err == nil:
+		// The live process is told too, so anything that rebuilds a provider from
+		// the environment later in this session agrees with the file.
+		os.Setenv(config.EnvModelKey, id)
+		m.statusText = i18n.T("model saved to .env — the next start uses it")
+	case errors.Is(err, config.ErrProviderNotInEnv):
+		m.statusText = i18n.T("model not saved: .env does not configure this provider — /setup writes one")
+	default:
+		m.statusText = i18n.T("could not save the model to .env: ") + err.Error()
 	}
-	return os.WriteFile(".env", []byte(sb.String()), 0o600)
 }
 
 // dropEnvKey removes every line assigning key, leaving comments and other
@@ -3745,7 +3877,7 @@ func (m *uiModel) proxyBox() string {
 		// keeps the focused field when the terminal is too short for all five —
 		// the field being typed into is the one row that cannot be the one to go.
 		return m.floatingPanel(title+"  ("+i18n.T("tab — next field, ←→ — type, enter — apply, esc — cancel")+")",
-			"", m.proxyFormRows(inner), m.proxy.focus)
+			"", m.proxyFormRows(inner), &listView{sel: m.proxy.focus})
 
 	case proxyNo:
 		rows := [][]string{
@@ -3753,7 +3885,7 @@ func (m *uiModel) proxyBox() string {
 			{styleHint.Render(i18n.T("an empty field clears the list · enter — apply · esc — cancel"))},
 			{m.proxy.buf + "█"},
 		}
-		return m.floatingPanel(title, "", rows, 0)
+		return m.floatingPanel(title, "", rows, &listView{})
 	}
 
 	entries := make([][]string, 0, proxyActionCount)
@@ -3775,7 +3907,7 @@ func (m *uiModel) proxyBox() string {
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, m.proxy.selected)
+	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, &listView{sel: m.proxy.selected})
 }
 
 func (m *uiModel) showProxy() tea.Cmd {
@@ -3886,13 +4018,14 @@ func (m *uiModel) pasteInto(text string) {
 		return
 	}
 	*dst += oneLine(text)
-	// Typing resets the cursor, so a paste has to as well or the highlight
-	// stays on the first row of a filtered list.
+	// Typing resets the cursor and the scroll offset, so a paste has to as well
+	// or the highlight stays on the first row of a filtered list and the window
+	// stays scrolled to where the old list ended.
 	if m.picker.open {
-		m.picker.selected = 0
+		m.picker.list = listView{}
 	}
 	if m.palette.open {
-		m.palette.selected = 0
+		m.palette.list = listView{}
 	}
 }
 
@@ -3926,17 +4059,17 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case setupPick:
 		switch msg.String() {
 		case "up":
-			if m.setup.selected > 0 {
-				m.setup.selected--
+			if m.setup.list.sel > 0 {
+				m.setup.list.sel--
 			}
 			return m, nil
 		case "down":
-			if m.setup.selected < len(opts)-1 {
-				m.setup.selected++
+			if m.setup.list.sel < len(opts)-1 {
+				m.setup.list.sel++
 			}
 			return m, nil
 		case "enter":
-			m.setup.opt = opts[m.setup.selected]
+			m.setup.opt = opts[m.setup.list.sel]
 			switch {
 			case m.setup.opt.GGUF:
 				m.setup.stage = setupGGUF
@@ -4061,7 +4194,9 @@ func (m *uiModel) loadGGUFDir(dir string) {
 	}
 	m.setup.gguf.dir = dir
 	m.setup.gguf.entries = entries
-	m.setup.gguf.selected = 0
+	// Both halves of the position, not just the cursor: a window scrolled into a
+	// directory that no longer exists draws rows the user cannot account for.
+	m.setup.gguf.list = listView{}
 }
 
 // readGGUFDir lists what the browser shows: the parent first, then
@@ -4108,20 +4243,32 @@ func (m *uiModel) ggufPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		p.open = false
 		return m, nil
 	case "up":
-		if p.selected > 0 {
-			p.selected--
+		if p.list.sel > 0 {
+			p.list.sel--
 		}
 		return m, nil
 	case "down":
-		if p.selected < len(p.entries)-1 {
-			p.selected++
+		if p.list.sel < len(p.entries)-1 {
+			p.list.sel++
 		}
 		return m, nil
+	case "pgup":
+		p.list.sel = max(p.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		p.list.sel = min(p.list.sel+m.floatPage(), len(p.entries)-1)
+		return m, nil
+	case "home":
+		p.list.sel = 0
+		return m, nil
+	case "end":
+		p.list.sel = max(len(p.entries)-1, 0)
+		return m, nil
 	case "enter":
-		if p.selected >= len(p.entries) {
+		if p.list.sel >= len(p.entries) {
 			return m, nil
 		}
-		e := p.entries[p.selected]
+		e := p.entries[p.list.sel]
 		if e.dir {
 			m.loadGGUFDir(e.path)
 			return m, nil
@@ -4305,7 +4452,7 @@ func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
 	m.ggufLoad = nil
 	if errors.Is(msg.err, discover.ErrCancelled) {
 		m.statusText = i18n.T("model load cancelled")
-		m.history = append(m.history, line{kindSys, i18n.T("⏹ stopped loading the local model")})
+		m.history = append(m.history, line{kindSys, i18n.T("stopped loading the local model")})
 		m.historyDirty = true
 		m.followVP()
 		return nil
@@ -4387,20 +4534,45 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+p":
 		m.picker.open = false
 		return m, nil
+	case "ctrl+c":
+		// The one way out that is not the overlay. Without it ctrl+c is a letter
+		// this box swallows, so a user reaching for it gets a filter full of
+		// control characters instead of an exit.
+		return m, m.quitCmd()
 	case "up":
-		if m.picker.selected > 0 {
-			m.picker.selected--
+		if m.picker.list.sel > 0 {
+			m.picker.list.sel--
 		}
 		return m, nil
 	case "down":
-		if m.picker.selected < len(filtered)-1 {
-			m.picker.selected++
+		if m.picker.list.sel < len(filtered)-1 {
+			m.picker.list.sel++
 		}
+		return m, nil
+	case "pgup":
+		m.picker.list.sel = max(m.picker.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		m.picker.list.sel = min(m.picker.list.sel+m.floatPage(), len(filtered)-1)
+		return m, nil
+	case "home":
+		m.picker.list.sel = 0
+		return m, nil
+	case "end":
+		m.picker.list.sel = max(len(filtered)-1, 0)
+		return m, nil
+	case "ctrl+f":
+		// The toggle a user reaches for instead of reading model ids: whether
+		// this endpoint serves anything free is a fact about the endpoint, and
+		// filtering it out by hand means knowing the naming convention each
+		// gateway happens to use this month.
+		m.picker.onlyFree = !m.picker.onlyFree
+		m.picker.list = listView{}
 		return m, nil
 	case "enter":
 		m.picker.open = false
-		if m.picker.selected < len(filtered) {
-			id := filtered[m.picker.selected]
+		if m.picker.list.sel < len(filtered) {
+			id := filtered[m.picker.list.sel]
 			m.history = append(m.history, line{kindSys, i18n.T("· model → ") + id})
 			m.historyDirty = true
 			cmd := m.switchModelCmd(id)
@@ -4411,22 +4583,41 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if q := []rune(m.picker.query); len(q) > 0 {
 			m.picker.query = string(q[:len(q)-1])
-			m.picker.selected = 0
+			m.picker.list = listView{}
 		}
 		return m, nil
 	}
 	if len(msg.Text) > 0 {
 		m.picker.query += msg.Text
-		m.picker.selected = 0
+		m.picker.list = listView{}
 	}
 	return m, nil
 }
 
+// filteredModels is the list the picker shows: the endpoint's own order, cut
+// down by the typed filter and by the free-only toggle.
+//
+// Every word of the filter has to appear, not the whole string: a model id is
+// "meta-llama/Llama-3.3-70B-Instruct", and somebody who types "llama 70b" is
+// looking for that one rather than for a model with a space in its name. With
+// nothing typed the endpoint's order stands, because a list nobody has filtered
+// is a list somebody chose the order of.
 func (m *uiModel) filteredModels() []string {
-	q := strings.ToLower(m.picker.query)
-	var out []string
+	words := strings.Fields(strings.ToLower(m.picker.query))
+	out := make([]string, 0, len(m.picker.Models))
 	for _, id := range m.picker.Models {
-		if q == "" || strings.Contains(strings.ToLower(id), q) {
+		if m.picker.onlyFree && !config.FreeModel(m.prov, id) {
+			continue
+		}
+		low := strings.ToLower(id)
+		hit := true
+		for _, w := range words {
+			if !strings.Contains(low, w) {
+				hit = false
+				break
+			}
+		}
+		if hit {
 			out = append(out, id)
 		}
 	}
@@ -5195,21 +5386,21 @@ func (m *uiModel) progressNote() string {
 // stateBadge is the one piece of status the bar always carries: what the agent
 // is doing right now. It is a function so the width arithmetic in the bar and in
 // its tests both measure the rendered string rather than a copy of it — an emoji
-// in "⏳ WORKING" is two cells wide, and guessing one cell short is how a row ends
+// in "WORKING" is seven cells wide, and guessing one cell short is how a row ends
 // up a column wider than the terminal and wraps.
 func (m *uiModel) stateBadge() string {
 	switch {
 	case m.busy:
-		return styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+		return styleBadgeBusy.Render(i18n.T("WORKING"))
 	case m.ggufLoad != nil:
 		// Loading is not WORKING: WORKING means the agent has your message, and
 		// a user who reads it that way waits for a reply that was never sent. This
 		// one says the session is fine and the model is not here yet.
-		return styleBadgeBusy.Render(i18n.T("⏳ LOADING"))
+		return styleBadgeBusy.Render(i18n.T("LOADING"))
 	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
-		return styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
+		return styleBadgeStop.Render(i18n.T("STOPPED"))
 	default:
-		return styleBadgeReady.Render(i18n.T("● READY"))
+		return styleBadgeReady.Render(i18n.T("READY"))
 	}
 }
 
@@ -5430,66 +5621,153 @@ func (m *uiModel) floatingWidth() int {
 	return max(min(m.width, 68), 24)
 }
 
+// floatPage is how far a page key moves inside a floating list: one screenful
+// of entries. It is derived from the terminal because a fixed page is a step
+// that jumps past the end of a short box and crawls through a tall one, and it
+// is capped so one press cannot skip past a model the user was reaching for.
+func (m *uiModel) floatPage() int {
+	return max(min(m.height-panelBorder-6, 12), 1)
+}
+
+// listView is where a list is: the highlighted entry and the first entry on
+// screen. top is state rather than something each frame re-derives, because a
+// box exists only between two redraws — a window computed from the selection
+// alone puts the cursor at the top of the body for every list longer than the
+// terminal, and a wheel or a page key then has nothing to accumulate into.
+type listView struct {
+	sel int
+	top int
+}
+
 // Every list drawn through here marks the row under the cursor with ▸ and the
 // item currently in use with *, the same two glyphs in every overlay: one
 // selection reading as two depending on which box is open is something a user
 // has to learn twice.
 //
-// floatingPanel frames a palette-style box: a two-row header, a list body and
-// the border. The body is trimmed by rendered row rather than by entry, because
-// one long model id can take two rows and a count taken before wrapping is not
-// the count that reaches the screen. Trimming stops at the selected entry: a
-// panel scrolled away from its cursor is worse than one listing fewer models.
-func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int) string {
+// floatingPanel frames a palette-style box with the header every overlay
+// shares: the title, the filter line and a blank spacer.
+func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *listView) string {
 	inner := m.floatingWidth() - panelBorder
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
-
 	head := []string{
 		styleHeader.Render(" "+title+" ") + styleHint.Render(i18n.T("esc — close")),
 		styleHint.Render(truncate(" › "+query, inner)),
 		"",
 	}
+	return m.floatingList(head, entries, lv)
+}
+
+// floatingList is floatingPanel with a header the caller wrote. A list with more
+// to say than a title and a filter line — which keys move it, how many of the
+// endpoint's models survived the filter — says it in rows above the body rather
+// than by growing the title into a paragraph that wraps off the narrow box.
+//
+// The body is windowed by rendered row rather than by entry, because one long
+// model id can take two rows and a count taken before wrapping is not the count
+// that reaches the screen.
+func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) string {
+	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 
 	// The head is measured rather than counted. The title shares its row with
 	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
 	// counted as three then leaves the panel one row taller than the screen it
 	// has to fit inside, and the bottom border falls off the bottom.
 	headRows := lipgloss.Height(stylePanel.Width(m.floatingWidth()).Render(strings.Join(head, "\n"))) - panelBorder
-	// One row is held back for the "still hidden" marker, so revealing it can
-	// never push the bottom border off the screen.
-	room := max(m.height-panelBorder-headRows-1, 1)
-	total := len(entries)
-	for len(entries) > 0 && len(entries)-1 != sel && rowCount(entries) > room {
-		entries = entries[:len(entries)-1]
-	}
 
-	rows := make([]string, 0, len(head)+room+1)
+	// Two rows are held back, one for each way a list can still be scrolled, so
+	// revealing a marker can never push the bottom border off the screen. A row
+	// the finished window does not need is given back below, because a list of
+	// six rows should not lose one of them to a marker it never draws.
+	avail := max(m.height-panelBorder-headRows, 1)
+	room := max(avail-2, 1)
+	start, end := panelWindow(entries, lv.sel, lv.top, room)
+	if (start == 0 || end >= len(entries)) && room < avail {
+		room = avail - 1
+		start, end = panelWindow(entries, lv.sel, lv.top, room)
+	}
+	lv.top = start
+
+	rows := make([]string, 0, len(head)+room+2)
 	rows = append(rows, head...)
-	for i, group := range entries {
-		for _, r := range group {
-			if i == sel {
+	if start > 0 {
+		rows = append(rows, styleHint.Render(i18n.T("   ↑ more ")+fmt.Sprint(start)))
+	}
+	left := room
+	for i := start; i < end && left > 0; i++ {
+		for _, r := range entries[i] {
+			if left == 0 {
+				break
+			}
+			if i == lv.sel {
 				r = styleSel.Render(r)
 			}
 			rows = append(rows, r)
+			left--
 		}
 	}
 	if len(entries) == 0 {
 		rows = append(rows, styleHint.Render(i18n.T("   nothing found")))
 	}
-	if hidden := total - len(entries); hidden > 0 {
-		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(hidden)))
+	if end < len(entries) {
+		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(len(entries)-end)))
 	}
 
 	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
 }
 
-// rowCount counts the rendered rows a list of entry groups occupies.
-func rowCount(entries [][]string) int {
-	n := 0
-	for _, e := range entries {
-		n += len(e)
+// panelWindow picks the entries a body of `room` rows can show.
+//
+// Two rules, and the second is the one that was broken. The highlighted entry is
+// always among them; and the list never grows to reach it. Trimming from the
+// tail and stopping once the cursor was included did satisfy the first rule —
+// by making the panel as tall as the distance to the cursor, at which point
+// lipgloss.Place centres the overflow and the row under the cursor and the
+// title of the box both end up off the screen. A list that showed nothing
+// however far the user scrolled is what that looks like from the keyboard.
+//
+// An entry taller than the whole room is still shown, from its first row: it is
+// the one carrying the cursor, and a row the user cannot scroll to is a dead
+// end. The caller clips what does not fit.
+func panelWindow(entries [][]string, sel, top, room int) (start, end int) {
+	if len(entries) == 0 {
+		return 0, 0
 	}
-	return n
+	if room < 1 {
+		room = 1
+	}
+	sel = min(max(sel, 0), len(entries)-1)
+	start = min(max(top, 0), sel)
+
+	// fill is the window that begins at `from`: as many whole entries as the
+	// room holds, or that one entry alone when even it is taller than the room.
+	fill := func(from int) (end, rows int) {
+		end, rows = from, 0
+		for end < len(entries) && rows+len(entries[end]) <= room {
+			rows += len(entries[end])
+			end++
+		}
+		if end == from {
+			end, rows = from+1, len(entries[from])
+		}
+		return end, rows
+	}
+	end, rows := fill(start)
+
+	// The cursor is below the window, so slide down one entry at a time until
+	// it is on screen: the smallest move that reveals it, which is what a
+	// single Down should read as. Jumping straight to the cursor instead would
+	// make every keypress past the fold move the whole body.
+	for sel >= end && start < sel {
+		start++
+		rows -= len(entries[start-1])
+		for end < len(entries) && rows+len(entries[end]) <= room {
+			rows += len(entries[end])
+			end++
+		}
+		if end == start {
+			end, rows = start+1, len(entries[start])
+		}
+	}
+	return start, end
 }
 
 func (m *uiModel) paletteBox() string {
@@ -5497,36 +5775,86 @@ func (m *uiModel) paletteBox() string {
 	var entries [][]string
 	for i, c := range m.filteredCommands() {
 		marker := "   "
-		if i == m.palette.selected {
+		if i == m.palette.list.sel {
 			marker = " ▸ "
 		}
 		entries = append(entries, wrapIndent(c.name+" — "+c.desc, inner, marker, "     "))
 	}
-	return m.floatingPanel(i18n.T("⌘ commands"), m.palette.query, entries, m.palette.selected)
+	return m.floatingPanel(i18n.T("commands"), m.palette.query, entries, &m.palette.list)
 }
 
+// modelPickerBox renders /models: the endpoint's catalogue, narrowed.
+//
+// The header is built here rather than handed to floatingPanel because this list
+// has three things to say that the shared one-row title cannot: which keys move
+// it, how much of the catalogue the filter kept, and whether the free filter is
+// on. On a list of three hundred models the count is not a nicety — it is the
+// difference between "the list is short" and "you are looking at the first
+// screen of something enormous".
 func (m *uiModel) modelPickerBox() string {
 	inner := m.floatingWidth() - panelBorder
+	shown := m.filteredModels()
+
+	// The hint is not truncated. The head is measured row by row, so letting it
+	// wrap costs one row on a narrow box and keeps every key on it; cutting it to
+	// fit hid the tail, which is where the newest and least-guessable key —
+	// ctrl+f — lives, on exactly the boxes the user needs it most.
+	hint := i18n.T("esc — close · ctrl+f — free only · ↑↓/pgup/pgdn — scroll")
+	free := 0
+	for _, id := range m.picker.Models {
+		if config.FreeModel(m.prov, id) {
+			free++
+		}
+	}
+	// The filter line carries its own invitation. The keys above say how to move
+	// and how to reach the free half; nothing said what typing does, and a list
+	// of three hundred that silently shrinks is indistinguishable from a list of
+	// three hundred — which is why the filter existed and nobody used it.
+	filterLine := " › " + m.picker.query
+	if m.picker.query == "" {
+		filterLine = " › " + i18n.T("type to filter…")
+	}
+	// The count names the models, not the box, so it takes its own word: the
+	// title's key carries the ⌘ with it, and borrowing it here printed the
+	// title's glyph inside the count.
+	counts := fmt.Sprintf("%d/%d %s · %d %s",
+		len(shown), len(m.picker.Models), i18n.T("models"), free, i18n.T("free"))
+	if m.picker.onlyFree {
+		counts += " · " + i18n.T("free only")
+	}
+	head := []string{
+		styleHeader.Render(" "+i18n.T("⌘ models")+" ") + styleHint.Render(hint),
+		styleHint.Render(truncate(filterLine, inner)),
+		styleHint.Render(counts),
+		"",
+	}
+
 	var entries [][]string
-	for i, id := range m.filteredModels() {
+	for i, id := range shown {
 		// The marker is the first-line indent rather than part of the text, so
 		// the rows stay inside the frame instead of being re-wrapped by it.
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
-		case i == m.picker.selected:
-			marker, style = " ▸ ", lipgloss.NewStyle()
+		case i == m.picker.list.sel:
+			marker = " ▸ "
 		case id == m.prov.Model:
 			marker, style = " ● ", styleTool
+		case config.FreeModel(m.prov, id):
+			// Dimmed, with no marker of its own. A row already carries two
+			// glyphs - the cursor and the model in use - and a third one
+			// standing for "this one costs nothing" is a code to learn rather
+			// than a fact. Weight says it without taking a column.
+			style = styleHint
 		}
 		rows := wrapIndent(id, inner, marker, "     ")
-		if i != m.picker.selected {
+		if i != m.picker.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("⌘ models"), m.picker.query, entries, m.picker.selected)
+	return m.floatingList(head, entries, &m.picker.list)
 }
 
 // maskedKey hides a secret while still showing that something was typed. The
@@ -5549,20 +5877,20 @@ func (m *uiModel) ggufPickBox() string {
 	var entries [][]string
 	for i, e := range m.setup.gguf.entries {
 		marker, style := "   ", lipgloss.NewStyle()
-		if i == m.setup.gguf.selected {
+		if i == m.setup.gguf.list.sel {
 			marker = " ▸ "
 		} else if e.dir {
 			style = styleHint
 		}
 		rows := wrapIndent(e.label, inner, marker, "     ")
-		if i != m.setup.gguf.selected {
+		if i != m.setup.gguf.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("? gguf file — enter opens, esc back"), m.setup.gguf.dir, entries, m.setup.gguf.selected)
+	return m.floatingPanel(i18n.T("? gguf file — enter opens, esc back"), m.setup.gguf.dir, entries, &m.setup.gguf.list)
 }
 
 // setupBox renders the /setup wizard: the provider list, then a key prompt, or
@@ -5583,22 +5911,22 @@ func (m *uiModel) setupBox() string {
 		// stores only the masked form.
 		rows := [][]string{{styleHint.Render(i18n.T("key (input hidden, paste or ctrl+v, then enter):"))},
 			{maskedKey(m.setup.buf, inner) + "█"}}
-		return m.floatingPanel(i18n.T("? provider key"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? provider key"), "", rows, &listView{})
 
 	case setupURL:
 		rows := [][]string{{styleHint.Render(i18n.T("base URL, e.g. http://localhost:1234/v1"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? custom endpoint"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? custom endpoint"), "", rows, &listView{})
 
 	case setupModel:
 		rows := [][]string{{styleHint.Render(i18n.T("model id on this endpoint"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? model"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? model"), "", rows, &listView{})
 
 	case setupGGUF:
 		rows := [][]string{{styleHint.Render(i18n.T("path to the .gguf file — ctrl+o or enter on empty browses the disk"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? gguf file"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? gguf file"), "", rows, &listView{})
 	}
 
 	opts := config.SetupOptions()
@@ -5609,13 +5937,13 @@ func (m *uiModel) setupBox() string {
 		// see floatingPanel. "?" stayed out of it because it already prefixes
 		// every wizard prompt's title.
 		switch {
-		case i == m.setup.selected:
+		case i == m.setup.list.sel:
 			marker, style = " ▸ ", styleTool
 		case setupLabel(o) == m.prov.Label:
 			marker, style = " * ", styleTool
 		}
 		rows := wrapIndent(o.Label, inner, marker, "     ")
-		if i != m.setup.selected {
+		if i != m.setup.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
@@ -5623,7 +5951,7 @@ func (m *uiModel) setupBox() string {
 		entries = append(entries, rows)
 	}
 	// * marks the provider already in use, ? the highlighted row.
-	return m.floatingPanel(i18n.T("? provider  (* — current, enter — select, esc — cancel)"), "", entries, m.setup.selected)
+	return m.floatingPanel(i18n.T("? provider  (* — current, enter — select, esc — cancel)"), "", entries, &m.setup.list)
 }
 
 // langLabels names each selectable language in that language itself, so the row
@@ -5705,7 +6033,7 @@ func (m *uiModel) langBox() string {
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("? language  (* — current, enter — select, esc — cancel)"), "", entries, m.lang.selected)
+	return m.floatingPanel(i18n.T("? language  (* — current, enter — select, esc — cancel)"), "", entries, &listView{sel: m.lang.selected})
 }
 
 func (m *uiModel) filteredCommands() []command {

@@ -33,18 +33,17 @@ var catalog = map[Lang]map[string]string{
 		"describe the task… (/help for commands, esc to cancel)":                                                           "опиши задачу… (/help — команды, esc — отмена)",
 
 		// Session and turn state.
-		"— session reset —":                   "— сессия сброшена —",
-		"turn stopped":                        "ход прерван",
-		"stopped":                             "прервано",
-		"error":                               "ошибка",
-		"ready":                               "готов",
-		"cancelled":                           "отменено",
-		"generating a reply…":                 "генерация ответа...",
-		"running…":                            "выполнение...",
-		"waiting for a task":                  "ожидание задачи",
-		"⏹ turn stopped by the user (Esc)":    "⏹ ход прерван пользователем (Esc)",
-		"⏹ turn stopped by the user (Ctrl+C)": "⏹ ход прерван пользователем (Ctrl+C)",
-		"⏹ turn stopped":                      "⏹ ход прерван",
+		"— session reset —":                 "— сессия сброшена —",
+		"turn stopped":                      "ход прерван",
+		"stopped":                           "прервано",
+		"error":                             "ошибка",
+		"ready":                             "готов",
+		"cancelled":                         "отменено",
+		"generating a reply…":               "генерация ответа...",
+		"running…":                          "выполнение...",
+		"waiting for a task":                "ожидание задачи",
+		"turn stopped by the user (Esc)":    "ход прерван пользователем (Esc)",
+		"turn stopped by the user (Ctrl+C)": "ход прерван пользователем (Ctrl+C)",
 
 		// Timing, tokens and the context meter.
 		"time:":                               "время:",
@@ -67,7 +66,7 @@ var catalog = map[Lang]map[string]string{
 		"output:":                             "ответ:",
 		"the context was compressed":          "контекст был сжат",
 		"cut at the output limit":             "обрезан лимитом вывода",
-		"⚠ the answer hit the output limit — say «continue» and it will pick up from there": "⚠ ответ упёрся в лимит вывода — скажите «продолжай», и модель продолжит с места обрыва",
+		"the answer hit the output limit — say «continue» and it will pick up from there": "ответ упёрся в лимит вывода — скажите «продолжай», и модель продолжит с места обрыва",
 		"no turn has run yet": "ещё ни одного хода не было",
 		"session (%d turns)":  "сессия (%d ходов)",
 		"total time:":         "всего времени:",
@@ -84,9 +83,9 @@ var catalog = map[Lang]map[string]string{
 
 		// Provider status.
 		"provider without tools": "провайдер без tools",
-		"⚠ %s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another.": "⚠ %s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
+		"%s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another.": "%s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
 		"failover: ": "запасной: ",
-		"⚡ %s is unavailable (%s) — %s (%s) answered": "⚡ %s недоступен (%s) — ответил %s (%s)",
+		"%s is unavailable (%s) — %s (%s) answered": "%s недоступен (%s) — ответил %s (%s)",
 		"provider: ":               "провайдер: ",
 		"provider saved to .env: ": "провайдер сохранён в .env: ",
 		"unavailable":              "недоступен",
@@ -100,6 +99,7 @@ var catalog = map[Lang]map[string]string{
 		" (context kept)":   " (контекст сохранён)",
 		"· model → ":        "· модель → ",
 		"   ↓ more ":        "   ↓ ещё ",
+		"   ↑ more ":        "   ↑ ещё ",
 
 		// Setup wizard.
 		"setup cancelled":                                  "настройка отменена",
@@ -136,18 +136,18 @@ var catalog = map[Lang]map[string]string{
 		"the interface is ready; a message will send as soon as the model answers":             "интерфейс готов; сообщение уйдёт, как только модель ответит",
 		"loading the local model — the interface is ready, messages will not send until it is": "загружаю локальную модель — интерфейс готов, сообщения уйдут после загрузки",
 		"model load cancelled":                                                                 "загрузка модели отменена",
-		"⏹ stopped loading the local model — llama-server was shut down":                       "⏹ загрузка локальной модели остановлена — llama-server выключен",
-		"⏹ stopped loading the local model":                                                    "⏹ загрузка локальной модели остановлена",
+		"stopped loading the local model — llama-server was shut down":                         "загрузка локальной модели остановлена — llama-server выключен",
+		"stopped loading the local model":                                                      "загрузка локальной модели остановлена",
 		"the model is still loading":                                                           "модель ещё загружается",
-		"⏳ kept your prompt — the model is still loading, press enter again when it is ready":  "⏳ ваш запрос сохранён — модель ещё загружается, нажмите enter ещё раз, когда она будет готова",
-		"⏳ LOADING": "⏳ ЗАГРУЗКА",
+		"kept your prompt — the model is still loading, press enter again when it is ready":    "ваш запрос сохранён — модель ещё загружается, нажмите enter ещё раз, когда она будет готова",
+		"LOADING": "ЗАГРУЗКА",
 		"? provider  (* — current, enter — select, esc — cancel)": "? провайдер  (* — текущий, enter — выбрать, esc — отмена)",
 
 		// Clipboard.
-		"nothing to copy":                              "нет ответа для копирования",
-		"clipboard error: ":                            "ошибка буфера: ",
-		"reply copied to the clipboard!":               "ответ скопирован в буфер обмена!",
-		"📋 the last reply was copied to the clipboard": "📋 последний ответ скопирован в буфер обмена",
+		"nothing to copy":                            "нет ответа для копирования",
+		"clipboard error: ":                          "ошибка буфера: ",
+		"reply copied to the clipboard!":             "ответ скопирован в буфер обмена!",
+		"the last reply was copied to the clipboard": "последний ответ скопирован в буфер обмена",
 
 		// Sidebar.
 		"MODEL":                  "МОДЕЛЬ",
@@ -170,9 +170,9 @@ var catalog = map[Lang]map[string]string{
 		" pgup/dn scroll":        " pgup/dn скролл",
 
 		// Status badges.
-		"⏳ WORKING": "⏳ РАБОТАЕТ",
-		"⏹ STOPPED": "⏹ ПРЕРВАНО",
-		"● READY":   "● ГОТОВ",
+		"WORKING": "РАБОТАЕТ",
+		"STOPPED": "ПРЕРВАНО",
+		"READY":   "ГОТОВ",
 
 		// Floating panels.
 		"esc — close":      "esc — закрыть",
@@ -180,6 +180,15 @@ var catalog = map[Lang]map[string]string{
 		"⌘ commands":       "⌘ команды",
 		"↑↓ · enter · esc": "↑↓ выбор · enter запуск · esc закрыть",
 		"⌘ models":         "⌘ модели",
+		"models":           "моделей",
+
+		// /models. The keys move a list of three hundred rows, so they are named
+		// on the box itself rather than only in the reference.
+		"esc — close · ctrl+f — free only · ↑↓/pgup/pgdn — scroll": "esc — закрыть · ctrl+f — только бесплатные · ↑↓/pgup/pgdn — скролл",
+		"free only":       "только бесплатные",
+		"free":            "бесплатных",
+		"type to filter…": "печатай, чтобы фильтровать…",
+		"list the models — type to filter, ctrl+f for the free ones": "список моделей — печатай, чтобы фильтровать, ctrl+f — только бесплатные",
 
 		// Boot.
 		"dmcode is starting…": "dmcode загружается…",
@@ -219,23 +228,23 @@ var catalog = map[Lang]map[string]string{
 		"selection copied (%d characters)": "выделение скопировано (%d символов)",
 
 		// Proxy.
-		"show or set the HTTP proxy":                                                          "показать или задать HTTP-прокси",
-		"set up the HTTP proxy (a dialog: on, off, bypass)":                                   "настроить HTTP-прокси (диалог: вкл, выкл, исключения)",
-		"proxy: none (direct connection)":                                                     "прокси: нет (прямое соединение)",
-		"proxy: cleared, connecting directly":                                                 "прокси: сброшен, прямое соединение",
-		"proxy: bypass list cleared":                                                          "прокси: список исключений очищен",
-		"proxy: the provider answered through it":                                             "прокси: провайдер ответил через него",
-		"proxy: the request failed — ":                                                        "прокси: запрос не удался — ",
+		"show or set the HTTP proxy":                        "показать или задать HTTP-прокси",
+		"set up the HTTP proxy (a dialog: on, off, bypass)": "настроить HTTP-прокси (диалог: вкл, выкл, исключения)",
+		"proxy: none (direct connection)":                   "прокси: нет (прямое соединение)",
+		"proxy: cleared, connecting directly":               "прокси: сброшен, прямое соединение",
+		"proxy: bypass list cleared":                        "прокси: список исключений очищен",
+		"proxy: the provider answered through it":           "прокси: провайдер ответил через него",
+		"proxy: the request failed — ":                      "прокси: запрос не удался — ",
 		"set one with: /proxy <url> · clear with: /proxy off · bypass with: /proxy no <list>": "задать: /proxy <url> · отключить: /proxy off · исключения: /proxy no <список>",
-		"checking the proxy…":                                                                 "проверяю прокси…",
-		"? proxy — now: ":                                                                     "? прокси — сейчас: ",
-		"direct connection":                                                                   "прямое соединение",
-		"no proxy address entered":                                                            "адрес прокси не введён",
-		"turn the proxy on or change it":                                                      "включить прокси или сменить адрес",
-		"edit the bypass list (NO_PROXY)":                                                     "исключения — куда ходить напрямую (NO_PROXY)",
-		"turn the proxy off":                                                                  "отключить прокси",
-		"show the current settings and test them":                                             "показать текущие настройки и проверить их",
-		"tab — next field, ←→ — type, enter — apply, esc — cancel":                            "tab — следующее поле, ←→ — тип, enter — применить, esc — отмена",
+		"checking the proxy…":                     "проверяю прокси…",
+		"? proxy — now: ":                         "? прокси — сейчас: ",
+		"direct connection":                       "прямое соединение",
+		"no proxy address entered":                "адрес прокси не введён",
+		"turn the proxy on or change it":          "включить прокси или сменить адрес",
+		"edit the bypass list (NO_PROXY)":         "исключения — куда ходить напрямую (NO_PROXY)",
+		"turn the proxy off":                      "отключить прокси",
+		"show the current settings and test them": "показать текущие настройки и проверить их",
+		"tab — next field, ←→ — type, enter — apply, esc — cancel": "tab — следующее поле, ←→ — тип, enter — применить, esc — отмена",
 		"type":     "тип",
 		"host":     "хост",
 		"port":     "порт",

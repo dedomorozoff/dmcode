@@ -335,7 +335,7 @@ func TestDeleteAsksTwice(t *testing.T) {
 	sendTurn(t, m, "единственная")
 	only := m.sessionID
 	m.openSessions()
-	m.sessionsList.selected = 0
+	m.sessionsList.list.sel = 0
 
 	m.sessionsKey(pressKey("d"))
 	if m.sessionsList.confirmDelete != only {
@@ -360,7 +360,7 @@ func TestEscapeLeavesTheDeleteConfirmation(t *testing.T) {
 	m := newSessionModel(t)
 	sendTurn(t, m, "единственная")
 	m.openSessions()
-	m.sessionsList.selected = 0
+	m.sessionsList.list.sel = 0
 	m.sessionsKey(pressKey("d"))
 
 	m.sessionsKey(pressKey("esc"))

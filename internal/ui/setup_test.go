@@ -45,10 +45,10 @@ func (d setupKeys) up() setupKeys    { return d.send(tea.KeyPressMsg{Code: tea.K
 // keeps the test honest if the list order ever changes: it asserts the row that
 // is reached is the one the option list says sits at that index.
 func (d setupKeys) walkTo(i int) setupKeys {
-	for d.m.setup.selected > 0 {
+	for d.m.setup.list.sel > 0 {
 		d = d.up()
 	}
-	for d.m.setup.selected < i {
+	for d.m.setup.list.sel < i {
 		d = d.down()
 	}
 	return d
@@ -162,9 +162,9 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			m := newSetupModel(t)
 			d := setupKeys{m: m}.type_("/setup").enter().walkTo(i)
 
-			if m.setup.selected != i {
-				t.Fatalf("arrowing to row %d landed on %d (%s)", i, m.setup.selected,
-					opts[m.setup.selected].Label)
+			if m.setup.list.sel != i {
+				t.Fatalf("arrowing to row %d landed on %d (%s)", i, m.setup.list.sel,
+					opts[m.setup.list.sel].Label)
 			}
 
 			// The row has to be the option the list says sits there, and it has to

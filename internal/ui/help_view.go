@@ -118,7 +118,7 @@ func (m *uiModel) helpRows(inner int) []string {
 
 	section("COMMANDS")
 	entry("/setup", "choose a provider")
-	entry("/models", "list the models · /model <id> — switch")
+	entry("/models", "list the models — type to filter, ctrl+f for the free ones")
 	entry("/editor", "open the code editor")
 	entry("/changes", "next change in the editor")
 	entry("/cd <path>", "change the working folder")

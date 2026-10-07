@@ -22,10 +22,10 @@ import (
 // the model so the position and the highlight survive redraws, the way every
 // other overlay's state does.
 type dirPickState struct {
-	open     bool
-	dir      string
-	entries  []dirEntry
-	selected int
+	open    bool
+	dir     string
+	entries []dirEntry
+	list    listView
 }
 
 // dirEntry is one row of the folder browser. The first row is the action that
@@ -58,7 +58,7 @@ func (m *uiModel) loadDirPick(dir string) {
 	}
 	m.dirPick.dir = dir
 	m.dirPick.entries = entries
-	m.dirPick.selected = 0
+	m.dirPick.list = listView{}
 }
 
 // readDirPick lists what the browser shows: the "use this folder" action for
@@ -104,20 +104,32 @@ func (m *uiModel) dirPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		p.open = false
 		return m, nil
 	case "up":
-		if p.selected > 0 {
-			p.selected--
+		if p.list.sel > 0 {
+			p.list.sel--
 		}
 		return m, nil
 	case "down":
-		if p.selected < len(p.entries)-1 {
-			p.selected++
+		if p.list.sel < len(p.entries)-1 {
+			p.list.sel++
 		}
 		return m, nil
+	case "pgup":
+		p.list.sel = max(p.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		p.list.sel = min(p.list.sel+m.floatPage(), len(p.entries)-1)
+		return m, nil
+	case "home":
+		p.list.sel = 0
+		return m, nil
+	case "end":
+		p.list.sel = max(len(p.entries)-1, 0)
+		return m, nil
 	case "enter":
-		if p.selected >= len(p.entries) {
+		if p.list.sel >= len(p.entries) {
 			return m, nil
 		}
-		e := p.entries[p.selected]
+		e := p.entries[p.list.sel]
 		if e.action {
 			p.open = false
 			return m, m.changeDir(e.path)
@@ -136,7 +148,7 @@ func (m *uiModel) dirPickBox() string {
 	for i, e := range m.dirPick.entries {
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
-		case i == m.dirPick.selected:
+		case i == m.dirPick.list.sel:
 			marker = " ▸ "
 		case e.action:
 			// The pick row is the answer to the question the header asks, so it
@@ -146,12 +158,12 @@ func (m *uiModel) dirPickBox() string {
 			style = styleHint
 		}
 		rows := wrapIndent(e.label, inner, marker, "     ")
-		if i != m.dirPick.selected {
+		if i != m.dirPick.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("choose a folder — enter opens, esc back"), m.dirPick.dir, entries, m.dirPick.selected)
+	return m.floatingPanel(i18n.T("choose a folder — enter opens, esc back"), m.dirPick.dir, entries, &m.dirPick.list)
 }

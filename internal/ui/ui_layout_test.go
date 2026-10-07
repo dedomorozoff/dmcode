@@ -167,7 +167,7 @@ func TestPasteTargetPerOverlay(t *testing.T) {
 	if m.palette.query != "set" {
 		t.Errorf("palette query = %q, want %q", m.palette.query, "set")
 	}
-	if m.palette.selected != 0 {
+	if m.palette.list.sel != 0 {
 		t.Error("paste into the palette must reset the cursor")
 	}
 
@@ -393,6 +393,15 @@ func TestWrapCellsBreaksOverlongWord(t *testing.T) {
 
 // The palette and the model picker list unbounded model identifiers, so their
 // frames must stay inside the terminal in both directions.
+//
+// The cursor sits on the LAST row, which is the case the box used to get wrong.
+// Trimming the tail and stopping once the cursor was included did keep the
+// cursor on screen — by making the panel as tall as the distance to it. Three
+// hundred entries in a 24-row terminal then produced a box that ran off the
+// bottom while lipgloss.Place pushed its own title off the top, and the row the
+// user was looking for was somewhere in the middle of the overflow. A cursor near
+// the top passes either way, so the fixture that finds this has to be near the
+// bottom.
 func TestOverlayPanelsFitTerminal(t *testing.T) {
 	ids := []string{
 		"gpt-4o-mini", "openai/gpt-oss-120b",
@@ -402,8 +411,8 @@ func TestOverlayPanelsFitTerminal(t *testing.T) {
 	}
 	for _, size := range [][2]int{{200, 60}, {120, 40}, {90, 24}, {70, 20}, {40, 12}} {
 		m := &uiModel{prov: config.Provider{Model: "gpt-4o-mini"}, width: size[0], height: size[1]}
-		m.picker = modelPicker{open: true, Models: ids, selected: 3}
-		m.palette = paletteState{open: true, query: "модел"}
+		m.picker = modelPicker{open: true, Models: ids, list: listView{sel: len(ids) - 1}}
+		m.palette = paletteState{open: true, query: "модел", list: listView{sel: 30}}
 
 		for name, box := range map[string]string{"picker": m.modelPickerBox(), "palette": m.paletteBox()} {
 			if w := lipgloss.Width(box); w > m.width {

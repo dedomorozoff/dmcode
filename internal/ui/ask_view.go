@@ -262,7 +262,7 @@ func (m *uiModel) handleAskTick() tea.Cmd {
 		chosen = m.ask.req.Options[0].Label
 	}
 	m.history = append(m.history, line{kindSys,
-		fmt.Sprintf("⏱ %s: %s", i18n.T("no answer in time, chose"), chosen)})
+		fmt.Sprintf("%s: %s", i18n.T("no answer in time, chose"), chosen)})
 	m.historyDirty = true
 	m.ask = askState{}
 	return nil
@@ -337,11 +337,11 @@ func (m *uiModel) askBox() string {
 		hints = i18n.T("enter — send · esc — back")
 	}
 	if left := m.askRemaining(); left > 0 {
-		hints = fmt.Sprintf("%s · ⏱ %s", hints, formatWait(left))
+		hints = fmt.Sprintf("%s · %s", hints, formatWait(left))
 	}
 	title := header
 	if q := strings.TrimSpace(m.ask.req.Question); q != "" {
 		title += "\n" + q
 	}
-	return m.floatingPanel(title, hints, entries, m.ask.cursor)
+	return m.floatingPanel(title, hints, entries, &listView{sel: m.ask.cursor})
 }
