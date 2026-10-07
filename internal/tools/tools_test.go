@@ -317,3 +317,181 @@ func TestListDirDotfiles(t *testing.T) {
 		t.Fatalf(".git directory should be ignored: %q", res.Entries)
 	}
 }
+
+// TestMoveFileMovesAndCounts: a move records the source's removal and the
+// destination's appearance in the tally, so the CHANGES panel sees both halves.
+func TestMoveFileMovesAndCounts(t *testing.T) {
+	ResetChanges()
+	defer ResetChanges()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.txt")
+	dst := filepath.Join(dir, "sub", "b.txt")
+	if err := os.WriteFile(src, []byte("line one\nline two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := moveFile(nil, moveFileArgs{Source: src, Destination: dst})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Errorf("the source still exists after the move: %v", err)
+	}
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("the destination was not created: %v", err)
+	}
+	if string(data) != "line one\nline two\n" {
+		t.Errorf("destination content = %q", data)
+	}
+	_ = res
+
+	found := map[string]*FileChange{}
+	for _, f := range ChangedFilesDetailed() {
+		found[f.Path] = &f
+	}
+	if got := found[dst]; got == nil || got.Added != 2 {
+		t.Errorf("destination in tally = %+v, want Added 2", got)
+	}
+	if got := found[src]; got == nil || got.Removed != 2 {
+		t.Errorf("source in tally = %+v, want Removed 2", got)
+	}
+}
+
+// TestMoveFileRefusesToOverwrite: a move that would replace an existing file
+// destroys content nobody read; the tool refuses and changes nothing.
+func TestMoveFileRefusesToOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.txt")
+	dst := filepath.Join(dir, "b.txt")
+	if err := os.WriteFile(src, []byte("moving"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dst, []byte("staying"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := moveFile(nil, moveFileArgs{Source: src, Destination: dst}); err == nil {
+		t.Fatal("move over an existing file was allowed")
+	}
+	if b, _ := os.ReadFile(dst); string(b) != "staying" {
+		t.Errorf("the destination was overwritten: %q", b)
+	}
+	if _, err := os.Stat(src); err != nil {
+		t.Errorf("the source was disturbed by a refused move: %v", err)
+	}
+}
+
+// TestDeleteFileRemovesAndCounts: a delete records the whole content against
+// the session baseline, not a touched flag.
+func TestDeleteFileRemovesAndCounts(t *testing.T) {
+	ResetChanges()
+	defer ResetChanges()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := deleteFile(nil, deleteFileArgs{Path: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatalf("delete_file left the file: %v", err)
+	}
+
+	for _, f := range ChangedFilesDetailed() {
+		if f.Path == p && !(f.Removed == 3 && !f.Touched) {
+			t.Errorf("deleted file in tally = %+v, want Removed 3, measured", f)
+		}
+	}
+}
+
+// TestDeleteFileRefusesDirectories: deleting a tree through a tool that says
+// "one file" is how a user loses a folder in a single call.
+func TestDeleteFileRefusesDirectories(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := deleteFile(nil, deleteFileArgs{Path: dir}); err == nil {
+		t.Fatal("delete_file accepted a directory")
+	}
+}
+
+// TestEditFileBatchAppliesSeveralEditsInOrder: five changes to one file land in
+// one call and one write, and later edits can anchor on text earlier ones
+// introduced.
+func TestEditFileBatchAppliesSeveralEditsInOrder(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("alpha\nbeta\ngamma\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := editFile(nil, editFileArgs{Path: p, Edits: []editItem{
+		{OldString: "alpha", NewString: "one"},
+		{OldString: "beta", NewString: "two"},
+		{OldString: "gamma", NewString: "one"}, // replaces the first edit's text: order matters
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Replacements != 3 {
+		t.Errorf("Replacements = %d, want 3", res.Replacements)
+	}
+	data, _ := os.ReadFile(p)
+	if string(data) != "one\ntwo\none\n" {
+		t.Errorf("batch content = %q, want %q", data, "one\ntwo\none\n")
+	}
+	if !strings.Contains(res.Diff, "alpha") && !strings.Contains(res.Diff, "gamma") {
+		t.Errorf("the diff does not describe the edits: %q", res.Diff)
+	}
+}
+
+// TestEditFileBatchIsAllOrNothing: an edit that cannot match aborts the whole
+// call before anything is written, so a half-applied batch cannot leave the
+// file in a state no diff describes.
+func TestEditFileBatchIsAllOrNothing(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("alpha\nbeta\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := editFile(nil, editFileArgs{Path: p, Edits: []editItem{
+		{OldString: "alpha", NewString: "one"},
+		{OldString: "no such text", NewString: "two"},
+	}})
+	if err == nil {
+		t.Fatal("a batch with a missing edit returned no error")
+	}
+	data, _ := os.ReadFile(p)
+	if string(data) != "alpha\nbeta\n" {
+		t.Errorf("a failed batch changed the file: %q", data)
+	}
+}
+
+// TestEditFileBatchSingleEditMatchesTheSingleForm: the batch path must accept a
+// one-item list and behave exactly like the old_string form, including the
+// whitespace-tolerant fallback.
+func TestEditFileBatchSingleEditMatchesTheSingleForm(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.go")
+	if err := os.WriteFile(p, []byte("func main() {\n\tdoThing()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := editFile(nil, editFileArgs{Path: p, Edits: []editItem{
+		{OldString: "    doThing()", NewString: "doOther()"}, // spaces vs tabs: fuzzy path
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Replacements != 1 {
+		t.Errorf("Replacements = %d, want 1", res.Replacements)
+	}
+	data, _ := os.ReadFile(p)
+	if string(data) != "func main() {\n\tdoOther()\n}\n" {
+		t.Errorf("batch content = %q", data)
+	}
+}

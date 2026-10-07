@@ -2,6 +2,9 @@ package ui
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
+	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
 // newSessionModel returns a model with a real session store in a temp
@@ -373,5 +377,64 @@ func TestEscapeLeavesTheDeleteConfirmation(t *testing.T) {
 	}
 	if len(m.sessions.Summaries()) != 1 {
 		t.Error("escape deleted the session")
+	}
+}
+
+// TestRewindReportsShellChangedFilesNotRestored is the second half of the
+// rewind contract: ctrl+z restores what the tools have before-content for, and
+// says loudly about what a shell command changed that nobody can take back. The
+// transcript must carry that line, or a rewind that left a sed -i result in the
+// tree would read as a rewind that undid it.
+func TestRewindReportsShellChangedFilesNotRestored(t *testing.T) {
+	m := newSessionModel(t)
+	p := filepath.Join(t.TempDir(), "f.txt")
+	if err := os.WriteFile(p, []byte("content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dmtools.BeginTurn()
+	dmtools.RecordShellChange(p)
+	sendTurn(t, m, "правка через шелл")
+
+	m.rewind()
+
+	var saw bool
+	for _, l := range m.history {
+		if strings.Contains(l.text, "not restored") && strings.Contains(l.text, "f.txt") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("the rewind did not report the unrestorable file, history:\n%+v", m.history)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "content\n" {
+		t.Errorf("a shell-touched file was modified by the rewind: %q", b)
+	}
+}
+
+// TestShortListCapsAndCountsTheOverflow: a rewind that restored two hundred
+// files must say "+196" rather than wrap the screen with absolute paths.
+func TestShortListCapsAndCountsTheOverflow(t *testing.T) {
+	got := shortList([]string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt"}, 3)
+	if !strings.Contains(got, "… +2") {
+		t.Errorf("shortList = %q, want the overflow counted", got)
+	}
+	if strings.Count(got, ".txt") != 3 {
+		t.Errorf("shortList = %q, want only the first three named", got)
+	}
+	if got := shortList([]string{"one.go"}, 3); got != "one.go" {
+		t.Errorf("a short list changed shape: %q", got)
+	}
+}
+
+// TestShortPathPrefersWorkspaceRelative: inside the root a path is shown as
+// the user thinks of it, not as an absolute surprise.
+func TestShortPathPrefersWorkspaceRelative(t *testing.T) {
+	dir := t.TempDir()
+	if err := dmtools.SetRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	rel := shortPath(filepath.Join(dir, "src", "main.go"))
+	if rel != filepath.Join("src", "main.go") {
+		t.Errorf("shortPath = %q, want the workspace-relative form", rel)
 	}
 }

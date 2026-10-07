@@ -53,29 +53,54 @@ func hasErr(m *uiModel, sub string) bool {
 	return false
 }
 
-// The sidebar's SESSION block reports what the agent actually changed, and stays
-// quiet until something has: a column of zeroes on a fresh session is noise, and
-// their absence is the information.
-func TestSidebarShowsTheChangeTally(t *testing.T) {
+// The sidebar's CHANGES section lists what the agent actually changed, one file
+// per row with that file's own counts, and stays quiet until something has: a
+// heading and rows over an empty list is not a list of no news, it is furniture,
+// and their absence is the information.
+func TestSidebarListsTheChangedFiles(t *testing.T) {
 	cleanTally(t)
 	m := tallyModel(t)
 
-	if s := ansi.Strip(m.sidebarView(20)); strings.Contains(s, "files:") {
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "CHANGES") {
 		t.Errorf("a fresh session already reports changes:\n%s", s)
 	}
 
 	dmtools.RecordChange("new.txt", "", "a\nb\nc\n")
-	dmtools.RecordChange("other.txt", "", "x\n")
+	dmtools.RecordChange("other.txt", "p\nq\n", "p\n")
 
-	s := ansi.Strip(m.sidebarView(20))
-	if !strings.Contains(s, "files: 2") {
-		t.Errorf("the sidebar does not report two changed files:\n%s", s)
+	s := ansi.Strip(m.sidebarView(40))
+	for _, want := range []string{"CHANGES", "new.txt", "other.txt", "+3", "+0", "-1"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the sidebar does not report %q:\n%s", want, s)
+		}
 	}
-	if !strings.Contains(s, "+4") {
-		t.Errorf("the sidebar does not report the added lines:\n%s", s)
+	// The counts belong to the file beside them, not to the session as a whole:
+	// a list where every row carries the session's total would answer "how much"
+	// twice and never "which file".
+	if !strings.Contains(s, "new.txt +3 -0") {
+		t.Errorf("new.txt does not carry its own counts:\n%s", s)
 	}
-	if !strings.Contains(s, "-0") {
-		t.Errorf("the sidebar does not report the removed lines:\n%s", s)
+	if !strings.Contains(s, "other.txt +0 -1") {
+		t.Errorf("other.txt does not carry its own counts:\n%s", s)
+	}
+}
+
+// A changed file that no longer differs — the session edited it and put it back —
+// is not a row. "+0 -0" would be a statement about work that is not in the tree.
+func TestSidebarOmitsAFileWhoseNetChangeIsZero(t *testing.T) {
+	cleanTally(t)
+	m := tallyModel(t)
+
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nB\n")
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nb\n")
+	dmtools.RecordChange("kept.txt", "", "x\n")
+
+	s := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(s, "same.txt") {
+		t.Errorf("a file changed back is still listed:\n%s", s)
+	}
+	if !strings.Contains(s, "kept.txt") {
+		t.Errorf("the file that did change is missing:\n%s", s)
 	}
 }
 
@@ -248,13 +273,19 @@ func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 		prev = c
 	}
 
-	s := ansi.Strip(tallyModel(t).sidebarView(20))
+	s := ansi.Strip(tallyModel(t).sidebarView(40))
 	// The file did not exist when the session found it, so the baseline is empty
 	// and the end state is wholly additive — two lines that were not there
 	// before. What is being checked is that it is two and not six: the two later
 	// writes each replaced a line, and counting them separately would show +6.
-	if !strings.Contains(s, "files: 1") || !strings.Contains(s, "+2") || !strings.Contains(s, "-0") {
+	if !strings.Contains(s, "f.txt +2 -0") {
 		t.Errorf("three writes to one file reported as:\n%s", s)
+	}
+	// One row, not three: a list that grew a row per write would be a history of
+	// the agent's steps rather than of its result, which is the whole property
+	// being tested.
+	if n := strings.Count(s, "f.txt"); n != 1 {
+		t.Errorf("f.txt appears %d times, want one row:\n%s", n, s)
 	}
 }
 

@@ -2,6 +2,8 @@ package ui
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"google.golang.org/adk/v2/session"
@@ -116,6 +118,20 @@ func (m *uiModel) rewind() {
 	m.input.SetValue(prompt)
 	m.input.CursorEnd()
 	m.history = append(m.history, line{kindSys, "↩ " + i18n.T("rolled back to the previous message")})
+	// The transcript cut is only half of a rewind: the turn also changed files
+	// on disk, and the tools journaled every one of them. Undo the last turn's
+	// group and say what came back — and, just as loudly, what a shell command
+	// changed that nobody can take back.
+	rep := dmtools.UndoTurn()
+	if len(rep.Restored) > 0 {
+		m.history = append(m.history, line{kindSys, "↩ " + i18n.T("files restored on disk: ") + shortList(rep.Restored, 4)})
+	}
+	for _, e := range rep.Errors {
+		m.history = append(m.history, line{kindErr, "↩ " + i18n.T("could not restore a file: ") + e})
+	}
+	if len(rep.Unrestorable) > 0 {
+		m.history = append(m.history, line{kindErr, i18n.T("changed by a shell command and not restored: ") + shortList(rep.Unrestorable, 4)})
+	}
 	m.historyDirty = true
 	m.statusText = i18n.T("the message is back in the input — edit it and send again")
 	// A picture that came back with the prompt reappears in the pending strip, and
@@ -123,6 +139,32 @@ func (m *uiModel) rewind() {
 	// viewport is re-synced, or the frame ends up taller than the terminal.
 	m.layout()
 	m.followVP()
+}
+
+// shortList renders a file list for a transcript line: relative to the
+// workspace when the file is inside it, otherwise just the base name, capped at
+// n entries with the remainder counted rather than dumped — a rewind that
+// restored two hundred files must say "+196", not wrap the screen.
+func shortList(paths []string, n int) string {
+	short := make([]string, 0, len(paths))
+	for _, p := range paths {
+		short = append(short, shortPath(p))
+	}
+	if len(short) <= n {
+		return strings.Join(short, ", ")
+	}
+	return strings.Join(short[:n], ", ") + fmt.Sprintf(" … +%d", len(short)-n)
+}
+
+// shortPath trims a workspace path to the form a user recognises: relative
+// inside the root, base name outside it.
+func shortPath(p string) string {
+	if root := dmtools.Root(); root != "" {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return rel
+		}
+	}
+	return filepath.Base(p)
 }
 
 // dropLastPrompt removes the most recent prompt from the in-memory recall list.

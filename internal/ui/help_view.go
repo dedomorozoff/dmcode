@@ -113,6 +113,10 @@ func (m *uiModel) helpRows(inner int) []string {
 	entry("esc", "stop the turn, close a dialog")
 	entry("↑/↓", "prompt history")
 	entry("pgup/pgdn", "scroll · home/end — top/bottom")
+	// ctrl+q is the only way out of the chat, and the panel used to be where it
+	// was written down. With the hotkeys gone from the panel this is the one place
+	// it is named — so it belongs here rather than nowhere.
+	entry("ctrl+q", "quit dmcode")
 	entry("f1", "this reference")
 	rows = append(rows, "")
 

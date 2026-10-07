@@ -245,21 +245,35 @@ func run(dir string, want resumeFlag) error {
 
 	mcpServers, mcpNotes := dmmcp.Load(mustGetwd())
 	mcpToolsets := dmmcp.Toolsets(mcpServers)
-	var mcpNames []string
+	// One eager pass per server, and the sidebar's MCP section is built from the
+	// same result the tool names come from: a second listing would be a second
+	// answer to "what does this server offer", and the two could disagree — a
+	// server that came up between the passes would appear in the panel and not
+	// in the agent's instrument set.
+	var mcpStates []dmmcp.ServerState
 	if len(mcpServers) > 0 {
-		names, moreNotes := dmmcp.List(ctx, mcpServers)
-		mcpNames = names
-		mcpNotes = append(mcpNotes, moreNotes...)
+		mcpStates = dmmcp.States(ctx, mcpServers)
+	}
+	for _, st := range mcpStates {
+		if st.Err != nil {
+			mcpNotes = append(mcpNotes, fmt.Sprintf("mcp: %s: %v", st.Name, st.Err))
+			continue
+		}
+		if st.CloseErr != nil {
+			mcpNotes = append(mcpNotes, fmt.Sprintf("mcp: %s: could not close the listing session: %v", st.Name, st.CloseErr))
+		}
 	}
 
 	toolNames := tools.ToolNames(agentTools)
-	toolNames = append(toolNames, mcpNames...)
+	for _, st := range mcpStates {
+		toolNames = append(toolNames, st.Tools...)
+	}
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
 	// A GGUF load is still running when the interface appears; the UI shows it
 	// loading and swaps the provider in when it answers.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpStates, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to

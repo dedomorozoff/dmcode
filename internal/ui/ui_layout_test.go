@@ -75,8 +75,11 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	}
 
 	full := m.sidebarView(200)
-	if !strings.Contains(full, "HOTKEYS") {
-		t.Error("tall sidebar should show every section")
+	// LAST TOOL is the deepest section this model has: the plan is empty and
+	// nothing has changed, so anything deeper would mean the panel is drawing a
+	// section that has nothing to say.
+	if !strings.Contains(full, "LAST TOOL") {
+		t.Errorf("tall sidebar does not reach its last section:\n%s", full)
 	}
 	if got := lipgloss.Width(full); got != sidebarBoxWidth+sidebarGap {
 		t.Errorf("sidebar is %d cells wide, want %d", got, sidebarBoxWidth+sidebarGap)
@@ -89,7 +92,7 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	if !strings.Contains(short, "…") {
 		t.Error("trimmed sidebar should mark the cut with an ellipsis")
 	}
-	if strings.Contains(short, "esc     stop turn") {
+	if strings.Contains(short, "LAST TOOL") {
 		t.Error("trimmed sidebar must not keep rendering cut-off lines")
 	}
 }

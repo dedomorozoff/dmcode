@@ -150,40 +150,62 @@ func Toolsets(servers map[string]Server) []tool.Toolset {
 	return out
 }
 
-// List connects to every server, asks it what it offers, and closes. It is
-// the eager half of Toolsets: the sidebar wants names to show, while the
-// toolsets themselves open their real connection lazily, so nothing keeps a
-// server alive merely because the session started.
+// ServerState is what one configured server turned out to be.
 //
-// It returns the tool names found and a note per server that could not be
-// asked. A server that fails here still keeps its toolset — it may be up by
-// the time a turn runs — but the user is told, because a silent gap in the
-// sidebar would read as "this server has no tools", which is a claim.
-func List(ctx context.Context, servers map[string]Server) (names []string, notes []string) {
+// The three fields are not three answers to one question, and which of them is
+// empty is the answer: Tools empty with Err set is a server that could not be
+// asked, and Tools empty with Err nil is a server that answered and offers
+// nothing. A caller that only had a tool count could not tell those apart, and
+// the difference is the whole reason for asking.
+type ServerState struct {
+	// Name is the key the server is configured under.
+	Name string
+	// Tools are the names it offered, in the order it listed them.
+	Tools []string
+	// Err is why it could not be asked, or nil.
+	Err error
+	// CloseErr is a failure to close the listing session. It does not stop the
+	// tools being reported: the answer arrived, and a session left open behind
+	// it is this function's problem rather than the server's.
+	CloseErr error
+}
+
+// States connects to every server, asks it what it offers, and closes. It is
+// the eager half of Toolsets: the sidebar wants to show what came of each
+// server, while the toolsets themselves open their real connection lazily, so
+// nothing keeps a server alive merely because the session started.
+//
+// Every configured server appears in the result, in name order, whether it
+// answered or not. A server that failed here still keeps its toolset — it may
+// be up by the time a turn runs — but the user is told, because a silent gap
+// in the sidebar would read as "this server has no tools", which is a claim.
+func States(ctx context.Context, servers map[string]Server) []ServerState {
+	out := make([]ServerState, 0, len(servers))
 	for _, name := range sortedNames(servers) {
+		st := ServerState{Name: name}
 		listCtx, cancel := context.WithTimeout(ctx, listTimeout)
 		client := mcp.NewClient(&mcp.Implementation{Name: "dmcode", Version: "1"}, nil)
 		session, err := client.Connect(listCtx, transportFor(servers[name]), nil)
 		if err != nil {
 			cancel()
-			notes = append(notes, fmt.Sprintf("mcp: %s: %v", name, err))
+			st.Err = err
+			out = append(out, st)
 			continue
 		}
 		res, err := session.ListTools(listCtx, nil)
-		closeErr := session.Close()
+		st.CloseErr = session.Close()
 		cancel()
 		if err != nil {
-			notes = append(notes, fmt.Sprintf("mcp: %s: %v", name, err))
+			st.Err = err
+			out = append(out, st)
 			continue
 		}
-		if closeErr != nil {
-			notes = append(notes, fmt.Sprintf("mcp: %s: could not close the listing session: %v", name, closeErr))
-		}
 		for _, t := range res.Tools {
-			names = append(names, t.Name)
+			st.Tools = append(st.Tools, t.Name)
 		}
+		out = append(out, st)
 	}
-	return names, notes
+	return out
 }
 
 // transportFor builds the transport one server speaks over. Both the lazy

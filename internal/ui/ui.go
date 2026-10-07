@@ -30,9 +30,11 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
 	"github.com/dedomorozoff/dmcode/internal/editor/syntax"
+	"github.com/dedomorozoff/dmcode/internal/editor/vcs"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/imgprev"
 	"github.com/dedomorozoff/dmcode/internal/llm"
+	"github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
 	"github.com/dedomorozoff/dmcode/internal/tools"
@@ -396,8 +398,22 @@ type uiModel struct {
 	// They live beside tools because they are not flattened into it: the
 	// MCP connection opens on the first turn that needs it.
 	mcpToolsets []tool.Toolset
-	prog        *tea.Program
-	toolNames   []string
+	// mcpStates is what the one eager listing made of each configured server,
+	// for the sidebar's MCP section. It is kept beside mcpToolsets rather than
+	// derived from it because a toolset's tools are only knowable by opening it:
+	// asking again here would connect to every server on the first frame.
+	mcpStates []mcp.ServerState
+	prog      *tea.Program
+	toolNames []string
+	// gitState is the repository the session is working in, as of the last
+	// refresh: which branch, and how much of the tree is dirty. It is a value
+	// rather than a *vcs.Repo because the panel only ever draws the summary, and
+	// holding a handle would invite a status walk on the frame path.
+	gitState gitState
+	// gitRepo is the open repository itself, kept for the same reason the panel
+	// keeps a snapshot rather than the answer: reading the branch means walking
+	// to .git, and the render path must not do I/O.
+	gitRepo *vcs.Repo
 	// ggufLoad is a local model loading in the background, if one is. Non-nil
 	// means the model is not answering yet: the session is fully usable, the
 	// provider in it is a name and a port, and a message sent now would go to a
@@ -526,7 +542,12 @@ type uiModel struct {
 	// which file is under the pointer", and it is the only copy: the rendered
 	// rows are strings by the time a click arrives.
 	rowRefs []codeRef
-	proxy   proxyState
+	// sideRefs is the sidebar's half of the same question: what each row of the
+	// panel stands for, index-aligned with the body sidebarView built. Only the
+	// changed-file rows carry a path; every other row holds a zero ref, which is
+	// what keeps the index aligned and makes a click on a heading do nothing.
+	sideRefs []codeRef
+	proxy    proxyState
 	// pending are the images attached to the next turn. They live on the model
 	// rather than inside the input text so a preview can be drawn and the bytes
 	// sent without re-reading the file, and so a rewind can put them back.
@@ -1043,6 +1064,14 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 			return nil
 		}
 		m.syncVP()
+		// The sidebar's own rows come first in the column test, because a click to
+		// the right of the chat panel is a click on the panel and not a click that
+		// missed: the changed-file list is there, and the transcript's index would
+		// refuse the column as out of range and silently drop it.
+		if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
+			m.jumpFrom = -1
+			return m.jumpToRef(ref)
+		}
 		i, ref, ok := m.refAtPointer(msg.X, msg.Y)
 		if !ok {
 			return nil
@@ -1347,6 +1376,13 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		// Starting in yolo would be a session the user never asked for.
 		beforeYolo: modeAct,
 	}
+	// The repository facts for the first frame, read here rather than by the
+	// refresh command: the program does not exist yet, so a message could not be
+	// delivered, and a panel that opens with no GIT section and gains one a
+	// frame later looks like a flicker rather than a measurement. Init asks again
+	// for the same reason the turn does — the counts are about now, not about
+	// start-up.
+	_, m.gitState = readGitState(wd)
 	// Resolved once here rather than at each use: the window is a property of
 	// the model, so every reader wants the same answer, and a lookup repeated
 	// at the sidebar and again in the compaction threshold is two chances for
@@ -1377,7 +1413,7 @@ func (m *uiModel) Init() tea.Cmd {
 	// The workspace exists from the first frame — the terminal, the tree and
 	// the git panel are one key (or one status-bar icon) away — but every
 	// panel starts closed: the first screen is the chat, not furniture.
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd())
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd(), m.gitStatusCmd())
 }
 
 // ggufLoadCmd waits for the background model load and reports the outcome.
@@ -1618,7 +1654,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ed.Chat = true
 			m.ed.DropPanelFocus()
 			m.ed.ClosePanels()
-			return m, nil
+			// The tree can have moved under the editor's own feet, and this is the
+			// one place a session learns that without a turn having run. The
+			// section is refreshed on the way out rather than on the way in so the
+			// panel the user comes back to is already right.
+			return m, m.gitStatusCmd()
 		case editor.ToggleEditorMsg:
 			// The status-bar icon at the head of the strip. The mode is the
 			// host's to flip — the editor only asks — and it reads the current
@@ -1827,10 +1867,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.quitCmd()
 		case "ctrl+q":
 			// The chat's quit. ctrl+c is taken by stopping a turn, so the
-			// program's exit gets its own key — one the sidebar already
-			// advertises. Inside the editor ctrl+q still means "back to the
-			// chat": the editor answers it with CloseEditorMsg before the
-			// chat ever sees the key.
+			// program's exit gets its own key — the one /help lists. Inside the
+			// editor ctrl+q still means "back to the chat": the editor answers it
+			// with CloseEditorMsg before the chat ever sees the key.
 			return m, m.quitCmd()
 		case "ctrl+p":
 			m.palette = paletteState{open: true}
@@ -2350,6 +2389,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i18n.T("in"), formatWait(msg.ev.Wait),
 		)})
 		m.historyDirty = true
+	case gitStatusMsg:
+		// A refresh that found no repository clears the section rather than
+		// leaving the previous folder's branch on screen: after a /cd out of a
+		// repository, the branch of the one left behind is a lie about where the
+		// agent is working. Zero state is what a missing repository reads as, so
+		// the same assignment covers both.
+		m.gitState = msg.state
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
@@ -2406,6 +2452,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.history = append(m.history, line{kindSys, ""})
 		m.historyDirty = true
+		// The turn is the only moment the tree can have moved: the agent has
+		// finished writing, and nothing else in a session writes files. Asking
+		// again here is what keeps the GIT counts honest without a timer walking
+		// the worktree all session — and it is asked for rather than read inline
+		// because that walk is disk I/O on the frame path.
+		extra = tea.Batch(extra, m.gitStatusCmd())
 	case errMsg:
 		m.busy = false
 		m.statusText = i18n.T("error")
@@ -4756,6 +4808,11 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
 	m.turnCount++
+	// A new journal group for this turn's file changes: the tools record every
+	// write as it happens, and a rewind takes the whole group back. The mark is
+	// laid on the loop, not in the goroutine below, so a second prompt cannot
+	// race the first one into the same group.
+	dmtools.BeginTurn()
 	// Stamped here, on the loop, rather than inside the command: the send
 	// happens the moment the key is handled, and a counter started by the
 	// goroutine would leave a gap between the prompt appearing on screen and
@@ -5110,44 +5167,81 @@ func (m *uiModel) sidebarView(height int) string {
 		sbPad   = 1 // horizontal padding
 		sbEdge  = 1 // one vertical border per side
 		sbInner = sidebarBoxWidth - 2*sbPad - 2*sbEdge
-		// maxToolRows caps the tool list's share of the panel. MCP can double
-		// the count, and a list that takes the panel over leaves the plan and
-		// the hotkeys below it trimmed away — the cap is what keeps the order
-		// of sections meaning anything on a short terminal.
-		maxToolRows = 12
 	)
 
-	// flow writes a wrapped multi-row entry: the first row starts with its
-	// marker, and every continuation row lines up under the first name rather
-	// than under the marker's left edge — a list that resumes one column to
-	// the left of where it started reads as broken, which is what the single
-	// space used to do.
-	flow := func(style lipgloss.Style, marker, text string) []string {
-		indent := strings.Repeat(" ", ansi.StringWidth(marker))
-		var out []string
-		for _, r := range wrapIndent(text, sbInner, marker, indent) {
-			out = append(out, style.Render(r))
-		}
-		return out
-	}
-
-	// build renders the whole body. hotkeys is the one collapsible part: the
-	// keys are listed by /help, so they are the first thing to go when the
-	// terminal is too short for everything.
-	build := func(hotkeys bool) string {
+	// build renders the whole body, and with it what each row stands for —
+	// the sidebar's answer to "which file is the row under the pointer", the
+	// same question rowRefs answers for the transcript. The index is filled by
+	// the writers below rather than derived from the drawn rows, because by the
+	// time a click arrives a row is a styled, possibly-wrapped string and the
+	// path it named survives only as characters in it.
+	//
+	// It is returned beside the body rather than kept in a field, because a field
+	// would survive the next build and describe a body that is no longer on
+	// screen — the same file at the wrong row, which is the failure an index is
+	// supposed to prevent.
+	build := func() (string, []codeRef) {
 		var b strings.Builder
+		var refs []codeRef
+		// marked is the length of refs as of the last separator. A separator is
+		// only worth a row if the section above it printed something, and that is
+		// what this answers.
+		marked := 0
+		// Every row records a ref, including the ones that name nothing: the
+		// index is positional, so a skipped row would shift every ref below it
+		// by one and a click would open the wrong file. A zero ref is what
+		// says "this row is not a jump target" — the same rule the transcript's
+		// own index follows.
 		row := func(style lipgloss.Style, text string) {
 			b.WriteString(style.Render(text) + "\n")
+			refs = append(refs, codeRef{})
 		}
-		// value writes an indented entry, wrapping it under its own marker so a
-		// long model or tool name stays readable instead of being cut mid-word. The
-		// text is cut to the room the marker leaves, so the ellipsis lands on the
-		// last row instead of being stranded on a continuation of its own.
-		value := func(style lipgloss.Style, marker, text string) {
+		// blank is a section separator, and it is a row like any other: it takes
+		// up a line on the panel, so the index has to have an entry for it or
+		// every ref below it would sit one row too high and a click would open
+		// the file above the one the user pointed at. This was the one row writer
+		// that did not go through row(), and it is exactly the kind of thing
+		// that reads correctly and is wrong — hence blank() rather than another
+		// bare WriteString.
+		//
+		// It is also the one writer that may write nothing at all. A separator
+		// between a section that drew rows and one that drew none is a blank line
+		// for nothing, and a panel with five of those is a panel whose sections
+		// are floating apart rather than a panel that is readable. The hotkeys
+		// used to hide this — they filled the bottom of the panel, so nobody was
+		// looking at the gaps above them — which is the usual way a layout
+		// survives long past the thing that was covering for it.
+		blank := func() {
+			if len(refs) == marked {
+				return
+			}
+			b.WriteString("\n")
+			refs = append(refs, codeRef{})
+			marked = len(refs)
+		}
+		// valueRef writes an indented entry and records what its rows stand for,
+		// appended to sideRefs in step with them. Wrapping is under the entry's own
+		// marker so a long name stays readable instead of being cut mid-word, and
+		// the text is cut to the room the marker leaves so the ellipsis lands on
+		// the last row instead of being stranded on a continuation of its own.
+		//
+		// The ref is written for every row the entry produces, including a wrapped
+		// continuation: they are the same file, and the index is positional, so a
+		// row left out would shift everything below it by one.
+		valueRef := func(style lipgloss.Style, marker, text string, ref codeRef) {
 			indent := strings.Repeat(" ", ansi.StringWidth(marker))
 			for _, r := range wrapIndent(truncate(text, sbInner-ansi.StringWidth(marker)), sbInner, marker, indent) {
 				b.WriteString(style.Render(r) + "\n")
+				refs = append(refs, ref)
 			}
+		}
+		// value is valueRef for the rows that name no file — a model, a branch, a
+		// plan step. It is kept as its own function so those call sites cannot
+		// pass a ref by accident, and so the distinction between "a row that
+		// stands for nothing" and "a row that was forgotten" stays visible in the
+		// call.
+		value := func(style lipgloss.Style, marker, text string) {
+			valueRef(style, marker, text, codeRef{})
 		}
 
 		// The art leads, at half the size it wears at startup: the same
@@ -5168,7 +5262,7 @@ func (m *uiModel) sidebarView(height int) string {
 		}
 		v = truncate(v, sbInner)
 		row(styleVersion, strings.Repeat(" ", sbInner-ansi.StringWidth(v))+v)
-		b.WriteString("\n")
+		blank()
 
 		row(styleSidebarLabel, i18n.T("MODEL"))
 		value(styleSidebarValue, " ", m.prov.Model)
@@ -5197,7 +5291,7 @@ func (m *uiModel) sidebarView(height int) string {
 			// sections and a session with one gets them both. Writing it
 			// unconditionally on either side leaves a doubled blank in the case
 			// that is on screen far more often.
-			b.WriteString("\n")
+			blank()
 			tag := proxyTag(s.Effective())
 			// The type rides in the heading, which has the room for it, leaving the
 			// value row the full width for a host and a port. It is not decoration:
@@ -5228,7 +5322,7 @@ func (m *uiModel) sidebarView(height int) string {
 		// And one after it, unconditionally, so turning a proxy on adds its section
 		// without shifting every section below it down a row — the panel would then
 		// reflow under a user who is reading it.
-		b.WriteString("\n")
+		blank()
 
 		row(styleSidebarLabel, i18n.T("SESSION"))
 		row(styleHint, " "+truncate(m.sessionID, sbInner-1))
@@ -5242,16 +5336,7 @@ func (m *uiModel) sidebarView(height int) string {
 			row(styleHint, fmt.Sprintf(i18n.T(" time: %s (%s %s)"),
 				formatWait(m.total.Elapsed), i18n.T("average"), formatWait(m.total.Average(m.total.Turns))))
 		}
-		// What the agent actually changed. The counts come from the tools, which are
-		// the only place that knows a file's before and after, so this is the real
-		// diff of the session rather than a sum of the write calls that produced it.
-		// It stays hidden until something has changed: a column of zeroes on a fresh
-		// session is noise, and its absence is the information.
-		if cs := dmtools.Changes(); cs.Files > 0 {
-			row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
-			row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
-		}
-		b.WriteString("\n")
+		blank()
 
 		// The context meter sits with the session counters, because it answers
 		// the same question from the other side: not "how much has happened"
@@ -5272,72 +5357,82 @@ func (m *uiModel) sidebarView(height int) string {
 				row(styleHint, " "+truncate(i18n.T("compressed — older turns summarized"), sbInner-1))
 			}
 		}
-		b.WriteString("\n")
+		blank()
 
 		row(styleSidebarLabel, i18n.T("FOLDER"))
 		// The full path, trimmed from the left: a Windows path is far wider than the
 		// panel, and the tail is the part that identifies the project.
 		value(styleSidebarValue, " ", shortenPath(m.workDir, sbInner-1))
-		b.WriteString("\n")
+		blank()
+
+		// GIT goes with the folder rather than with the session counters: both name
+		// the place the agent is working, and a repository is a property of a
+		// directory, not of how long the conversation has been running.
+		m.gitSidebar(sbInner, row, value)
+		blank()
 
 		if m.lastTool != "" {
 			row(styleSidebarLabel, i18n.T("LAST TOOL"))
 			value(styleTool, " ⏺ ", m.lastTool)
-			b.WriteString("\n")
+			blank()
 		}
 
-		row(styleSidebarLabel, i18n.T("TOOLS"))
-		rows := flow(styleHint, " ", strings.Join(m.activeToolNames(), ", "))
-		if len(rows) > maxToolRows {
-			rows = append(rows[:maxToolRows], " …")
-		}
-		for _, r := range rows {
-			b.WriteString(r + "\n")
-		}
-		b.WriteString("\n")
+		// What the agent actually changed, one file per row. It used to be a count
+		// under SESSION and a list of the agent's instrument names under TOOLS; the
+		// list is what a user reads to find out what happened, and the count could
+		// only tell them that something did.
+		m.changesSidebar(sbInner, row, valueRef)
+		blank()
 
-		// The plan sits between the tools and the hotkeys: it is state the turn is
-		// producing, where the tool list is fixed and the hotkeys never change.
+		m.mcpSidebar(sbInner, row)
+		blank()
+
+		// The plan is the last section, and the one thing here that is state the
+		// turn is producing rather than a record of what already is — which is why
+		// it is what a short terminal is most likely to lose, and why nothing below
+		// it has been waiting to be dropped first.
 		m.planSidebar(row, value)
-		b.WriteString("\n")
-
-		if hotkeys {
-			row(styleSidebarLabel, i18n.T("HOTKEYS"))
-			row(styleHint, i18n.T(" f1     help"))
-			row(styleHint, i18n.T(" ctrl+e  editor"))
-			row(styleHint, i18n.T(" ctrl+p  commands"))
-			row(styleHint, i18n.T(" ctrl+b  project panel"))
-			row(styleHint, i18n.T(" ctrl+y  copy reply"))
-			row(styleHint, i18n.T(" ctrl+z  undo last message"))
-			row(styleHint, i18n.T(" ctrl+q  quit"))
-			row(styleHint, i18n.T(" alt+t  terminal"))
-			row(styleHint, i18n.T(" tab     plan/act"))
-			row(styleHint, i18n.T(" shift+tab yolo"))
-			row(styleHint, i18n.T(" esc     stop turn"))
-			row(styleHint, i18n.T(" pgup/dn scroll"))
-		}
 
 		// Measuring at sbInner wraps and pads every row to exactly the width the
 		// framed box will have available, so the split below counts real rows.
-		return lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+		//
+		// The index is cut to the rendered body's own length. TrimRight above
+		// drops the trailing newlines, and those trailing blanks are rows the
+		// writers counted, so an index longer than the body would have the panel
+		// answering about rows that are not on screen.
+		rendered := lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+		return rendered, refs[:min(len(refs), strings.Count(rendered, "\n")+1)]
 	}
 
 	if height <= 0 {
-		return styleSidebar.Width(sidebarBoxWidth).Render(build(true))
+		body, refs := build()
+		m.sideRefs = refs
+		return styleSidebar.Width(sidebarBoxWidth).Render(body)
 	}
 
+	// There is nothing to drop and then trim any more. The hotkeys were the one
+	// collapsible part — the keys are listed by /help, so a copy of them on the
+	// panel was the least useful of its rows — and with them gone the panel either
+	// fits or is cut, in which case the cut is marked and nothing pretends
+	// otherwise.
 	budget := max(height-2*sbEdge, 1)
-	lines := strings.Split(build(true), "\n")
+	body, refs := build()
+	lines := strings.Split(body, "\n")
+	trimmed := false
 	if len(lines) > budget {
-		// The full body does not fit. The hotkeys go first — they are the most
-		// replaceable rows on the panel — and only what still overflows after
-		// that is trimmed.
-		lines = strings.Split(build(false), "\n")
-		if len(lines) > budget {
-			lines = lines[:budget]
-			// Mark the cut so a trimmed panel is not read as a complete one.
-			lines[budget-1] = styleHint.Render("…")
-		}
+		lines = lines[:budget]
+		trimmed = true
+		// Mark the cut so a trimmed panel is not read as a complete one.
+		lines[budget-1] = styleHint.Render("…")
+	}
+	// The index describes the rows that are on screen, not the rows that were
+	// built. A body cut to the budget lost its tail, so the index is cut to match
+	// — and the row the ellipsis replaced is a marker rather than a file, so that
+	// entry is cleared too. Without this a click on the ellipsis opens whichever
+	// file the row before it named.
+	m.sideRefs = refs[:min(len(refs), len(lines))]
+	if trimmed && len(m.sideRefs) > 0 {
+		m.sideRefs[len(m.sideRefs)-1] = codeRef{}
 	}
 
 	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
@@ -6253,7 +6348,7 @@ func (r Resume) sessionToOpen() string {
 	return r.ID
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -6264,6 +6359,7 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	m.pool = pool
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets
+	m.mcpStates = mcpStates
 	m.askTimeout = config.AskTimeout()
 	// A local model that is still loading is handed over here rather than waited
 	// for in main: the port and the model's name are already known, so the
