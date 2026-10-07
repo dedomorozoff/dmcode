@@ -152,6 +152,7 @@ var catalog = map[Lang]map[string]string{
 		// Sidebar.
 		"MODEL":                  "МОДЕЛЬ",
 		"SESSION":                "СЕССИЯ",
+		"PROXY":                  "ПРОКСИ",
 		"FOLDER":                 "ПАПКА",
 		"LAST TOOL":              "ПОСЛЕДНИЙ ТУЛ",
 		"TOOLS":                  "ИНСТРУМЕНТЫ",

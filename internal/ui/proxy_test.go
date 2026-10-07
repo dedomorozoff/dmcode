@@ -82,6 +82,19 @@ func TestSidebarShowsTheChangeTally(t *testing.T) {
 // A session that writes the same line over and over must not accumulate a number
 // per write: the tally is the difference between how the session found the file
 // and how it left it.
+// sidebarRows returns the panel's rows with the box stripped, so a test can ask
+// whether a row is blank. The border characters are the panel's own content as
+// far as the frame is concerned, and TrimSpace leaves them, so a row that is
+// empty apart from its borders is indistinguishable from a full one.
+func sidebarRows(t *testing.T, m *uiModel) []string {
+	t.Helper()
+	out := []string{}
+	for _, l := range strings.Split(ansi.Strip(m.sidebarView(40)), "\n") {
+		out = append(out, strings.Trim(strings.TrimSpace(l), "│"))
+	}
+	return out
+}
+
 // A proxy in effect is on the panel, because the panel is where the model and the
 // wire are both already reported — and a user whose requests fail behind one has
 // no other way to see that they are going through it at all.
@@ -98,7 +111,10 @@ func TestSidebarSaysWhenTheConnectionGoesThroughAProxy(t *testing.T) {
 	// survived the panel's width. The long-host case is its own test below.
 	m.applyProxy("socks5://localhost:21001")
 	s := ansi.Strip(m.sidebarView(40))
-	if !strings.Contains(s, "socks5 localhost:21001") {
+	if !strings.Contains(s, "PROXY") {
+		t.Errorf("the panel shows a proxy without naming it:\n%s", s)
+	}
+	if !strings.Contains(s, "localhost:21001") {
 		t.Errorf("the panel does not report the proxy:\n%s", s)
 	}
 
@@ -122,6 +138,12 @@ func TestSidebarProxyRowHasNoCredentialsAndKeepsThePort(t *testing.T) {
 	if strings.Contains(s, "dedo") || strings.Contains(s, "dedodedo") {
 		t.Errorf("the panel prints the proxy login:\n%s", s)
 	}
+	// The type is in the heading rather than the value: a left-trim on a long host
+	// eats the first word, and the type is what tells an http proxy from a socks5
+	// one — which decides whether a failure is a DNS question or a port one.
+	if !strings.Contains(s, "PROXY socks5") {
+		t.Errorf("the proxy heading does not name the type:\n%s", s)
+	}
 	if !strings.Contains(s, "vpn.example.com:21001") {
 		t.Errorf("the proxy row lost the host and port:\n%s", s)
 	}
@@ -137,6 +159,62 @@ func TestSidebarProxyRowHasNoCredentialsAndKeepsThePort(t *testing.T) {
 		if w := ansi.StringWidth(line); w != boxW {
 			t.Errorf("a row is %d wide, the box is %d:\n%q", w, boxW, line)
 		}
+	}
+}
+
+// The section is inserted between MODEL and SESSION, so it must be separated the
+// same way the sections around it are — one blank line, and one only. A blank
+// written on the wrong side of a conditional block doubles in the case that is on
+// screen far more often (no proxy), which reads as a gap in the panel rather than
+// as spacing.
+func TestSidebarProxySectionIsSpacedLikeTheOthers(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	rows := sidebarRows(t, m)
+	blankBefore := func(label string) int {
+		for i, l := range rows {
+			if strings.Contains(l, label) {
+				return i
+			}
+		}
+		t.Fatalf("no %s row on the panel", label)
+		return -1
+	}
+	// The invariant is one blank row before a section label — not a fixed distance,
+	// since a section's length is its own business (MODEL has a value and a "via",
+	// PROXY has a host and maybe a bypass list). A blank written on the wrong side
+	// of a conditional block shows up here as a doubled gap in the case that is on
+	// screen far more often, which is the one with no proxy.
+	spaced := func(label string, single bool) {
+		i := blankBefore(label)
+		if i < 2 {
+			return
+		}
+		if strings.TrimSpace(rows[i-1]) != "" {
+			t.Errorf("no blank row before %s:\n%s", label, strings.Join(rows, "\n"))
+		}
+		if single && strings.TrimSpace(rows[i-2]) == "" {
+			t.Errorf("a doubled blank row before %s:\n%s", label, strings.Join(rows, "\n"))
+		}
+	}
+	// FOLDER is checked for the blank but not for the doubling: the CONTEXT block
+	// above it writes its separator even when there is no context meter to draw, so
+	// it has always been reached through two blanks. That is not this section's
+	// spacing to fix, and asserting against it here would be a test failing on a
+	// pre-existing quirk rather than on the proxy row.
+	for _, l := range []string{"MODEL", "SESSION", "FOLDER"} {
+		spaced(l, l != "FOLDER")
+	}
+
+	// With a proxy the same spacing has to hold around the new section, or it is
+	// the only block on the panel that does not look like the others.
+	m.applyProxy("socks5://localhost:21001")
+	m.applyProxy("no localhost")
+	rows = sidebarRows(t, m)
+	for _, l := range []string{"MODEL", "PROXY", "SESSION"} {
+		spaced(l, true)
 	}
 }
 

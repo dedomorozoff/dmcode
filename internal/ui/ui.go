@@ -4965,27 +4965,44 @@ func (m *uiModel) sidebarView(height int) string {
 		if m.prov.Label != "" {
 			row(styleHint, truncate("via "+m.prov.Label, sbInner))
 		}
-		// The proxy rides with the model, because it is the other half of the same
-		// fact: which provider answers, and over what wire. It is here rather than
-		// in its own section because a separate label would cost a row and a
-		// heading to say the same thing — and the panel's rows are the scarce
-		// resource.
+
+		// The proxy is its own section, like MODEL and FOLDER, rather than another
+		// line under MODEL. The word has to be on screen: "socks5
+		// vpn.example.com:21001" on its own is a string, and the reader has no way
+		// to know it is a proxy rather than a provider or a leftover fragment —
+		// which is the whole reason to show it at all. It could not simply be
+		// prefixed to the address either: the panel is 31 columns, so "proxy " in
+		// front of it pushes the port off the end, and the row loses the half a
+		// reader came for.
 		//
-		// Only when one is set. "No proxy" on every session is the case that has
-		// no news, and printing it would spend a row proving that nothing is
-		// wrong with the connection.
-		//
-		// The password is redacted like everywhere else, and the address is cut
-		// from the left: the host and port are the part that identifies a proxy,
-		// and a panel is too narrow for the credentials as well.
-		// Read once: two calls could straddle a /proxy change and print a host
+		// Read once: two calls could straddle a /proxy change and print an address
 		// from one setting next to a bypass list from the next.
+		//
+		// The section exists only when a proxy is set. "PROXY: none" on every
+		// direct session would spend a heading and a row proving that nothing is
+		// wrong with the connection.
 		if s := config.CurrentProxy(); s.Active {
+			// The separator goes before the section rather than after MODEL, so
+			// that a session with no proxy gets one blank line between its
+			// sections and a session with one gets them both. Writing it
+			// unconditionally on either side leaves a doubled blank in the case
+			// that is on screen far more often.
+			b.WriteString("\n")
+			tag := proxyTag(s.Effective())
+			// The type rides in the heading, which has the room for it, leaving the
+			// value row the full width for a host and a port. It is not decoration:
+			// telling an http proxy from a socks5 one at a glance is what decides
+			// whether a connection problem is a DNS question or a port one — and in
+			// the value row that word is the first thing a left-trim would eat.
+			kind := ""
+			if i := strings.IndexByte(tag, ' '); i > 0 {
+				kind, tag = tag[:i], tag[i+1:]
+			}
+			row(styleSidebarLabel, truncate(i18n.T("PROXY")+" "+kind, sbInner))
 			// Trimmed from the left, like a path and for the same reason: the tail
 			// is the part that identifies a proxy, and cutting the right would leave
-			// "socks5://vpn.example.com:…" — a row that names the host and hides the
-			// port, which is the half a reader came for.
-			row(styleHint, trimLeft(" "+proxyTag(s.Effective()), sbInner))
+			// "vpn.example.com:…" — naming the host and hiding the port.
+			row(styleHint, trimLeft(" "+tag, sbInner))
 			// The bypass list only when it has entries: it says nothing about the
 			// proxy above it, and an empty one would print a label over an absence.
 			//
@@ -4998,6 +5015,9 @@ func (m *uiModel) sidebarView(height int) string {
 				row(styleHint, truncate(" "+i18n.T("bypass: ")+s.NoProxy, sbInner))
 			}
 		}
+		// And one after it, unconditionally, so turning a proxy on adds its section
+		// without shifting every section below it down a row — the panel would then
+		// reflow under a user who is reading it.
 		b.WriteString("\n")
 
 		row(styleSidebarLabel, i18n.T("SESSION"))
