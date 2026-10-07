@@ -82,6 +82,82 @@ func TestSidebarShowsTheChangeTally(t *testing.T) {
 // A session that writes the same line over and over must not accumulate a number
 // per write: the tally is the difference between how the session found the file
 // and how it left it.
+// A proxy in effect is on the panel, because the panel is where the model and the
+// wire are both already reported — and a user whose requests fail behind one has
+// no other way to see that they are going through it at all.
+func TestSidebarSaysWhenTheConnectionGoesThroughAProxy(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "socks5") {
+		t.Errorf("a direct connection is shown as proxied:\n%s", s)
+	}
+
+	// A short host, so the assertion is on the whole row rather than on what
+	// survived the panel's width. The long-host case is its own test below.
+	m.applyProxy("socks5://localhost:21001")
+	s := ansi.Strip(m.sidebarView(40))
+	if !strings.Contains(s, "socks5 localhost:21001") {
+		t.Errorf("the panel does not report the proxy:\n%s", s)
+	}
+
+	m.applyProxy("off")
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "socks5") {
+		t.Errorf("the proxy outlived the setting that turned it off:\n%s", s)
+	}
+}
+
+// The panel is 31 columns. A masked login does not fit alongside a host, so the
+// tag drops the credentials outright — and what is left must still end in the
+// port, since that is the half a user is there to read.
+func TestSidebarProxyRowHasNoCredentialsAndKeepsThePort(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	m.applyProxy("socks5://dedo:dedodedo@vpn.example.com:21001")
+
+	s := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(s, "dedo") || strings.Contains(s, "dedodedo") {
+		t.Errorf("the panel prints the proxy login:\n%s", s)
+	}
+	if !strings.Contains(s, "vpn.example.com:21001") {
+		t.Errorf("the proxy row lost the host and port:\n%s", s)
+	}
+	// The row has to fit the box it is drawn in, or the panel stops lining up
+	// with the rest of the frame. The width to compare against is measured off
+	// the frame's own border row rather than taken from sidebarBoxWidth: the
+	// rendered box carries a column of margin that the constant does not count,
+	// and a test that disagrees with the constant about the box's width is a test
+	// that fails on the constant rather than on a row being too long.
+	rows := strings.Split(s, "\n")
+	boxW := ansi.StringWidth(rows[0])
+	for _, line := range rows {
+		if w := ansi.StringWidth(line); w != boxW {
+			t.Errorf("a row is %d wide, the box is %d:\n%q", w, boxW, line)
+		}
+	}
+}
+
+// A bypass list changes nothing about the proxy, so it earns its row only when it
+// has something in it — an empty list would be a label over an absence.
+func TestSidebarShowsTheBypassListOnlyWhenItHasEntries(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	m.applyProxy("socks5://vpn.example.com:21001")
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "bypass") {
+		t.Errorf("an empty bypass list is printed:\n%s", s)
+	}
+
+	m.applyProxy("no localhost")
+	if s := ansi.Strip(m.sidebarView(40)); !strings.Contains(s, "bypass: localhost") {
+		t.Errorf("a set bypass list is not on the panel:\n%s", s)
+	}
+}
+
 func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 	cleanTally(t)
 	// Each write reports what was on disk before it, exactly as writeFileAtomic

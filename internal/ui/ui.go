@@ -723,14 +723,26 @@ type ggufEntry struct {
 	dir   bool
 }
 
-// proxyState drives the /proxy dialog: a short menu of actions, then a text
-// stage for whichever one needs a value. It exists because "set one with:
-// /proxy <url>" asked the user to remember a command syntax on top of the
-// proxy address itself, and to know in advance whether the address worked.
+// proxyState drives the /proxy dialog: a short menu of actions, then a form for
+// whichever one needs a value. It exists because "set one with: /proxy <url>"
+// asked the user to remember a command syntax on top of the proxy address
+// itself, and to know in advance whether the address worked.
 const (
 	proxyPick = iota
 	proxyURL
 	proxyNo
+)
+
+// The address form's fields, in the order they are shown and tabbed through.
+// The type comes first because it decides the port's default, and the password
+// last because it is the only field whose value must never reach the screen.
+const (
+	pfScheme = iota
+	pfHost
+	pfPort
+	pfUser
+	pfPass
+	pfCount
 )
 
 type proxyState struct {
@@ -738,10 +750,88 @@ type proxyState struct {
 	stage    int
 	selected int
 	buf      string
+	// fields holds the address form's values, one string per pf* index. It is a
+	// slice rather than five named fields so that typing, backspace, paste and
+	// rendering can all be written once against "the focused field" instead of
+	// five times against five fields — the repetition is where a form like this
+	// rots, because the fifth copy is the one nobody edits.
+	fields [pfCount]string
+	// focus is which field the form is on.
+	focus int
+}
+
+// field returns a pointer to the focused field, so a handler can append to it
+// without knowing which field that is.
+func (s *proxyState) field() *string {
+	if s.focus < 0 || s.focus >= pfCount {
+		return nil
+	}
+	return &s.fields[s.focus]
+}
+
+// spec reads the form out as the parts it describes.
+//
+// An unrecognised scheme is passed through rather than replaced with http. The
+// type field is stepped through Schemes and so cannot hold anything else, but
+// substituting a scheme here would turn a value Validate is about to reject into
+// a valid-looking one — the rejection and the fix would be in different places.
+func (s *proxyState) spec() config.Spec {
+	scheme := strings.ToLower(strings.TrimSpace(s.fields[pfScheme]))
+	if !slices.Contains(config.Schemes, scheme) {
+		return config.Spec{Scheme: scheme}
+	}
+	return config.Spec{
+		Scheme: scheme,
+		Host:   strings.TrimSpace(s.fields[pfHost]),
+		Port:   strings.TrimSpace(s.fields[pfPort]),
+		User:   strings.TrimSpace(s.fields[pfUser]),
+		Pass:   s.fields[pfPass],
+	}
+}
+
+// setSpec fills the form from a configured address, so reopening the dialog shows
+// what is set instead of five empty boxes.
+func (s *proxyState) setSpec(sp config.Spec) {
+	s.fields[pfScheme] = sp.Scheme
+	s.fields[pfHost] = sp.Host
+	s.fields[pfPort] = sp.Port
+	s.fields[pfUser] = sp.User
+	s.fields[pfPass] = sp.Pass
+}
+
+// schemeIndex is the form's type field as an index into config.Schemes, and -1
+// when it holds something that is not a scheme. left and right step through the
+// list rather than typing into it: a type is one of four names, and letting the
+// user type one is how it becomes "socks" — which SetProxy accepts as a bare host
+// and then dials on port 80.
+func (s *proxyState) schemeIndex() int {
+	return slices.Index(config.Schemes, strings.ToLower(strings.TrimSpace(s.fields[pfScheme])))
 }
 
 func (s *proxyState) reset() {
 	*s = proxyState{}
+}
+
+// openForm seeds the address form from the proxy already in effect, so "turn on
+// or change it" starts from the current value instead of blank — a user editing
+// one field should not have to retype the four they are keeping.
+func (s *proxyState) openForm() {
+	s.stage = proxyURL
+	s.focus = pfScheme
+	s.buf = ""
+	if cur := config.CurrentProxy().Effective(); cur != "" {
+		s.setSpec(config.ParseSpec(cur))
+	}
+	// An unset proxy still opens with a type and a port on screen, not with two
+	// empty fields the user has to guess at: the defaults are what most setups
+	// want, and a value already filled in can be read, corrected or cleared —
+	// where an empty one has to be understood first.
+	if s.fields[pfScheme] == "" {
+		s.fields[pfScheme] = config.Schemes[0]
+	}
+	if s.fields[pfPort] == "" {
+		s.fields[pfPort] = config.DefaultPort(s.fields[pfScheme])
+	}
 }
 
 type command struct {
@@ -3316,7 +3406,7 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 		return fail(err)
 	}
 	if s.Active {
-		m.history = append(m.history, line{kindSys, "proxy: " + s.HTTPS})
+		m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
 	} else {
 		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
 	}
@@ -3344,17 +3434,7 @@ func (m *uiModel) persistProxy(s config.ProxySettings) error {
 		merged = dropEnvKey(merged, k)
 	}
 	if s.Active {
-		vars := map[string]string{}
-		if s.HTTP != "" {
-			vars[config.EnvHTTPProxy] = s.HTTP
-		}
-		if s.HTTPS != "" {
-			vars[config.EnvHTTPSProxy] = s.HTTPS
-		}
-		if s.NoProxy != "" {
-			vars[config.EnvNoProxy] = s.NoProxy
-		}
-		merged, _ = config.MergeDotEnv(merged, vars)
+		merged, _ = config.MergeDotEnv(merged, s.ProxyVars())
 	}
 	var sb strings.Builder
 	for _, l := range merged {
@@ -3416,8 +3496,7 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.proxy.selected {
 			case 0:
-				m.proxy.stage = proxyURL
-				m.proxy.buf = ""
+				m.proxy.openForm()
 			case 1:
 				m.proxy.stage = proxyNo
 				m.proxy.buf = ""
@@ -3433,21 +3512,59 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case proxyURL:
 		switch msg.String() {
-		case "enter":
-			val := strings.TrimSpace(m.proxy.buf)
-			if val == "" {
-				m.statusText = i18n.T("no proxy address entered")
+		case "up":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "down":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "left", "right":
+			// On the type, an arrow picks the scheme; everywhere else it moves
+			// the focus. Tab moves the focus too, so a type that could only be
+			// reached by tabbing away and back would be a value the form hides.
+			if m.proxy.focus == pfScheme {
+				if msg.String() == "right" {
+					m.proxy.stepScheme(1)
+				} else {
+					m.proxy.stepScheme(-1)
+				}
 				return m, nil
 			}
-			if err := config.ValidateProxy(val); err != nil {
+			if msg.String() == "right" {
+				if m.proxy.focus < pfCount-1 {
+					m.proxy.focus++
+				}
+			} else if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "tab":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "shift+tab":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "enter":
+			spec := m.proxy.spec()
+			if err := spec.Validate(); err != nil {
 				m.statusText = err.Error()
 				return m, nil
 			}
 			m.proxy.reset()
-			return m, m.applyProxy(val)
+			return m, m.applyProxy(spec.URL())
 		case "backspace":
-			if r := []rune(m.proxy.buf); len(r) > 0 {
-				m.proxy.buf = string(r[:len(r)-1])
+			if f := m.proxy.field(); f != nil {
+				if r := []rune(*f); len(r) > 0 {
+					*f = string(r[:len(r)-1])
+				}
 			}
 			return m, nil
 		}
@@ -3467,15 +3584,130 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if len(msg.Text) > 0 && m.proxy.stage != proxyPick {
+	// Text lands in the form's focused field, except on the type: there the same
+	// keys are what selects a scheme, and typing letters into a four-value list
+	// only produces values SetProxy will reject.
+	if len(msg.Text) > 0 && m.proxy.stage == proxyNo {
 		m.proxy.buf += msg.Text
 	}
+	if len(msg.Text) > 0 && m.proxy.stage == proxyURL {
+		if m.proxy.focus == pfScheme {
+			m.proxy.stepScheme(1)
+			return m, nil
+		}
+		if f := m.proxy.field(); f != nil {
+			*f += msg.Text
+		}
+	}
 	return m, nil
+}
+
+// stepScheme moves the type field through config.Schemes by delta, wrapping. An
+// empty or unrecognised field starts at the first scheme rather than refusing to
+// move: it is a field the user has not filled in, not a value to complain about.
+func (s *proxyState) stepScheme(delta int) {
+	i := s.schemeIndex()
+	if i < 0 {
+		if delta > 0 {
+			i = -1
+		} else {
+			i = len(config.Schemes)
+		}
+	}
+	i = (i + delta + len(config.Schemes)) % len(config.Schemes)
+	// The port follows the type, because the two default together: switching an
+	// 8080 http proxy to socks5 and leaving 8080 behind would dial a port the new
+	// scheme has no reason to be on. "Unchanged" is read as the port still holding
+	// *some* scheme's default rather than as the user having typed it, which needs
+	// no second field remembering what the type used to be — a field that can
+	// disagree with the one on screen. A port that is none of the defaults was
+	// typed, and typing wins.
+	if isDefaultPort(s.fields[pfPort]) {
+		s.fields[pfPort] = config.DefaultPort(config.Schemes[i])
+	}
+	s.fields[pfScheme] = config.Schemes[i]
+}
+
+// isDefaultPort reports whether p is empty or one of the scheme defaults, which
+// is what "the user has not chosen a port" looks like.
+func isDefaultPort(p string) bool {
+	if p == "" {
+		return true
+	}
+	for _, sc := range config.Schemes {
+		if config.DefaultPort(sc) == p {
+			return true
+		}
+	}
+	return false
 }
 
 // proxyActionCount is the number of rows the /proxy menu offers. It lives in
 // one place because the key handler and the renderer must agree on it.
 const proxyActionCount = 4
+
+// proxyFormRows draws the address form: one row per field, label and value side
+// by side, with the focused one marked.
+//
+// The labels are padded to one width so the values line up. A form whose values
+// start at a different column per row reads as a list of unrelated strings, and
+// the eye stops being able to scan a column — which is the whole reason the
+// fields are separate.
+//
+// The password is the one value drawn as dots. It is on screen, in a transcript
+// nobody chose to keep, and in whatever the terminal keeps in scrollback.
+func (m *uiModel) proxyFormRows(inner int) [][]string {
+	labels := []string{
+		i18n.T("type"),
+		i18n.T("host"),
+		i18n.T("port"),
+		i18n.T("login"),
+		i18n.T("password"),
+	}
+	values := make([]string, pfCount)
+	for i := range values {
+		values[i] = m.proxy.fields[i]
+	}
+	if m.proxy.fields[pfPass] != "" {
+		values[pfPass] = strings.Repeat("•", len([]rune(m.proxy.fields[pfPass])))
+	}
+	// A placeholder rather than an empty row, so a field that must be filled is
+	// visibly waiting for something instead of looking already done.
+	placeholders := map[int]string{
+		pfHost: "vpn.example.com",
+		pfPort: "1080",
+		pfUser: "optional",
+		pfPass: "optional",
+	}
+
+	// The gutter is " ▸ " on the focused row and "   " elsewhere, and the marker
+	// is what marks the focus — the same ▸ the menu uses, so one thing in this
+	// dialog means "you are here".
+	labelW := 0
+	for _, l := range labels {
+		labelW = max(labelW, ansi.StringWidth(l))
+	}
+
+	rows := make([][]string, 0, pfCount)
+	for i, l := range labels {
+		gutter := "   "
+		if i == m.proxy.focus {
+			gutter = " ▸ "
+		}
+		v := values[i]
+		if v == "" {
+			v = styleHint.Render(placeholders[i])
+		} else if i == m.proxy.focus {
+			v += "█"
+		}
+		row := gutter + l + strings.Repeat(" ", labelW-ansi.StringWidth(l)) + "  " + v
+		if i == m.proxy.focus {
+			row = styleTool.Render(gutter) + row[len(gutter):]
+		}
+		rows = append(rows, []string{truncate(row, inner)})
+	}
+	return rows
+}
 
 func (m *uiModel) proxyBox() string {
 	inner := m.floatingWidth() - panelBorder
@@ -3484,21 +3716,17 @@ func (m *uiModel) proxyBox() string {
 	// not have to remember whether a proxy is already on, or which one.
 	now := i18n.T("direct connection")
 	if s := config.CurrentProxy(); s.Active {
-		now = s.HTTPS
-		if now == "" {
-			now = s.HTTP
-		}
+		now = config.RedactProxy(s.Effective())
 	}
 	title := i18n.T("? proxy — now: ") + truncate(now, max(inner-ansi.StringWidth(i18n.T("? proxy — now: ")), 1))
 
 	switch m.proxy.stage {
 	case proxyURL:
-		rows := [][]string{
-			{styleHint.Render(i18n.T("proxy address, e.g. 127.0.0.1:8080 or socks5://host:1080"))},
-			{styleHint.Render(i18n.T("enter — apply, esc — cancel"))},
-			{m.proxy.buf + "█"},
-		}
-		return m.floatingPanel(title, "", rows, 0)
+		// The focus is passed as the selection so the panel's own overflow rule
+		// keeps the focused field when the terminal is too short for all five —
+		// the field being typed into is the one row that cannot be the one to go.
+		return m.floatingPanel(title+"  ("+i18n.T("tab — next field, ←→ — type, enter — apply, esc — cancel")+")",
+			"", m.proxyFormRows(inner), m.proxy.focus)
 
 	case proxyNo:
 		rows := [][]string{
@@ -3536,6 +3764,10 @@ func (m *uiModel) showProxy() tea.Cmd {
 	add := func(s string) {
 		m.history = append(m.history, line{kindSys, s})
 	}
+	// Every address goes out redacted. A proxy address usually carries the
+	// login, and this line lands in the transcript, which is written to disk and
+	// shown to whoever opens the session.
+	show := config.RedactProxy
 	if !s.Active {
 		add(i18n.T("proxy: none (direct connection)"))
 	} else {
@@ -3546,7 +3778,7 @@ func (m *uiModel) showProxy() tea.Cmd {
 			{"https", s.HTTPS}, {"http", s.HTTP},
 		} {
 			if p.val != "" {
-				add("proxy " + p.label + ": " + p.val)
+				add("proxy " + p.label + ": " + show(p.val))
 			}
 		}
 		if s.NoProxy != "" {
@@ -3609,8 +3841,10 @@ func (m *uiModel) pasteTarget() *string {
 		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
-	case m.proxy.open && m.proxy.stage != proxyPick:
+	case m.proxy.open && m.proxy.stage == proxyNo:
 		return &m.proxy.buf
+	case m.proxy.open && m.proxy.stage == proxyURL:
+		return m.proxy.field()
 	case m.picker.open:
 		return &m.picker.query
 	case m.palette.open:
@@ -4633,6 +4867,34 @@ func truncate(s string, n int) string {
 // the left margin is applied after everything else, adding a column but no
 // row. So the body is wrapped and measured on its own, trimmed to the budget,
 // and only then framed.
+// proxyTag is the sidebar's short name for a proxy in effect: the type, the host
+// and the port — "socks5 vpn.example.com:21001".
+//
+// Two things are dropped from the address it is built from. The login goes
+// entirely rather than being masked, because the panel is 31 columns and
+// "socks5://dedo:••••@vpn.example.com:21001" does not fit: the host falls off the
+// end and the row ends up naming a scheme and a login with no host between them.
+// The row's job is to say which proxy this is, and the full address is one /proxy
+// away — that one masks.
+//
+// "://" goes too, for the same reason: it costs three cells and separates two
+// things the narrow row already puts side by side. The type stays as a word in
+// front, because telling an http proxy from a socks5 one at a glance is what the
+// row is for — that difference decides whether a connection problem is a DNS
+// question or a port one.
+func proxyTag(addr string) string {
+	s := addr
+	if i := strings.Index(s, "://"); i >= 0 {
+		if at := strings.LastIndex(s, "@"); at > i {
+			// The login, if any, is dropped rather than masked.
+			s = s[:i] + " " + s[at+1:]
+		} else {
+			s = s[:i] + " " + s[i+3:]
+		}
+	}
+	return s
+}
+
 func (m *uiModel) sidebarView(height int) string {
 	const (
 		sbPad   = 1 // horizontal padding
@@ -4702,6 +4964,39 @@ func (m *uiModel) sidebarView(height int) string {
 		value(styleSidebarValue, " ", m.prov.Model)
 		if m.prov.Label != "" {
 			row(styleHint, truncate("via "+m.prov.Label, sbInner))
+		}
+		// The proxy rides with the model, because it is the other half of the same
+		// fact: which provider answers, and over what wire. It is here rather than
+		// in its own section because a separate label would cost a row and a
+		// heading to say the same thing — and the panel's rows are the scarce
+		// resource.
+		//
+		// Only when one is set. "No proxy" on every session is the case that has
+		// no news, and printing it would spend a row proving that nothing is
+		// wrong with the connection.
+		//
+		// The password is redacted like everywhere else, and the address is cut
+		// from the left: the host and port are the part that identifies a proxy,
+		// and a panel is too narrow for the credentials as well.
+		// Read once: two calls could straddle a /proxy change and print a host
+		// from one setting next to a bypass list from the next.
+		if s := config.CurrentProxy(); s.Active {
+			// Trimmed from the left, like a path and for the same reason: the tail
+			// is the part that identifies a proxy, and cutting the right would leave
+			// "socks5://vpn.example.com:…" — a row that names the host and hides the
+			// port, which is the half a reader came for.
+			row(styleHint, trimLeft(" "+proxyTag(s.Effective()), sbInner))
+			// The bypass list only when it has entries: it says nothing about the
+			// proxy above it, and an empty one would print a label over an absence.
+			//
+			// Trimmed from the right, unlike the address above it. A list is read by
+			// its beginning — which hosts are exempt — and the entries that fall off
+			// the end are the ones a user can most afford not to see. Truncating
+			// from the left would leave "…pass: localhost,10.0.0.0/8", having spent
+			// the cells on hiding the word "bypass".
+			if s.NoProxy != "" {
+				row(styleHint, truncate(" "+i18n.T("bypass: ")+s.NoProxy, sbInner))
+			}
 		}
 		b.WriteString("\n")
 

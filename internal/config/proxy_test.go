@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +34,84 @@ func TestSetProxyAcceptsABareHostAndPort(t *testing.T) {
 	}
 	if !s.Active {
 		t.Error("a set proxy reports itself inactive")
+	}
+}
+
+// A proxy address assembled from parts must survive the round trip a form
+// depends on: fields in, an address out, fields back. A login or password
+// containing the delimiter characters of a URL is the case that breaks it, and
+// it breaks it silently — the address still parses, as a different host with a
+// different password.
+func TestSpecURLRoundTripsCredentialsThatLookLikeDelimiters(t *testing.T) {
+	const pass = "p@ss:word/1?#x"
+	s := Spec{Scheme: "socks5", Host: "vpn.example.com", Port: "21001", User: "de do", Pass: pass}
+
+	back := ParseSpec(s.URL())
+	if back.Scheme != s.Scheme || back.Host != s.Host || back.Port != s.Port {
+		t.Errorf("round trip lost the address: %+v from %q", back, s.URL())
+	}
+	if back.User != s.User || back.Pass != pass {
+		t.Errorf("round trip lost the credentials: %q / %q, want %q / %q",
+			back.User, back.Pass, s.User, pass)
+	}
+}
+
+// The port is the whole point of asking for it separately. Go fills an absent
+// port from the scheme, so a socks5 address without one is well-formed and gets
+// dialed on 1080 — a port nobody chose, refused by a proxy that is listening
+// somewhere else. Validate has to refuse it and say which port it would have
+// used, because that number is what the user has to go and check.
+func TestSpecValidateRefusesAMissingPortAndNamesTheOneGoWouldUse(t *testing.T) {
+	s := Spec{Scheme: "socks5", Host: "vpn.example.com"}
+	err := s.Validate()
+	if err == nil {
+		t.Fatal("a socks5 proxy with no port was accepted")
+	}
+	if !strings.Contains(err.Error(), "1080") {
+		t.Errorf("the reason does not name the port that would have been used: %v", err)
+	}
+}
+
+func TestSpecValidateRefusesValuesThatCannotWork(t *testing.T) {
+	for _, tc := range []struct {
+		why  string
+		spec Spec
+		want string
+	}{
+		{"no type", Spec{Host: "h", Port: "1"}, "type"},
+		{"a type that is not one of the four", Spec{Scheme: "socks", Host: "h", Port: "1"}, "not a proxy type"},
+		{"no host", Spec{Scheme: "http", Port: "1"}, "host"},
+		{"a host with a slash in it", Spec{Scheme: "http", Host: "a/b", Port: "1"}, "host"},
+		{"a port that is not a number", Spec{Scheme: "http", Host: "h", Port: "80a"}, "not a port number"},
+		{"a port past the top of the range", Spec{Scheme: "http", Host: "h", Port: "70000"}, "1–65535"},
+		{"a port of zero", Spec{Scheme: "http", Host: "h", Port: "0"}, "1–65535"},
+		{"a password with no login", Spec{Scheme: "http", Host: "h", Port: "1", Pass: "x"}, "login"},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			err := tc.spec.Validate()
+			if err == nil {
+				t.Fatalf("accepted: %+v", tc.spec)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("reason %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A password in a display string is a credential on screen, and every place a
+// proxy address is shown is a place the transcript keeps it.
+func TestRedactProxyHidesOnlyThePassword(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"socks5://dedo:hunter2@vpn.example.com:21001", "socks5://dedo:••••@vpn.example.com:21001"},
+		// No credentials, nothing to hide — and in particular not a mangled host.
+		{"http://127.0.0.1:3128", "http://127.0.0.1:3128"},
+		// A login with no password is not a secret.
+		{"socks5://dedo@vpn.example.com:1080", "socks5://dedo@vpn.example.com:1080"},
+	} {
+		if got := RedactProxy(tc.in); got != tc.want {
+			t.Errorf("RedactProxy(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
 
