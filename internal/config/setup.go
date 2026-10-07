@@ -167,6 +167,10 @@ func isLoopback(baseURL string) bool {
 // SetupVars is the .env content a chosen option produces. It is shared by the
 // stdin wizard and /setup so the two cannot write different things.
 //
+// DMCODE_MODEL is intentionally absent: the model preference is a user choice
+// that belongs in ~/.dmcode/settings.json, not in the project's .env. Callers
+// that need the default model for a chosen option read opt.Model directly.
+//
 // The GGUF option persists only what is already known: the path arrives from
 // the wizard's prompt and lands in the map through opt.GGUFPath. Everything
 // else — the port, the model id — is decided when the server actually starts.
@@ -180,7 +184,6 @@ func SetupVars(opt SetupOption, key string) map[string]string {
 	}
 	if opt.BaseURL != "" {
 		vars["OPENAI_BASE_URL"] = opt.BaseURL
-		vars["DMCODE_MODEL"] = opt.Model
 	}
 	if opt.Reasoning != "" {
 		vars["DMCODE_REASONING_EFFORT"] = opt.Reasoning
@@ -276,24 +279,21 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	for k, v := range extras {
 		vars[k] = v
 	}
-	// Merge rather than truncate: picking a free provider must not delete a real
-	// key the user already had for a paid one.
-	existing, err := ReadDotEnv()
-	if err != nil {
-		return err
-	}
-	merged, _ := MergeDotEnv(existing, vars)
-
-	var sb strings.Builder
-	for _, l := range merged {
-		sb.WriteString(l + "\n")
-	}
+	// Export to environment for this session.
 	for _, k := range SortedKeys(vars) {
 		if err := os.Setenv(k, vars[k]); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(".env", []byte(sb.String()), 0o600)
+	// Save everything to settings.json for persistence.
+	apiKeyVar := ""
+	if !opt.Keyless && opt.EnvKey != "" {
+		apiKeyVar = opt.EnvKey
+	}
+	if serr := SaveSettings(opt.BaseURL, apiKeyVar, key, opt.API, opt.Model, opt.Reasoning, opt.GGUFPath, vars["DMCODE_LLAMA_SERVER"], vars["DMCODE_LLAMA_ARGS"]); serr != nil {
+		return serr
+	}
+	return nil
 }
 
 // FreeProviderHint is the advice shown when no endpoint is reachable. It is a

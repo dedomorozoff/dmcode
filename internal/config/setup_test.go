@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // inTempDir runs the body in a scratch directory, since the wizard writes .env
@@ -73,12 +75,15 @@ func TestMergeDotEnvPreservesForeignKeys(t *testing.T) {
 		"MY_OWN=1",
 		"OPENCODE_API_KEY=real-secret",
 		"OPENAI_BASE_URL=" + SetupOptions()[0].BaseURL,
-		"DMCODE_MODEL=" + SetupOptions()[0].Model,
 		"DMCODE_API=" + APIChat,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("merged .env lost %q:\n%s", want, text)
 		}
+	}
+	// DMCODE_MODEL must NOT be in .env: the model is now in settings.json.
+	if strings.Contains(text, "DMCODE_MODEL=") {
+		t.Errorf("DMCODE_MODEL leaked into .env (it belongs in settings.json):\n%s", text)
 	}
 	// vals carries only what the wizard wrote; foreign keys stay untouched.
 	if _, leaked := vals["OPENCODE_API_KEY"]; leaked {
@@ -218,6 +223,7 @@ func TestSetupVarsForGGUF(t *testing.T) {
 // The stdin wizard must walk a GGUF pick through the path prompt and persist
 // both the file and the optional server binary, still without any key.
 func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	inTempDir(t)
 	idx := 0
 	for i, o := range SetupOptions() {
@@ -229,21 +235,21 @@ func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
 	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("the GGUF wizard rejected a complete answer: %v", err)
 	}
-	data, _ := os.ReadFile(".env")
-	text := string(data)
-	for _, want := range []string{
-		"DMCODE_GGUF=models\\qwen.gguf",
-		"DMCODE_API=chat",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("missing %q:\n%s", want, text)
-		}
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
 	}
-	if strings.Contains(text, "DMCODE_LLAMA_SERVER") {
-		t.Errorf("an empty binary answer wrote a variable:\n%s", text)
+	if st.GGUFPath != "models\\qwen.gguf" {
+		t.Errorf("settings.GGUFPath = %q, want models\\qwen.gguf", st.GGUFPath)
 	}
-	if strings.Contains(text, "API_KEY") {
-		t.Errorf("a key was written for the GGUF option:\n%s", text)
+	if st.API != "chat" {
+		t.Errorf("settings.API = %q, want chat", st.API)
+	}
+	if st.LlamaServer != "" {
+		t.Errorf("settings.LlamaServer = %q after empty answer, want empty", st.LlamaServer)
+	}
+	if st.APIKey != "" {
+		t.Errorf("settings.APIKey = %q for GGUF option, want empty", st.APIKey)
 	}
 
 	// A named binary has to be recorded too.
@@ -251,9 +257,12 @@ func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
 	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("the GGUF wizard rejected a named binary: %v", err)
 	}
-	data, _ = os.ReadFile(".env")
-	if !strings.Contains(string(data), "DMCODE_LLAMA_SERVER=C:\\llama\\llama-server.exe") {
-		t.Errorf("the binary was not persisted:\n%s", data)
+	st, err = settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	if st.LlamaServer != "C:\\llama\\llama-server.exe" {
+		t.Errorf("settings.LlamaServer = %q, want C:\\llama\\llama-server.exe", st.LlamaServer)
 	}
 }
 
@@ -278,6 +287,7 @@ func TestReadDotEnvMissingFile(t *testing.T) {
 // either must not be written out as a working config.
 func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	opts := SetupOptions()
 	idx := 0
 	for i, o := range opts {
@@ -309,39 +319,61 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 	if err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
 		t.Fatalf("a complete Unsloth answer was rejected: %v", err)
 	}
-	data, _ := os.ReadFile(".env")
-	for _, want := range []string{
-		"OPENAI_API_KEY=sk-unsloth-abc",
-		"OPENAI_BASE_URL=http://127.0.0.1:8888/v1",
-		"DMCODE_MODEL=qwen3-27b",
-		"DMCODE_API=chat",
-	} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("missing %q:\n%s", want, data)
+	// Check settings.json has all the values.
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	for _, want := range []string{"sk-unsloth-abc", "http://127.0.0.1:8888/v1"} {
+		if want == "sk-unsloth-abc" && st.APIKey != want {
+			t.Errorf("settings.APIKey = %q, want %q", st.APIKey, want)
 		}
+		if want == "http://127.0.0.1:8888/v1" && st.BaseURL != want {
+			t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, want)
+		}
+	}
+	if st.Model != "qwen3-27b" {
+		t.Errorf("settings.Model = %q, want qwen3-27b", st.Model)
+	}
+	if st.API != "chat" {
+		t.Errorf("settings.API = %q, want chat", st.API)
+	}
+	// .env should not be created — all config goes to settings.json.
+	if _, serr := os.Stat(".env"); serr == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
 }
 
-// reach the same .env as /setup and reject the same half-typed answers.
+// TestStdinWizardWritesKeylessChoice verifies the keyless option writes all
+// its config to settings.json.
 func TestStdinWizardWritesKeylessChoice(t *testing.T) {
 	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	var out strings.Builder
 	if err := SetupWizardWith(strings.NewReader("1\n"), &out); err != nil {
 		t.Fatalf("choosing the keyless option failed: %v", err)
 	}
-	data, _ := os.ReadFile(".env")
+	// Check settings.json has all the values.
 	want := SetupOptions()[0]
-	for _, w := range []string{
-		"OPENAI_BASE_URL=" + want.BaseURL,
-		"DMCODE_MODEL=" + want.Model,
-		"DMCODE_API=chat",
-	} {
-		if !strings.Contains(string(data), w) {
-			t.Errorf("missing %q:\n%s", w, data)
-		}
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
 	}
-	if strings.Contains(string(data), "API_KEY") {
-		t.Errorf("a key was written for a keyless provider:\n%s", data)
+	if st.BaseURL != want.BaseURL {
+		t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, want.BaseURL)
+	}
+	if st.Model != want.Model {
+		t.Errorf("settings.Model = %q, want %q", st.Model, want.Model)
+	}
+	if st.API != want.API {
+		t.Errorf("settings.API = %q, want %q", st.API, want.API)
+	}
+	if st.Reasoning != want.Reasoning {
+		t.Errorf("settings.Reasoning = %q, want %q", st.Reasoning, want.Reasoning)
+	}
+	// .env should not be created — all config goes to settings.json.
+	if _, err := os.Stat(".env"); err == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
 	if !strings.Contains(out.String(), want.Label) {
 		t.Error("the prompt did not offer the free option")
@@ -393,24 +425,33 @@ func TestStdinWizardRejectsEmptyKey(t *testing.T) {
 // A custom endpoint that is filled in properly must be persisted.
 func TestStdinWizardAcceptsCompleteCustomEndpoint(t *testing.T) {
 	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	in := fmt.Sprintf("%d\nsk-abc\nhttp://127.0.0.1:1234/v1\nmy-model\n", len(SetupOptions()))
 	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("a complete custom endpoint was rejected: %v", err)
 	}
-	data, _ := os.ReadFile(".env")
-	for _, w := range []string{
-		"OPENAI_BASE_URL=http://127.0.0.1:1234/v1",
-		"DMCODE_MODEL=my-model",
-		"OPENAI_API_KEY=sk-abc",
-	} {
-		if !strings.Contains(string(data), w) {
-			t.Errorf("missing %q:\n%s", w, data)
-		}
+	// Check settings.json has all the values.
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	if st.BaseURL != "http://127.0.0.1:1234/v1" {
+		t.Errorf("settings.BaseURL = %q, want http://127.0.0.1:1234/v1", st.BaseURL)
+	}
+	if st.APIKey != "sk-abc" {
+		t.Errorf("settings.APIKey = %q, want sk-abc", st.APIKey)
+	}
+	if st.Model != "my-model" {
+		t.Errorf("settings.Model = %q, want my-model", st.Model)
+	}
+	// .env should not be created — all config goes to settings.json.
+	if _, err := os.Stat(".env"); err == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
 }
 
-// TestSetupVarsForKilo pins the Kilo option: it must write the free routing
-// model and its own key variable, and must never clobber a real OpenAI key.
+// TestSetupVarsForKilo pins the Kilo option: it must write its own key variable
+// and must never clobber a real OpenAI key. The model goes to settings.json.
 func TestSetupVarsForKilo(t *testing.T) {
 	var kilo *SetupOption
 	for i := range SetupOptions() {
@@ -422,8 +463,11 @@ func TestSetupVarsForKilo(t *testing.T) {
 		t.Fatal("no Kilo option in SetupOptions")
 	}
 	vars := SetupVars(*kilo, "kilo-key")
-	if vars["DMCODE_MODEL"] != "kilo-auto/free" || vars["KILO_API_KEY"] != "kilo-key" || vars["DMCODE_API"] != APIChat {
+	if vars["KILO_API_KEY"] != "kilo-key" || vars["DMCODE_API"] != APIChat {
 		t.Errorf("SetupVars for Kilo = %v", vars)
+	}
+	if _, ok := vars["DMCODE_MODEL"]; ok {
+		t.Errorf("DMCODE_MODEL must not be in SetupVars (belongs in settings.json): %v", vars)
 	}
 	if vars["OPENAI_API_KEY"] != "" {
 		t.Errorf("Kilo must not clobber OPENAI_API_KEY: %v", vars)

@@ -3596,54 +3596,27 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 	return m.showProxy()
 }
 
-// persistProxy brings .env in line with the environment.
-//
-// MergeDotEnv only adds and replaces, so a proxy that has been turned off has to
-// be removed from the file explicitly: left there it would be read back on the
-// next start and the session would silently keep going through a proxy the user
-// has switched off.
+// persistProxy writes the proxy settings to ~/.dmcode/settings.json so they
+// survive restarts and apply regardless of the working directory.
 func (m *uiModel) persistProxy(s config.ProxySettings) error {
-	lines, err := config.ReadDotEnv()
-	if err != nil {
-		return err
-	}
-	// Start from the file as it is, drop every proxy variable, then write the
-	// current ones back. In that order, so a variable that no longer has a value
-	// cannot survive, which is the whole point of "off".
-	merged, _ := config.MergeDotEnv(lines, nil)
-	for _, k := range append(config.ProxyEnvKeys(), config.EnvNoProxy) {
-		merged = dropEnvKey(merged, k)
-	}
-	if s.Active {
-		merged, _ = config.MergeDotEnv(merged, s.ProxyVars())
-	}
-	// Through the shared writer: .env holds the provider key, so a half-written
-	// file after a crash is a session with no configuration and no way back to
-	// the one it had. Same reason the proxy write and the model write cannot be
-	// two different pieces of code.
-	return config.WriteDotEnv(merged)
+	return config.SaveProxy(s)
 }
 
-// persistModelChoice writes the picked model into .env and says so when it did
-// not go through.
+// persistModelChoice writes the picked model into ~/.dmcode/settings.json and
+// says so when it did not go through.
 //
-// The three outcomes are three different sentences on purpose. Silence would
-// read as "saved" and be wrong; an error the user cannot act on is noise. A
-// refusal because .env does not describe this endpoint is worth saying out loud,
-// because the alternative — writing the line anyway — is the thing that makes a
-// session fail to start days later with nothing on screen to explain it.
+// SaveModel only touches the provider fields, so a GGUF path or a llama-server
+// binary saved earlier survives a model switch — switching the cloud model
+// must not orphan the local one.
 func (m *uiModel) persistModelChoice(id string) {
-	switch err := config.SaveModel(m.prov, id); {
-	case err == nil:
-		// The live process is told too, so anything that rebuilds a provider from
-		// the environment later in this session agrees with the file.
-		os.Setenv(config.EnvModelKey, id)
-		m.statusText = i18n.T("model saved to .env — the next start uses it")
-	case errors.Is(err, config.ErrProviderNotInEnv):
-		m.statusText = i18n.T("model not saved: .env does not configure this provider — /setup writes one")
-	default:
-		m.statusText = i18n.T("could not save the model to .env: ") + err.Error()
+	if err := config.SaveModel(m.prov, id); err != nil {
+		m.statusText = i18n.T("could not save the model: ") + err.Error()
+		return
 	}
+	// Tell the live process too, so anything that rebuilds a provider from the
+	// environment later in this session agrees with what was just saved.
+	os.Setenv(config.EnvModelKey, id)
+	m.statusText = i18n.T("model saved — the next start uses it")
 }
 
 // dropEnvKey removes every line assigning key, leaving comments and other
@@ -4400,26 +4373,14 @@ func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 	return nil
 }
 
-// persistSetup writes the provider to .env and exports it for this process.
-// The status it returns is already translated; err is the underlying cause.
+// persistSetup exports the provider configuration for this process.
+// The settings are now persisted to ~/.dmcode/settings.json in commitSetup.
+// This function just exports the vars to the environment.
 func (m *uiModel) persistSetup(vars map[string]string) (string, error) {
-	// Merge into any existing .env rather than replacing it, so a key the user
-	// set for another provider is not silently dropped.
-	lines, err := config.ReadDotEnv()
-	if err != nil {
-		return i18n.T("error reading .env"), err
-	}
-	merged, _ := config.MergeDotEnv(lines, vars)
-
-	var sb strings.Builder
-	for _, l := range merged {
-		sb.WriteString(l + "\n")
-	}
-	if werr := os.WriteFile(".env", []byte(sb.String()), 0o600); werr != nil {
-		return i18n.T("could not write .env"), werr
-	}
 	for _, k := range config.SortedKeys(vars) {
-		os.Setenv(k, vars[k])
+		if err := os.Setenv(k, vars[k]); err != nil {
+			return i18n.T("could not set environment variable"), err
+		}
 	}
 	return "", nil
 }
@@ -4471,6 +4432,16 @@ func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
 		return nil
 	}
 	m.setup.reset()
+
+	// Persist to settings.json so the path survives restarts. There is no
+	// endpoint or model yet — those arrive with ggufReadyMsg — so only the
+	// GGUF fields and the wire are recorded; BaseURL/Model are cleared so a
+	// previous cloud provider cannot linger next to the .gguf path
+	// (DetectProviders prefers DMCODE_GGUF).
+	if serr := config.SaveSettings("", "", "", vars["DMCODE_API"], "", "", vars["DMCODE_GGUF"], vars["DMCODE_LLAMA_SERVER"], vars["DMCODE_LLAMA_ARGS"]); serr != nil {
+		m.history = append(m.history, line{kindErr, "could not save settings: " + serr.Error()})
+		m.historyDirty = true
+	}
 
 	// The fast failures — a missing .gguf, a llama-server that is not on disk —
 	// are reported here, before a second of waiting, which is the same order
@@ -4546,7 +4517,7 @@ func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) te
 
 	p := config.Provider{
 		BaseURL:   vars["OPENAI_BASE_URL"],
-		Model:     config.OrDefaultModel(vars["DMCODE_MODEL"]),
+		Model:     config.OrDefaultModel(opt.Model),
 		API:       opt.API,
 		Label:     setupLabel(opt),
 		Reasoning: vars["DMCODE_REASONING_EFFORT"],
@@ -4557,8 +4528,20 @@ func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) te
 	m.prov = p
 	m.setup.reset()
 	m.statusText = i18n.T("provider: ") + p.Label
-	m.history = append(m.history, line{kindSys, i18n.T("provider saved to .env: ") + p.Label})
+	m.history = append(m.history, line{kindSys, i18n.T("provider saved to ~/.dmcode/settings.json")})
 	m.historyDirty = true
+
+	// Save everything to settings.json. commitSetup is never reached for a GGUF
+	// pick (applySetup routes those to startGGUFSetup), so the GGUF fields are
+	// deliberately cleared: a stale .gguf path would outrank the provider just
+	// chosen on the next start (DetectProviders prefers DMCODE_GGUF).
+	apiKeyVar := ""
+	if !opt.Keyless && opt.EnvKey != "" {
+		apiKeyVar = opt.EnvKey
+	}
+	if serr := config.SaveSettings(p.BaseURL, apiKeyVar, p.APIKey, p.API, p.Model, p.Reasoning, "", "", ""); serr != nil {
+		m.history = append(m.history, line{kindErr, "could not save settings: " + serr.Error()})
+	}
 
 	return m.rebuildRunnerFor(p)
 }

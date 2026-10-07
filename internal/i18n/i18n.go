@@ -7,11 +7,11 @@
 package i18n
 
 import (
-	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // Lang is a supported interface language.
@@ -79,7 +79,9 @@ func Set(l Lang) error {
 	current = l
 	mu.Unlock()
 	os.Setenv("DMCODE_LANG", string(l))
-	return save()
+	return settings.Update(func(s *settings.S) {
+		s.Lang = string(l)
+	})
 }
 
 // Init picks the language at startup: the DMCODE_LANG environment variable if
@@ -93,72 +95,11 @@ func Init() {
 			return
 		}
 	}
-	if v, err := read(); err == nil && v != "" {
-		if l, ok := Parse(v); ok {
+	if s, err := settings.Load(); err == nil && s.Lang != "" {
+		if l, ok := Parse(s.Lang); ok {
 			mu.Lock()
 			current = l
 			mu.Unlock()
 		}
 	}
-}
-
-// settingsPath is ~/.dmcode/settings.json, next to the prompt history. The
-// override exists for tests and for users who keep state beside their project.
-func settingsPath() (string, error) {
-	if p := os.Getenv("DMCODE_SETTINGS_PATH"); p != "" {
-		return p, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".dmcode", "settings.json"), nil
-}
-
-// settings is the on-disk shape. It is a struct rather than a bare map so a
-// future key can be added without invalidating existing files.
-type settings struct {
-	Lang string `json:"lang,omitempty"`
-}
-
-func read() (string, error) {
-	path, err := settingsPath()
-	if err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	var s settings
-	if err := json.Unmarshal(data, &s); err != nil {
-		return "", err
-	}
-	return s.Lang, nil
-}
-
-// save writes the settings file, creating the directory. The write is atomic
-// (temp file plus rename) so an interrupted run cannot leave a half-written
-// file that fails to parse on the next start.
-func save() error {
-	path, err := settingsPath()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.Marshal(settings{Lang: string(Current())})
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
 }

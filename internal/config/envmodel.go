@@ -1,97 +1,84 @@
 package config
 
 import (
-	"errors"
 	"os"
-	"strings"
+
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
-// EnvModelKey is the .env variable that names the model to run.
+// EnvModelKey is the environment variable that names the model to run.
 const EnvModelKey = "DMCODE_MODEL"
 
-// ErrProviderNotInEnv says the .env does not name the endpoint this session is
-// talking to, so there is nowhere honest to record a model for it. It is a named
-// error rather than a string so a caller can tell "not saved, and here is why"
-// apart from "the write failed", and so a test can assert the distinction.
-var ErrProviderNotInEnv = errors.New("this provider is not the one .env configures")
-
-// SaveModel records the model in .env so a model picked in the running session
-// is the one the next start uses, and reports whether it was saved.
-//
-// It refuses to write when the file does not already describe this endpoint.
-// DMCODE_MODEL is honoured on the two configured paths — an explicit
-// OPENAI_BASE_URL, or a provider key that names a preset — and ignored by the
-// free-endpoint discovery path, which asks each candidate what it serves.
-// Writing the line anyway would either do nothing today, or apply tomorrow to
-// whatever endpoint the same .env describes by then: a model name is only
-// meaningful next to the endpoint it belongs to, and a wrong one is a start-up
-// failure with nothing on screen to say why.
+// SaveModel records the provider configuration in ~/.dmcode/settings.json.
+// It takes a Provider and model string, extracting the fields to save.
 func SaveModel(p Provider, model string) error {
-	lines, err := ReadDotEnv()
+	return settings.Update(func(s *settings.S) {
+		s.BaseURL = p.BaseURL
+		s.APIKey = p.APIKey
+		s.APIKeyVar = p.APIKeyVar
+		s.API = p.API
+		s.Model = model
+		s.Reasoning = p.Reasoning
+	})
+}
+
+// SaveSettings persists provider configuration to ~/.dmcode/settings.json.
+func SaveSettings(baseURL, apiKeyVar, apiKey, api, model, reasoning, ggufPath, llamaServer, llamaArgs string) error {
+	return settings.Update(func(s *settings.S) {
+		s.BaseURL = baseURL
+		s.APIKey = apiKey
+		s.APIKeyVar = apiKeyVar
+		s.API = api
+		s.Model = model
+		s.Reasoning = reasoning
+		s.GGUFPath = ggufPath
+		s.LlamaServer = llamaServer
+		s.LlamaArgs = llamaArgs
+	})
+}
+
+// LoadSettings applies ~/.dmcode/settings.json onto the environment.
+func LoadSettings() {
+	s, err := settings.Load()
 	if err != nil {
-		return err
+		return
 	}
-	if !EnvDescribesProvider(lines, p) {
-		return ErrProviderNotInEnv
+	// Provider configuration: endpoint, key, and API choice.
+	if s.BaseURL != "" && os.Getenv("OPENAI_BASE_URL") == "" {
+		os.Setenv("OPENAI_BASE_URL", s.BaseURL)
 	}
-	merged, _ := MergeDotEnv(lines, map[string]string{EnvModelKey: model})
-	return WriteDotEnv(merged)
-}
-
-// EnvDescribesProvider reports whether the .env lines already say which endpoint
-// p is, by either of the two ways the startup path is told: an explicit
-// OPENAI_BASE_URL naming this host, or the key variable of the setup option that
-// does. A line naming a different endpoint is not a description of this one, and
-// neither is a comment that happens to mention it.
-func EnvDescribesProvider(lines []string, p Provider) bool {
-	if p.BaseURL == "" {
-		return false
+	if s.APIKey != "" && s.APIKeyVar != "" && os.Getenv(s.APIKeyVar) == "" {
+		os.Setenv(s.APIKeyVar, s.APIKey)
 	}
-	host := endpointHost(p.BaseURL)
-	if host == "" {
-		return false
+	if s.API != "" && os.Getenv("DMCODE_API") == "" {
+		os.Setenv("DMCODE_API", s.API)
 	}
-	for _, line := range lines {
-		k, v, ok := DotEnvPair(line)
-		if !ok {
-			continue
-		}
-		if k == "OPENAI_BASE_URL" && endpointHost(v) == host {
-			return true
-		}
-		if o, found := optionForKey(k); found && endpointHost(o.BaseURL) == host {
-			return true
-		}
+	if s.Reasoning != "" && os.Getenv("DMCODE_REASONING_EFFORT") == "" {
+		os.Setenv("DMCODE_REASONING_EFFORT", s.Reasoning)
 	}
-	return false
-}
-
-// optionForKey finds the setup option whose key variable is name.
-func optionForKey(name string) (SetupOption, bool) {
-	for _, o := range SetupOptions() {
-		if o.EnvKey != "" && o.EnvKey == name {
-			return o, true
-		}
+	// Model preference — global, not per-project.
+	if s.Model != "" {
+		os.Setenv(EnvModelKey, s.Model)
 	}
-	return SetupOption{}, false
-}
-
-// WriteDotEnv writes the .env file with the permissions it needs — it holds
-// provider keys — and in the order that cannot lose it: a temporary file in the
-// same directory, then a rename over the original. A plain write truncates the
-// file first, so a crash or a full disk in between leaves a session with no
-// configuration at all and no way back to the one it had.
-func WriteDotEnv(lines []string) error {
-	var sb strings.Builder
-	for _, l := range lines {
-		sb.WriteString(l + "\n")
+	// Proxy settings — global, not per-project.
+	if s.Proxy != "" && os.Getenv(EnvHTTPProxy) == "" && os.Getenv("http_proxy") == "" {
+		os.Setenv(EnvHTTPProxy, s.Proxy)
+		os.Setenv(EnvHTTPSProxy, s.Proxy)
+		os.Setenv("http_proxy", s.Proxy)
+		os.Setenv("https_proxy", s.Proxy)
 	}
-	if err := os.WriteFile(".env.tmp", []byte(sb.String()), 0o600); err != nil {
-		return err
+	if s.NoProxy != "" && os.Getenv(EnvNoProxy) == "" && os.Getenv("no_proxy") == "" {
+		os.Setenv(EnvNoProxy, s.NoProxy)
+		os.Setenv("no_proxy", s.NoProxy)
 	}
-	if err := os.Rename(".env.tmp", ".env"); err != nil {
-		os.Remove(".env.tmp")
-		return err
+	// GGUF path — global preference for local models.
+	if s.GGUFPath != "" && os.Getenv("DMCODE_GGUF") == "" {
+		os.Setenv("DMCODE_GGUF", s.GGUFPath)
 	}
-	return nil
+	if s.LlamaServer != "" && os.Getenv("DMCODE_LLAMA_SERVER") == "" {
+		os.Setenv("DMCODE_LLAMA_SERVER", s.LlamaServer)
+	}
+	if s.LlamaArgs != "" && os.Getenv("DMCODE_LLAMA_ARGS") == "" {
+		os.Setenv("DMCODE_LLAMA_ARGS", s.LlamaArgs)
+	}
 }

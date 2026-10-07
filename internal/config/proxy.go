@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // HTTP proxy support.
@@ -397,4 +399,13 @@ func firstEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+// SaveProxy writes the proxy settings to ~/.dmcode/settings.json so they
+// survive restarts and are global — not tied to any working directory.
+func SaveProxy(s ProxySettings) error {
+	return settings.Update(func(st *settings.S) {
+		st.Proxy = s.Effective()
+		st.NoProxy = s.NoProxy
+	})
 }
