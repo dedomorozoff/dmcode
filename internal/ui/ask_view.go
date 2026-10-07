@@ -165,7 +165,7 @@ func (m *uiModel) askKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		// The turn is not cancelled here: escape already reaches the tool through
 		// the turn's context, and quitting is the one thing that must always work.
-		return m, tea.Quit
+		return m, m.quitCmd()
 	case "esc":
 		if m.ask.customOpen {
 			// Escape backs out of the text field first: a user who opened it by
@@ -262,7 +262,7 @@ func (m *uiModel) handleAskTick() tea.Cmd {
 		chosen = m.ask.req.Options[0].Label
 	}
 	m.history = append(m.history, line{kindSys,
-		fmt.Sprintf("⏱ %s: %s", i18n.T("no answer in time, chose"), chosen)})
+		fmt.Sprintf("%s: %s", i18n.T("no answer in time, chose"), chosen)})
 	m.historyDirty = true
 	m.ask = askState{}
 	return nil
@@ -300,7 +300,7 @@ func (m *uiModel) askBox() string {
 		marker := "   "
 		switch {
 		case i == m.ask.cursor:
-			marker = " ? "
+			marker = " ▸ "
 		case m.ask.checked[i]:
 			marker = " ✓ "
 		}
@@ -320,7 +320,7 @@ func (m *uiModel) askBox() string {
 		}
 		marker := "   "
 		if cr == m.ask.cursor {
-			marker = " ? "
+			marker = " ▸ "
 		}
 		entries = append(entries, style(cr, marker, label))
 	}
@@ -337,11 +337,11 @@ func (m *uiModel) askBox() string {
 		hints = i18n.T("enter — send · esc — back")
 	}
 	if left := m.askRemaining(); left > 0 {
-		hints = fmt.Sprintf("%s · ⏱ %s", hints, formatWait(left))
+		hints = fmt.Sprintf("%s · %s", hints, formatWait(left))
 	}
 	title := header
 	if q := strings.TrimSpace(m.ask.req.Question); q != "" {
 		title += "\n" + q
 	}
-	return m.floatingPanel(title, hints, entries, m.ask.cursor)
+	return m.floatingPanel(title, hints, entries, &listView{sel: m.ask.cursor})
 }

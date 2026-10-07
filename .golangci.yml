@@ -1,0 +1,39 @@
+version: "2"
+
+# The tree predates a linter, so the set is named rather than taken wholesale.
+# These four are the checks that find bugs rather than restate style; errcheck
+# and unused are off until the existing findings are dealt with, because
+# turning them on today would fail every build on debt that predates this file
+# (unchecked os.Chdir/Write in test helpers, dead Win32 procs in clipimg).
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - misspell
+    - staticcheck
+
+  settings:
+    staticcheck:
+      # SA* are the bug-finding checks. S1* (gosimple), ST* (stylecheck) and
+      # QF* (quickfix) are advice about how the code could read instead, which
+      # is not what a gate is for.
+      checks:
+        - all
+        - -S1*
+        - -ST*
+        - -QF*
+
+  exclusions:
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # The SA checks that fire in tests are about a helper's shape - an unused
+      # assignment on a fluent driver, an empty branch feeding Update - and not
+      # about the code under test.
+      - path: _test\.go
+        linters:
+          - staticcheck

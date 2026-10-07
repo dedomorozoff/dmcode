@@ -1,3 +1,485 @@
+# dmCode v0.2.3
+
+dmcode is a workspace now. The chat is still the agent you know; the same
+window also holds a real code editor — project tree, git, a terminal, splits,
+bookmarks and LSP — and switches between them with one key.
+
+> ### ⚠️ Two things to read before trusting them
+>
+> **The editor's keys and the terminal panel have been exercised, but not
+> driven for hours by a person.** The frames, the mouse arithmetic and the
+> chat-mode composition are covered by tests that assert the row counts and
+> the hit-testing, and the test suite runs on macOS and Windows as well as
+> Linux. What is still unproven is how the editor feels over a long session,
+> and nothing here has been driven by a person for hours on any platform.
+> The picture view added in this release is covered by tests only for the
+> same reason: nobody has watched an animated GIF play in a real terminal yet.
+>
+> **Sending a picture to a model is still unverified.** Attaching and
+> previewing are confirmed working on Windows against a live session; no
+> picture has been through a real vision endpoint, so whether the `image_url`
+> data URL dmcode puts on the wire is one a live endpoint accepts is untested.
+> Please report what breaks.
+
+## Install
+
+```bash
+# macOS / Linux / BSD
+curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
+```
+
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
+
+```bash
+go install github.com/dedomorozoff/dmcode@latest
+```
+
+## What's new since v0.2.2
+
+### The editor draws pictures instead of their bytes
+
+Open a PNG and the editor used to show you the file's bytes as prose: a column
+of `ÿØ` boxes, one per pixel row, that scrolled like source and — this is the
+part that mattered — **saved back over the picture**. `ctrl+s` on a `.png` wrote
+whatever was in the buffer into the file.
+
+A picture is now a tab of its own kind. It is drawn where the lines would be,
+at the pane's width, out of the same half-block renderer the chat's preview
+uses — one picture, one drawing routine, rather than two that differ by which
+half of dmcode opened it. There is no gutter: line numbers beside an image
+describe a document that does not exist. The caption on the last row carries the
+name, the dimensions, the format and — for an animation — which frame you are
+looking at, because a GIF with no frame counter reads as a flicker.
+
+**A picture tab is read-only, and that is enforced rather than promised.** Typing,
+`enter`, `backspace`, paste and `ctrl+s` do not reach the buffer: the key
+handler for a picture drops them before the editing switch every text tab falls
+into, and a paste — which arrives as one message carrying the whole text, and
+would walk straight past a check written for key presses — is refused where it
+lands. The keys that are about the workspace rather than the file keep working:
+switch tabs with `alt+←`/`alt+→`, scroll a tall picture with the wheel or
+`pgup`/`pgdn`.
+
+### Animated GIFs play
+
+A GIF is not a still with a `.gif` extension — the motion is the content, and a
+preview of frame zero is a preview of a video in the same sense. Every frame is
+decoded and composited at open, then advanced on a timer.
+
+Compositing is the part that is easy to leave out and obvious once you know: a
+GIF frame is the rectangle that *changed*, drawn over the frame before it, and
+the disposal method says whether the canvas is put back afterwards. Rendering
+the frames as decoded shows an empty cell for every partial frame, which in a
+real animation is most of them — so each frame is drawn onto the canvas the last
+one left behind, with `DisposalBackground` and `DisposalPrevious` honoured.
+
+The timer is one `tea.Tick` per frame, each scheduling the next, rather than a
+goroutine with a clock of its own. That is what makes the animation stop by
+itself: a closed tab, a switch to another file, or the chat screen covering the
+editor all mean there is nothing to advance, and the chain ends with no cancel
+path to get wrong. A flag keeps one animation from becoming two chains — every
+message asks for a frame, and without it the picture would run at twice the
+speed its own delays declare. A frame delay the file asks for is honoured, with
+a floor and a ceiling: a GIF may declare zero, which is a strobe rather than a
+picture, and a declared ten seconds is a picture that looks frozen.
+
+Frames are capped at 240, and a file over 64 MB opens as text with the reason
+on the status line — a worse view of a picture, and a far better outcome than
+pulling an arbitrarily large file into memory.
+
+### A file named `.png` that is not one opens as text, and says why
+
+The extension is the cheap first question and the bytes are the real one, so a
+`.png` that does not decode is not a tab that refuses to open: it is the text it
+actually is, with one line in the status line naming the reason. The same is true
+of the other direction — a picture overwritten with text reloads as text rather
+than going on showing the frame of a file that no longer exists.
+
+WebP is in the list of extensions worth trying and has no decoder in this build,
+exactly as in the chat: you get a named refusal rather than a filename being
+treated as prose.
+
+### The status bar stops describing a document that is not there
+
+`Ln 1, Col 1` under a rendered image is a cursor that is nowhere, and `LF UTF-8`
+is a question nobody asks about a PNG. A picture tab reports its dimensions and
+format instead, in the single pane and in each pane of a split alike.
+
+### Everything else from v0.2.2 stands
+
+The rest of what shipped in v0.2.2 is unchanged and still current. In brief: one
+file arriving under two names and the code comparing them — which made the
+workspace refuse its own files, made git operations fail on files that were
+plainly in the tree, made the editor open a file twice, and made saving not
+reload the tab, all fixed through `internal/pathnorm`; a closed terminal that
+left its shell holding the project directory; a white picture that drew as a
+field of dots because Go fuses multiply-add on arm64; Cline as a first-class
+provider in `/setup`; and `/setup` no longer outgrows a 22-row terminal.
+
+### One file has more than one name
+
+CI grew macOS and Windows runners in that release, and on the first run eight
+tests failed. All eight were the same thing: **the same file arrived under two
+names, and the code compared the names.** On a developer's machine those names
+are the same string — the temp directory, the checkout and the home directory
+are all spelled the one way the process already spells them — so nothing here
+was ever visible locally. Change where either side comes from, and it appears:
+
+- `t.TempDir()` says `/var/folders/...`, `os.Getwd()` says
+  `/private/var/folders/...`.
+- A Windows runner's `%TEMP%` is `C:\Users\RUNNER~1`, and the repository it
+  walks up into is `C:\Users\runneradmin`.
+- A symlinked checkout is not the directory it points at.
+
+What that cost, before this release:
+
+- **The workspace refused its own files.** `write_file` into a path inside your
+  project could be turned away as outside the working directory, naming a
+  directory the file was in. On macOS and on a Windows runner, this was
+  constant rather than occasional.
+- **Git operations failed on files that were plainly in the tree.** Staging,
+  unstaging, blame and the gutter's HEAD content all computed
+  `/private/var/.../a.go` against a root of `/var/...`, got `../../..`, and go-git
+  refused it: `invalid path "../../..": cannot use ".."`. The error arrives in
+  plumbing vocabulary, several layers from the spelling that caused it. It now
+  names both directories, in dmcode's words.
+- **The editor opened the same file twice.** A path typed by hand, a restored
+  session and a row clicked in the finder all spell it differently, so
+  `ctrl+o` on a file already open gave you a second tab, and every "is this
+  already open" question downstream was wrong along with it.
+- **Saving a file did not reload its tab.** The watcher reports the name the
+  operating system gave it; the tab holds the name the editor was opened with.
+
+`internal/pathnorm` is the answer in two functions — `Canonical` puts a path in
+the spelling this machine agrees on (links followed, 8.3 short name and letter
+case on Windows, missing tail appended for a file that does not exist yet), and
+`Same` is the comparison. The workspace boundary, the git layer, and the
+editor's tab list and file watcher all ask it now, and the boundary still refuses
+a symlink that leaves the tree — the retry is a fix for the spelling, not a way
+out of the check.
+
+### Closing a terminal now ends the shell
+
+`ClosePseudoConsole` signals the console and returns; it does not terminate the
+attached process. Closing the process handle straight afterwards only drops our
+reference to something still running. The shell lives on, a shell holds its
+working directory open, and a directory with a live handle in it cannot be
+deleted — so quitting the editor could leave a `cmd.exe` behind holding your
+project directory. The child is now terminated by pid and waited for, with a
+bounded wait: a shell that somehow refuses to die must not hang the UI on
+shutdown.
+
+### A white picture stopped drawing as a field of dots
+
+The ASCII preview picked its cell with three float multiplies, and Go fuses
+multiply-add on arm64 — one rounding where an x86 build does three. For pure
+white the fused sum lands a hair under 255, `int()` truncates rather than
+rounds, and the brightest pixel in the picture drew as the second-darkest glyph
+on a ramp that ends in space. An all-white image rendered as the emptiest
+possible picture on a Mac; a pale photograph came out one step too dark. It is
+integer arithmetic now, and the ramp length is folded into the numerator rather
+than dividing twice.
+
+### One more provider, and `/setup` fits a small terminal
+
+- **Cline** is a first-class option in `/setup`. It is a gateway rather than a
+  client-gated service: `api.cline.bot` serves plain OpenAI `/chat/completions`
+  with tool calling, and wants an ordinary key from `app.cline.bot`. Nothing
+  about it is faked, which is why it sits next to the others. The default model
+  is `anthropic/claude-sonnet-4-6`, because that is what Cline's docs name for
+  coding.
+- **`/setup` no longer outgrows the screen.** The panel's height budget counted
+  its header as three rows when the header is one row that wraps to two at 72
+  columns, so on a 22-row terminal the bottom border fell off. The header is
+  measured now rather than counted — which fixes the palette and the model
+  picker too, since all three go through the same helper. Sixteen providers
+  cannot each be visible on a 22-row terminal however they are drawn, so what is
+  asserted is the invariant that does hold: every option is on screen or counted
+  by the overflow marker, and the panel fits.
+- **OpenCode Zen's default model is `big-pickle`**, not
+  `nemotron-3-ultra-free`. Both places that name it — the wizard's option list
+  and the keyed preset — have to agree, or the wizard sets up a different model
+  than the key alone selects.
+
+### Every list marks the row under the cursor the same way
+
+The command list, `ctrl+p`, the model picker and the GGUF browser already drew
+the selected row with a triangle, so entering `/setup` from the palette changed
+the marker on the way in. The provider list, `/proxy`, `/lang`, `/sessions` and
+the `ask_user` options did the same. All of them use the triangle now, and the
+rule lives on the helper they all render through, so the next list inherits it
+instead of inventing a glyph. A question mark stays where it means something
+else — the prefix of a prompt title, as in `? provider key`.
+
+### The installers verify what they downloaded
+
+Every release publishes a `sha256sums.txt` over its assets, and both installers
+check their download against it before installing: a mismatch stops with both
+digests printed, and a release that predates the file — or a machine with no
+`sha256` tool — is told so and continues. This is integrity against a corrupt
+download, not a signature; **releases are still unsigned.**
+
+### CI now runs where the code branches
+
+The suite runs on macOS and Windows as well as Linux, and under `-race` on the
+two images with a C toolchain cgo can find. This is what found everything in the
+first section, and it will keep finding what a developer's machine cannot show.
+`golangci-lint` runs the set named in `.golangci.yml` — govet, ineffassign,
+misspell, staticcheck's SA checks — plus a `gofmt` pass over tracked files, and
+it gates the push. Turning it on caught two pieces of dead code in the editor
+along with the style findings.
+
+### Also in this release
+
+The v0.2.1 follow-ups are listed under *What's new since v0.2.0* below and
+shipped in this tag: `/image` is reachable again, resuming a session no longer
+loses the code, `dmcode -s` reopens a session, clicking a change in the
+transcript opens the file at that line, and the editor stops showing an
+`[untitled]` tab it did not open.
+
+## What's new since v0.2.0
+
+Three fixes from the workspace's first days, no new surface:
+
+- `ctrl+e` in the editor now returns to the chat — the key that opened the
+  editor toggles both ways. `ctrl+q` still works, `F1` keeps the help panel,
+  and the help table and the status hints name the new binding.
+- The project tree no longer opens itself when the editor is entered. It
+  answers `ctrl+b`, `F9` or its own status-bar icon, and otherwise stays
+  where the user last left it.
+- Status-icon tooltips no longer freeze over the transcript. Chat mode keeps
+  tracking the icon strip on mouse motion, so a callout left over from the
+  editor mode clears on the first move instead of sitting on the screen with
+  nothing to remove it.
+- `ctrl+q` quits dmcode from the chat — the key the sidebar has advertised
+  all along actually works now. Inside the editor it still means "back to
+  the chat"; from the chat the key ends the program, the way `ctrl+c` did
+  on an empty prompt.
+- A multi-cursor crash reported from the field is fixed: a line join moved
+  the lines under the cursors below it without moving the cursors, and the
+  next backspace sliced past the end of an empty line, taking the whole
+  session down. Joins now run strictly bottom-up regardless of cursor
+  order — which also un-skips the higher of two joins — and shift every
+  cursor at or below the joined line; a stale cursor is clamped instead of
+  panicking.
+- Every `edit_file` and `write_file` now draws what it changed in the
+  transcript: a header naming the file, real line numbers from the old and
+  the new text in a gutter, and the code highlighted with the editor's
+  syntax theme over a dim green or red wash for the added and removed rows.
+- Those line numbers are now something you can act on. **Click any line of a
+  change block and the editor opens the file there**, cursor on the row you
+  pointed at — including a line the write removed, which opens the line that
+  replaced it. `alt+g` (or `/changes`) does the same without aiming: it opens
+  the next change below where you are, and pressing it again walks the rest of
+  the session's edits and comes back round.
+- A click that is not on a change row still does nothing, so the
+  select-and-copy that a plain click is careful not to break keeps working.
+- A `write_file` cut off by the model's output limit no longer loses the
+  turn when the model had narrated first: the re-ask goes ahead, preceded
+  by a blank line, with a concrete recipe for writing the file in chunks.
+  When the turn really cannot be saved, the error says what to ask for
+  next.
+- The editor's status notes (config reloaded, terminal exited and friends)
+  no longer surface on the chat screen; the open git panel keeps its
+  context line.
+- `/new` and `/sessions` now close the workspace's clean tabs, so the
+  next `ctrl+e` starts from a bare editor rather than the previous
+  conversation's files. A tab with unsaved typing survives the reset.
+- A fresh program start opens a bare editor too: the workspace no longer
+  restores the tabs the last run saved. The standalone editor keeps its
+  session restore.
+- The editor no longer shows an `[untitled]` tab it did not open. Opening the
+  workspace on a session where the agent had changed nothing used to put a tab
+  bar reading `1:[untitled]` over an empty gutter and a status line reading
+  `Ln 1, Col 1` — a document nobody has, reporting a cursor that is nowhere.
+  It now says **no file open — Ctrl+O to find one · Ctrl+P for a new file**,
+  over nothing: no tab, no gutter, no line number. The moment you type, the
+  buffer appears under its own name as anything else would.
+  `ctrl+w` with no file open is no longer an exit, which it never should have
+  been — `ctrl+q` and `F1` are the advertised ones.
+- Typing `/` now matches what you type against command names **in order,
+  anywhere in the name**, instead of only as a prefix. One keystroke used to
+  leave one row — `/p` was `/proxy` and nothing else, `/n` was `/new` — so the
+  list closed the moment it opened, and finding `/resume` meant backspacing out
+  to reach the `r`. The order answers "which one did I mean": an exact name,
+  then names starting with it, then the rest by how close together your letters
+  appear. `/md` is `/mode`, not `/models`; `/c` is `/cd`, not `/changes`. The
+  window is also a few rows taller, since more commands stay plausible at once.
+- `/debug` works, is named in the README, and appeared in neither the `/` list
+  nor `ctrl+p` — typing `/de` matched nothing at all. A command hidden this way
+  is the list of commands and the set of commands being two different sets, so
+  it is listed now, from both places, and a test pins that every command that
+  answers is offered.
+- **`/image` is reachable again.** Two ways to lose a path, both of them
+  reporting nothing wrong: typing `/im` and pressing enter **ran** `/image` with
+  no argument, so a usage line appeared, the prompt was emptied, and the path
+  typed next was sent to the model as a question about a filename — even though
+  the list had just offered that row as the completion of what was typed. A
+  command that needs an argument is now completed into the prompt instead of run,
+  and `/resume <id>` gets the same treatment. And a quoted path
+  (`/image "…/my shot.png"`) is a path again: the quotes a terminal puts around
+  a dropped name, or a user copies back, were being taken as part of the file
+  name.
+- **Resuming a session no longer loses the code.** Switching to or resuming a
+  saved conversation printed the prompts and the prose and nothing else: every
+  tool call, every tool result and every change block was gone, so a session came
+  back as a conversation in which the agent appeared to have done no work. The
+  store had all of it — the function parts are in the events and survive to disk —
+  and the transcript builder simply never read it. Both halves are fixed: the
+  store hands back what each event contained, and the transcript draws it through
+  the same functions the live turn draws it with. A restored change block is a
+  real change block again, so clicking it still opens the file at that line.
+- **`dmcode -s` reopens a session, and dmcode tells you the command when it
+  exits.** A bare `-s` resumes the newest session, `-s <id>` that one, and the
+  other flags still work beside it (`dmcode -s -C ~/myapp`). The hint is printed
+  after the TUI closes — the only moment a line about the session survives the
+  window going away — and the resumed conversation is printed before the first
+  frame, so a resume does not open on an empty transcript beside a model that
+  remembers everything.
+
+## What's new since v0.1.7
+
+### The editor lives in the same window
+
+`ctrl+e` opens it, `ctrl+q` puts it back. One screen rather than one window per
+thing: the transcript is the main area when the editor is closed, and the panel
+toggles stay live in both modes.
+
+What came across is the editor body — syntax highlighting, the project tree, a
+git panel with inline diffs and blame, a real PTY, fuzzy file finding, splits,
+bookmarks, LSP completion and go-to-definition. dmcode keeps its own agent, so
+the old editor's AI panel, ghost text, chat rail and DAP debug panel are gone
+rather than half-present.
+
+`F1` inside the editor lists its keys. It is a long list on purpose: a project
+tree, a git panel and a terminal are three different grammars, and a table in a
+README is not where anyone looks while they are typing.
+
+### One status bar, and only what belongs to the screen you are on
+
+The bottom row is the workspace's, and its four icons are: editor, tree, git,
+terminal. Each is clickable, each shows its label on hover.
+
+The editor icon is first deliberately. Every other icon opens a panel; that one
+changes what the whole screen is, so it belongs where the eye lands before a row
+of toggles has been read. It is also the only icon whose state is a mode rather
+than a panel, and it lights up while the editor is up.
+
+That reorder freed the rest of the row. In chat mode the bar now carries the
+icons and the git branch, and nothing else: `Ln 4, Col 12`, the encoding, the
+language tag and the F1 hint are gone, because they described a file nobody can
+see on that screen while competing with the only part of the row a user can act
+on. In the editor mode all of it comes back — the file's own state belongs to
+the file's own screen.
+
+### The agent can see
+
+Drop a screenshot into the prompt, paste one from the clipboard, or attach one
+with `/image` — and dmcode draws it, in colour, before you send it.
+
+An attachment lives in exactly one place at a time: while it waits it is a strip
+above the input, and when you send that same rendering moves into the transcript.
+Three ways in — `/image <path>`, drag-and-drop of a picture path in the prompt,
+and `ctrl+v` for the clipboard's picture on Windows.
+
+Reduction happens before both outputs: an image over 1568px is shrunk first, and
+*then* the preview is drawn and the same bytes go on the wire. Drawing the
+original and sending a reduced copy would show you a preview of something the
+model never saw.
+
+Pictures reach only providers on the `/chat/completions` wire, and dmcode says so
+at the moment you attach rather than failing later inside the SDK.
+`DMCODE_API=chat` sends everything down the chat wire instead.
+
+### A conversation you can take back
+
+`ctrl+z` rewinds the last turn — the prompt comes back to the input and the
+answer goes with it — and `/sessions` lists conversations with `/resume` to
+switch between them.
+
+### Selection, yolo mode, and the tools that now work
+
+`ask_user` and `todo_write` compiled, passed their unit tests and did nothing at
+all: the transcript showed a tool call and a schema-validation message, and no
+result. The cause was not their logic but their *generated argument schema* —
+`functiontool` derives it from the Go type, so a field with no description
+reaches the model as a bare `{"type":"string"}`, and a field is required unless
+its JSON tag says otherwise. `ask_user` had declared its options as a nested
+object, so every shape a model naturally sent was refused. Both are flat now,
+every field described, with the exact payloads a model was observed to send driven
+through a real `runner.Run` turn by the tests.
+
+`shift+tab` is yolo: act's reach with `ask_user` withdrawn, so "the agent will
+not stop to ask" is a property of what it can reach rather than a line in an
+instruction it is asked to believe.
+
+A drag selects in the transcript and releases into the clipboard, with a
+character count in the status bar — a selection can be one word or three screens
+of build output, and "copied" alone does not say which happened. `/mouse` turns
+it off, because with the mouse on the terminal's own drag-select is gone.
+
+## Fixes worth naming
+
+Each of these looked correct and was wrong, and none was found by reading the
+code. They are here because the pattern is the lesson.
+
+- **The chat frame was one row short with the terminal docked**, so the status bar
+  sat a character above the bottom edge. Chat mode framed the terminal without
+  the leading divider row that `termExtraRows` reserves and that every mouse
+  coordinate counts from.
+- **The tests wrote to your clipboard.** Every copy and cut test in the editor
+  suite put its own fixture — "hello", "alpha" — into the one clipboard the user
+  has, so a `go test ./...` left that text behind; and a paste test *read* the
+  real one, so what the buffer received depended on what you had copied last.
+  The clipboard is now reached through two indirections in both packages and
+  swapped per test, and a test fails if anything calls the clipboard directly.
+- **`ctrl+v` was bound to a key the terminal never sends.** A terminal that binds
+  `ctrl+v` converts it to a paste, and a screenshot produces no text to fall back
+  to, so the shortcut did nothing at all.
+- **A clipboard format the OS advertises is not one it will render.** Windows
+  synthesises formats from the ones it holds, so an app that lists `CF_DIBV5`
+  and declines to render it left the format "available" while `GetClipboardData`
+  returned `ERROR_NOT_FOUND` — as "Element not found", with a readable `CF_DIB`
+  beside it.
+- **The picture bounds check forgot the header shared the allocation**, so a DIB
+  overstating its dimensions by more than a header's worth read past the end of
+  memory the clipboard owns.
+- **The preview never reset its colour**, so the caption below was drawn in the
+  colour of the image's bottom-right pixel — invisible on a picture with dark
+  edges, which is why a careful look missed it.
+- **The help had rotted.** It listed a duplicate git-diff row, a tree-ops row
+  pointing at `help.tree_ops`, a key that does not exist and so rendered as the
+  raw key, and it left out F12, Ctrl+Space and Ctrl+/. It also had no entry for
+  the way back to the chat. A test now holds the list to the catalog and to
+  itself, which is how the missing key was found.
+
+## Known limitations
+
+Stated plainly, not hidden.
+
+- Sending a picture to a model is unverified end to end (above).
+- A rewind does not rewrite `~/.dmcode/history.jsonl`, so an undone prompt is
+  still offered by `/history` until the next start.
+- Cancellation reaches the context but not the process, so a running
+  `run_command` finishes on its own schedule.
+- The workspace boundary is a lexical check at resolve time; the tools that open
+  files close the symlink gap themselves, but `grep` skips symlinks rather than
+  following one out of the tree.
+- The editor's sub-agent nested turn, the rewind against a real runner, and the
+  session-file round trip through `runner.Run` all have unit tests and no
+  end-to-end check.
+
 # dmCode v0.1.8
 
 The agent can see. Drop a screenshot into the prompt, paste one from the

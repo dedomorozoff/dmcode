@@ -54,7 +54,31 @@ Working on a task of more than a trivial edit:
 Asking the user:
 - When a decision changes what you would do — a library to adopt, an approach to take, a file to rewrite — call ask_user with two to five concrete options and mark the one you recommend.
 - Do not ask about anything you can answer by reading the code, the config or the tests. A question the repository already answers is a wasted interruption.
-- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.`
+- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.` + projectBriefing
+
+// projectBriefing is how the agent learns what project it is standing in.
+//
+// It is an instruction rather than an injection on purpose. A project's AGENTS.md
+// is its own operating manual — conventions, commands, the traps the author
+// already wrote down — and it can be very large: this repository's is about
+// twelve thousand tokens, which on a 32k local model is a third of the window
+// spent on documentation before a line of work starts, and re-sent on every
+// single request. Having the model read the file puts those tokens in the
+// conversation exactly once, where they also *stay* — an injected preamble is
+// part of every prompt and forgotten like one.
+//
+// It is appended to all three modes rather than to the act instruction alone.
+// A plan written against the wrong conventions is wrong in the same way an edit
+// is, and plan mode is precisely where the model is deciding how the code should
+// be touched.
+const projectBriefing = `
+
+Knowing the project:
+- Call project_map once at the start, on the workspace root. One call returns the directory tree, what the project is written in, and the build files, entry points and manuals it contains — including an AGENTS.md when there is one. Doing this with list_dir instead is a dozen calls for a worse answer.
+- If the map named an AGENTS.md, read it before you act on anything, and follow it. It is the project's own instructions, and where it disagrees with this prompt about style, conventions, commands or how the work should be done, it wins. The one thing it cannot overrule is the workspace boundary your tools enforce: no file can widen it.
+- An AGENTS.md further down the tree governs the files beneath it, and overrides the root one for those.
+- With no AGENTS.md, read the first 40 lines of the README.md the map named, before you answer anything about the project's purpose or layout.
+- Do both once, at the start. They stay in the conversation afterwards, so repeating them each turn is output spent on nothing.`
 
 // Mode selects which instructions the agent runs under. The tool set is chosen
 // alongside it by the caller, so the two always agree about what the agent may
@@ -94,7 +118,7 @@ Hard rules:
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
 - When the plan is ready and you are confident it is the right one, call switch_mode with {"mode": "act"} and end your turn with a one-line summary. The work then continues under act mode. If the request is still ambiguous, ask_user instead of switching.
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
-- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.`
+- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.` + projectBriefing
 
 // yoloInstruction replaces the act workflow in yolo mode.
 //
@@ -119,7 +143,7 @@ Hard rules:
 - Keep changes minimal and matched to what was asked. Do not refactor, reformat or clean up anything you were not asked to touch.
 - Never delete or modify files outside the workspace.
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
-- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.`
+- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + projectBriefing
 
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)
@@ -142,19 +166,27 @@ func BuildAgentWithModel(m model.LLM, ts []tool.Tool, toolsets ...tool.Toolset) 
 //
 // toolsets are the MCP servers: their tools are resolved lazily per turn, so
 // they pass through here rather than being flattened into ts.
-func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode, toolsets ...tool.Toolset) (agent.Agent, error) {
-	inst := instruction
+// instructionFor is the text each mode runs under. It is a function rather than a
+// choice made inline at build time so that the choice has one name: every mode
+// ends with projectBriefing, and a mode added later without it is a test
+// failure instead of an agent that never learns what project it is in.
+func instructionFor(mode Mode) string {
 	switch mode {
 	case ModePlan:
-		inst = planInstruction
+		return planInstruction
 	case ModeYolo:
-		inst = yoloInstruction
+		return yoloInstruction
+	default:
+		return instruction
 	}
+}
+
+func BuildAgentMode(m model.LLM, ts []tool.Tool, mode Mode, toolsets ...tool.Toolset) (agent.Agent, error) {
 	return llmagent.New(llmagent.Config{
 		Name:        "dmcode",
 		Model:       m,
 		Description: "Autonomous coding agent that reads, writes, and builds code.",
-		Instruction: inst,
+		Instruction: instructionFor(mode),
 		Tools:       ts,
 		Toolsets:    toolsets,
 	})

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 	"github.com/dedomorozoff/dmcode/internal/todo"
 )
 
@@ -117,6 +119,15 @@ var ErrOutsideRoot = fmt.Errorf("outside the working directory")
 // resolve. A symlink inside the tree is therefore the known soft spot — the
 // alternative is refusing to create any file that does not exist yet, which
 // would break write_file outright.
+//
+// A *failed* lexical check is not final, because the root is stored with its
+// links followed and the argument may not be: SetRoot canonicalises its side and
+// nothing canonicalises this one, so a path spelled /var/... against a root
+// spelled /private/var/... — or an 8.3 short name against its long form — reads
+// as a stranger to a boundary that is looking at the very same directory. So a
+// refusal is retried with both sides in one spelling, which is pathnorm's whole
+// job. The path handed back is still the caller's: canonical is only ever
+// something to compare, never something to open.
 func resolve(p string) (string, error) {
 	if p == "" {
 		p = "."
@@ -133,6 +144,9 @@ func resolve(p string) (string, error) {
 		return abs, nil
 	}
 	if err := insideRoot(base, abs); err != nil {
+		if real := pathnorm.Canonical(abs); real != abs && insideRoot(base, real) == nil {
+			return abs, nil
+		}
 		return "", fmt.Errorf("%s is %w: %s", p, ErrOutsideRoot, base)
 	}
 	return abs, nil
@@ -304,9 +318,11 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 	if err != nil {
 		return readFileResult{}, err
 	}
-	if len(data) > maxReadBytes {
-		data = data[:maxReadBytes]
-	}
+	// The whole file is read so the line count is honest and offset_line can
+	// page across it. Capping before the split — as an earlier version did —
+	// made total_lines the count of the truncated tail and meant a file over
+	// the cap could never be read past its first 256 KB, which is exactly the
+	// "large file" the tool's own description points offset_line at.
 	lines := strings.Split(string(data), "\n")
 	total := len(lines)
 	start := max(in.Offset, 0)
@@ -319,11 +335,17 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 		end = start + in.Limit
 		trunc = true
 	}
-	if len(data) == maxReadBytes {
+	content := strings.Join(lines[start:end], "\n")
+	if len(content) > maxReadBytes {
+		// A single page can still be enormous when the model asks for a wide
+		// window; the cap keeps one response from becoming the whole context
+		// window. It cuts the page, not the file: the next offset_line still
+		// reaches what came after it.
+		content = content[:maxReadBytes]
 		trunc = true
 	}
 	return readFileResult{
-		Content:    strings.Join(lines[start:end], "\n"),
+		Content:    content,
 		TotalLines: total,
 		Truncated:  trunc,
 	}, nil
@@ -334,7 +356,8 @@ type writeFileArgs struct {
 	Content string `json:"content"`
 }
 type writeFileResult struct {
-	BytesWritten int `json:"bytes_written"`
+	BytesWritten int    `json:"bytes_written"`
+	Diff         string `json:"diff,omitempty"`
 }
 
 func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
@@ -358,29 +381,22 @@ func writeFile(ctx agent.Context, in writeFileArgs) (writeFileResult, error) {
 			return writeFileResult{}, err
 		}
 	}
-	if err := writeFileAtomic(path, []byte(in.Content)); err != nil {
+	before, err := writeFileAtomic(path, []byte(in.Content))
+	if err != nil {
 		return writeFileResult{}, err
 	}
-	return writeFileResult{BytesWritten: len(in.Content)}, nil
+	return writeFileResult{BytesWritten: len(in.Content), Diff: DiffBlock(in.Path, before, in.Content)}, nil
 }
 
-// writeFileAtomic writes data through a temporary file in the target directory
+// writeFileBytes writes data through a temporary file in the target directory
 // and a rename, so an unexpected exit cannot leave a truncated or half-written
 // file behind. os.Rename replaces an existing destination on all platforms
 // dmcode supports.
 //
-// This is also the single point every write passes through — write_file and
-// edit_file both land here — so it is where the session's change tally is kept.
-// Doing it here rather than in each tool means no write can reach disk without
-// being counted.
-func writeFileAtomic(path string, data []byte) error {
-	// What is being replaced, read before the rename. A read failure other than
-	// "not there" is not fatal to the write: the tool's job is to write, and
-	// refusing to overwrite a file that cannot be read would be a worse outcome
-	// than a tally that undercounts. The failure is therefore swallowed and the
-	// write counted as wholly additive.
-	before, _ := readIfExists(path)
-
+// It is the raw writer with no side effects: neither the change tally nor the
+// undo journal sees this write. Those belong in writeFileAtomic, which wraps it
+// — and in restoreFile, which must undo a change without becoming one.
+func writeFileBytes(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".dmcode-*")
 	if err != nil {
 		return err
@@ -399,18 +415,59 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tmpName)
 		return err
 	}
-	recordChange(path, before, string(data))
 	return nil
 }
 
-type editFileArgs struct {
-	Path       string `json:"path"`
+// writeFileAtomic writes data through writeFileBytes and keeps the session's
+// two records of what it did: the change tally and the undo journal.
+//
+// This is the single point every write passes through — write_file, edit_file
+// and the batch edits all land here — so no write can reach disk without being
+// counted *and* without being recorded for ctrl+z to take back. Doing it here
+// rather than in each tool is what keeps the two seams from drifting apart:
+// a write that reached the tally but not the journal could be counted and then
+// not undone, which is the panel's lie again in a different tense.
+func writeFileAtomic(path string, data []byte) (string, error) {
+	// What is being replaced, read before the rename. A read failure other than
+	// "not there" is not fatal to the write: the tool's job is to write, and
+	// refusing to overwrite a file that cannot be read would be a worse outcome
+	// than a tally that undercounts. The failure is therefore swallowed and the
+	// write counted as wholly additive.
+	before, _ := readIfExists(path)
+	_, statErr := os.Stat(path)
+	existed := statErr == nil
+
+	if err := writeFileBytes(path, data); err != nil {
+		return before, err
+	}
+	recordChange(path, before, string(data))
+	pushUndo(undoEntry{kind: undoWrite, path: path, before: before, existed: existed})
+	return before, nil
+}
+
+// editItem is one replacement inside a batch of edits. It is the same shape as
+// a single edit_file call's old_string/new_string pair, so a model that has
+// learned the simple form already knows the batch form.
+type editItem struct {
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all,omitempty"`
 }
+
+type editFileArgs struct {
+	Path       string `json:"path"`
+	OldString  string `json:"old_string,omitempty"`
+	NewString  string `json:"new_string,omitempty"`
+	ReplaceAll bool   `json:"replace_all,omitempty"`
+	// Edits applies several replacements to the file in one call, in order,
+	// and writes once. A model editing five lines of one file spends one round
+	// trip instead of five, and the transcript shows one diff block instead of
+	// five rewrites. When it is set, old_string/new_string are ignored.
+	Edits []editItem `json:"edits,omitempty"`
+}
 type editFileResult struct {
-	Replacements int `json:"replacements"`
+	Replacements int    `json:"replacements"`
+	Diff         string `json:"diff,omitempty"`
 }
 
 func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
@@ -426,99 +483,112 @@ func editFile(ctx agent.Context, in editFileArgs) (editFileResult, error) {
 		return editFileResult{}, err
 	}
 	src := string(data)
-	if in.OldString == "" {
-		return editFileResult{}, fmt.Errorf("old_string is empty")
-	}
 
-	// 1. Try exact match
-	write := func(content string) (editFileResult, error) {
-		if err := writeFileAtomic(path, []byte(content)); err != nil {
+	write := func(content string, reps int) (editFileResult, error) {
+		before, err := writeFileAtomic(path, []byte(content))
+		if err != nil {
 			return editFileResult{}, err
 		}
-		return editFileResult{}, nil
+		return editFileResult{Replacements: reps, Diff: DiffBlock(in.Path, before, content)}, nil
 	}
-	if in.ReplaceAll {
-		n := strings.Count(src, in.OldString)
-		if n > 0 {
-			if _, err := write(strings.ReplaceAll(src, in.OldString, in.NewString)); err != nil {
-				return editFileResult{}, err
+
+	// The batch form works on the in-memory copy and writes only when every
+	// edit has landed, so a call that fails half-way changes nothing on disk:
+	// an edit_file that applied three of five replacements and then errored
+	// would leave the file in a state no diff describes. Each edit sees the
+	// result of the ones before it, which is what lets later edits anchor on
+	// text the earlier ones introduced.
+	if len(in.Edits) > 0 {
+		cur := src
+		total := 0
+		for i, e := range in.Edits {
+			out, n, err := editOne(cur, e.OldString, e.NewString, e.ReplaceAll)
+			if err != nil {
+				return editFileResult{}, fmt.Errorf("edit %d failed in %s: %w", i+1, in.Path, err)
 			}
-			return editFileResult{Replacements: n}, nil
+			cur, total = out, total+n
+		}
+		return write(cur, total)
+	}
+
+	out, n, err := editOne(src, in.OldString, in.NewString, in.ReplaceAll)
+	if err != nil {
+		return editFileResult{}, fmt.Errorf("%s: %w", in.Path, err)
+	}
+	return write(out, n)
+}
+
+// editOne applies one replacement to src and returns the new content and how
+// many replacements were made.
+//
+// Three strategies are tried in order: the exact match, then the same match on
+// newline-normalised text (Windows files carry \r\n while models quote \n), and
+// finally a whitespace-tolerant line-granular match — the fuzzy path, which is
+// what makes a snippet quoted with spaces against a tab-indented file land.
+// An old_string found more than once refuses a single replacement, exactly as
+// a whole-file edit_file call does; replace_all replaces every occurrence.
+func editOne(src, oldS, newS string, replaceAll bool) (string, int, error) {
+	if oldS == "" {
+		return src, 0, fmt.Errorf("old_string is empty")
+	}
+
+	// 1. Exact match.
+	if replaceAll {
+		if n := strings.Count(src, oldS); n > 0 {
+			return strings.ReplaceAll(src, oldS, newS), n, nil
 		}
 	} else {
-		idx := strings.Index(src, in.OldString)
+		idx := strings.Index(src, oldS)
 		if idx >= 0 {
-			if strings.Index(src[idx+1:], in.OldString) >= 0 {
-				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+			if strings.Index(src[idx+1:], oldS) >= 0 {
+				return src, 0, fmt.Errorf("old_string matches multiple locations; include more context or set replace_all")
 			}
-			if _, err := write(src[:idx] + in.NewString + src[idx+len(in.OldString):]); err != nil {
-				return editFileResult{}, err
-			}
-			return editFileResult{Replacements: 1}, nil
+			return src[:idx] + newS + src[idx+len(oldS):], 1, nil
 		}
 	}
 
-	// 2. Fallback: normalize newlines (\r\n <-> \n) for Windows/Unix compatibility
+	// 2. Newline-normalised (\r\n <-> \n) for Windows/Unix compatibility.
 	hasCRLF := strings.Contains(src, "\r\n")
 	normSrc := strings.ReplaceAll(src, "\r\n", "\n")
-	normOld := strings.ReplaceAll(in.OldString, "\r\n", "\n")
-	normNew := strings.ReplaceAll(in.NewString, "\r\n", "\n")
-
-	if in.ReplaceAll {
-		n := strings.Count(normSrc, normOld)
-		if n > 0 {
+	normOld := strings.ReplaceAll(oldS, "\r\n", "\n")
+	normNew := strings.ReplaceAll(newS, "\r\n", "\n")
+	if replaceAll {
+		if n := strings.Count(normSrc, normOld); n > 0 {
 			normSrc = strings.ReplaceAll(normSrc, normOld, normNew)
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if _, err := write(normSrc); err != nil {
-				return editFileResult{}, err
-			}
-			return editFileResult{Replacements: n}, nil
+			return normSrc, n, nil
 		}
 	} else {
 		idx := strings.Index(normSrc, normOld)
 		if idx >= 0 {
 			if strings.Index(normSrc[idx+1:], normOld) >= 0 {
-				return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+				return normSrc, 0, fmt.Errorf("old_string matches multiple locations; include more context or set replace_all")
 			}
 			normSrc = normSrc[:idx] + normNew + normSrc[idx+len(normOld):]
 			if hasCRLF {
 				normSrc = strings.ReplaceAll(normSrc, "\n", "\r\n")
 			}
-			if _, err := write(normSrc); err != nil {
-				return editFileResult{}, err
-			}
-			return editFileResult{Replacements: 1}, nil
+			return normSrc, 1, nil
 		}
 	}
 
-	// 3. Fallback: whitespace-normalized, line-granular match. Models habitually
-	// reproduce a snippet with the file's tabs swapped for spaces or an
-	// indentation level off by one; the words are right, the spacing is not.
-	// The window whose lines agree once whitespace runs are collapsed is taken
-	// as the match, and new_string's indentation is replaced with the file's
-	// own, so the edit lands the way the file was formatted.
-	count, out, err := fuzzyReplace(src, in.OldString, in.NewString, in.ReplaceAll)
+	// 3. Whitespace-normalized, line-granular match.
+	count, out, err := fuzzyReplace(src, oldS, newS, replaceAll)
 	if err != nil {
-		return editFileResult{}, err
+		return src, 0, err
 	}
 	if count == 1 {
-		if _, err := write(out); err != nil {
-			return editFileResult{}, err
-		}
-		return editFileResult{Replacements: 1}, nil
+		return out, 1, nil
 	}
-	if count > 1 && in.ReplaceAll {
-		if _, err := write(out); err != nil {
-			return editFileResult{}, err
-		}
-		return editFileResult{Replacements: count}, nil
+	if count > 1 && replaceAll {
+		return out, count, nil
 	}
 	if count > 1 {
-		return editFileResult{}, fmt.Errorf("old_string matches multiple locations in %s; include more context or set replace_all", in.Path)
+		return src, 0, fmt.Errorf("old_string matches multiple locations; include more context or set replace_all")
 	}
-	return editFileResult{}, fmt.Errorf("old_string not found in %s", in.Path)
+	return src, 0, fmt.Errorf("old_string not found")
 }
 
 // leadingWS returns the indentation prefix of a single line.
@@ -620,9 +690,19 @@ func fuzzyReplace(src, oldS, newS string, replaceAll bool) (int, string, error) 
 }
 
 // isIgnoredDir returns true if directory should be skipped (VCS / vendor / caches).
+//
+// The list is deliberately short and every entry is a directory no project keeps
+// source in. `build`, `bin` and `obj` are the obvious omissions and stay out on
+// purpose: all three hold real code in enough projects that skipping them would
+// hide the very code a reader was sent to find. Generated output — dist, target,
+// out, the virtualenvs and the tool caches — is unambiguous in a way, and a
+// single checked-in .exe in dist/ was enough to make a Go project's map claim it
+// was twelve percent executable.
 func isIgnoredDir(name string) bool {
 	switch name {
-	case ".git", ".crush", ".hg", ".svn", "node_modules", ".idea", ".vscode", "vendor":
+	case ".git", ".crush", ".hg", ".svn", "node_modules", ".idea", ".vscode", "vendor",
+		"dist", "target", "out", ".next", ".nuxt", ".turbo", ".cache", ".gradle",
+		".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
 		return true
 	default:
 		return false
@@ -1111,9 +1191,16 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	defer cancel()
 
 	args := append(append([]string{}, flags...), in.Command)
+	// The command runs inside commandEffect rather than directly, so the tree is
+	// compared either side of it and anything it changed reaches the tally. This
+	// is the only instrument that could change the workspace without saying so,
+	// and before it the panel reported what it was told rather than what
+	// happened — which for `sed -i` is nothing at all.
 	cmd := exec.CommandContext(cmdCtx, shell, args...)
 	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := commandEffect(Root(), func() ([]byte, error) {
+		return cmd.CombinedOutput()
+	})
 	result := runCommandResult{Output: truncate(string(out), 20000)}
 	if cmdCtx.Err() != nil {
 		if parentCtx.Err() != nil {
@@ -1127,6 +1214,145 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 		result.Output += fmt.Sprintf("\n[command failed: %v]", err)
 	}
 	return result, nil
+}
+
+type moveFileArgs struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+type moveFileResult struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// moveFile renames a file within the workspace.
+//
+// It exists because the only route that worked before was `mv` through
+// run_command, which the shell watcher can only mark as "changed somewhere" —
+// the tally knew a file moved but not that it *moved*, and ctrl+z had nothing
+// to take back. As a tool of its own the move records its two facts, the
+// source's removal and the destination's appearance, and the undo journal can
+// invert it with a rename back.
+//
+// The destination is refused when it already exists: a move that silently
+// replaced a file would destroy content the agent may never have read, and the
+// explicit sequence delete-then-move is the honest way to say "replace".
+func moveFile(ctx agent.Context, in moveFileArgs) (moveFileResult, error) {
+	src, err := resolve(in.Source)
+	if err != nil {
+		return moveFileResult{}, err
+	}
+	dst, err := resolve(in.Destination)
+	if err != nil {
+		return moveFileResult{}, err
+	}
+	if err := withinRootAfterLinks(src); err != nil {
+		return moveFileResult{}, err
+	}
+	// The destination may not exist yet, so the symlink re-check runs on the
+	// deepest ancestor that does, and again after MkdirAll — the same dance
+	// write_file does, so a link hiding inside the new path cannot carry the
+	// file out of the workspace.
+	if dir := filepath.Dir(dst); dir != "." && dir != "" {
+		if err := withinRootAfterLinks(existingAncestor(dir)); err != nil {
+			return moveFileResult{}, err
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return moveFileResult{}, err
+		}
+		if err := withinRootAfterLinks(dir); err != nil {
+			return moveFileResult{}, err
+		}
+	}
+
+	info, err := os.Stat(src)
+	if err != nil {
+		return moveFileResult{}, err
+	}
+	if info.IsDir() {
+		return moveFileResult{}, fmt.Errorf("%s is a folder; move_file moves files", in.Source)
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return moveFileResult{}, fmt.Errorf("%s already exists; refusing to overwrite it — delete it first if that is what is meant", in.Destination)
+	}
+
+	before, _ := readIfExists(src)
+	if err := os.Rename(src, dst); err != nil {
+		// A rename fails across volumes (different drive letters on Windows).
+		// Copy then delete is the fallback that keeps the move working there;
+		// the tally and the journal see the same before/after either way.
+		if cpErr := copyFile(src, dst); cpErr != nil {
+			return moveFileResult{}, fmt.Errorf("move failed: %v (copy+delete also failed: %v)", err, cpErr)
+		}
+		if rmErr := os.Remove(src); rmErr != nil {
+			return moveFileResult{}, fmt.Errorf("moved %s to %s but could not remove the original: %v", src, dst, rmErr)
+		}
+	}
+	recordChange(src, before, "")
+	recordChange(dst, "", before)
+	pushUndo(undoEntry{kind: undoMove, path: src, before: before, dest: dst})
+	return moveFileResult{From: src, To: dst}, nil
+}
+
+// copyFile copies one file to another, creating the destination's directory.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+type deleteFileArgs struct {
+	Path string `json:"path"`
+}
+type deleteFileResult struct {
+	Removed string `json:"removed"`
+}
+
+// deleteFile removes one file from the workspace.
+//
+// Like move_file it is a dedicated operation rather than `rm` through the
+// shell, for the same two reasons: the tally can record exactly what left (the
+// whole content, against the session baseline) instead of a touched flag, and
+// the undo journal can bring it back. A folder is refused — deleting a tree
+// through a tool that says "one file" is how a user loses a directory in a
+// single line of history.
+func deleteFile(ctx agent.Context, in deleteFileArgs) (deleteFileResult, error) {
+	path, err := resolve(in.Path)
+	if err != nil {
+		return deleteFileResult{}, err
+	}
+	if err := withinRootAfterLinks(path); err != nil {
+		return deleteFileResult{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return deleteFileResult{}, err
+	}
+	if info.IsDir() {
+		return deleteFileResult{}, fmt.Errorf("%s is a folder; delete_file deletes files", in.Path)
+	}
+	before, _ := readIfExists(path)
+	if err := os.Remove(path); err != nil {
+		return deleteFileResult{}, err
+	}
+	recordChange(path, before, "")
+	pushUndo(undoEntry{kind: undoDelete, path: path, before: before})
+	return deleteFileResult{Removed: path}, nil
 }
 
 // pagingNote is the part of the contract every walk-based tool shares, kept in
@@ -1143,7 +1369,7 @@ const pagingNote = "Results are paginated: pass offset to continue where next_of
 func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Reads a file. Optional offset_line and limit_lines for large files. Returns content, total line count and whether it was truncated.",
+		Description: "Reads a file. offset_line and limit_lines page through large files; when truncated is true, continue from the next line with offset_line. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
 	}, readFile)
 	if err != nil {
 		return nil, err
@@ -1185,12 +1411,34 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	runCommandTool, err := functiontool.New(functiontool.Config{
 		Name:        "run_command",
-		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600.",
+		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root.",
 	}, runCommand)
 	if err != nil {
 		return nil, err
 	}
+	moveFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "move_file",
+		Description: "Moves a file to a new path inside the workspace, creating parent directories. Refuses to overwrite an existing destination. Counted in the session's changes and undone by ctrl+z.",
+	}, moveFile)
+	if err != nil {
+		return nil, err
+	}
+	deleteFileTool, err := functiontool.New(functiontool.Config{
+		Name:        "delete_file",
+		Description: "Deletes one file. Counted in the session's changes and undone by ctrl+z.",
+	}, deleteFile)
+	if err != nil {
+		return nil, err
+	}
+	projectMapTool, err := makeProjectMapTool()
+	if err != nil {
+		return nil, err
+	}
 	webSearchTool, err := MakeWebSearchTool()
+	if err != nil {
+		return nil, err
+	}
+	fetchURLTool, err := MakeFetchURLTool()
 	if err != nil {
 		return nil, err
 	}
@@ -1203,7 +1451,8 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	out := []tool.Tool{
 		readFileTool, writeFileTool, editFileTool, listDirTool,
-		grepTool, globTool2, runCommandTool, webSearchTool,
+		grepTool, globTool2, runCommandTool, moveFileTool, deleteFileTool,
+		webSearchTool, fetchURLTool, projectMapTool,
 	}
 	return append(out, todoTools...), nil
 }
@@ -1211,20 +1460,27 @@ func MakeTools() ([]tool.Tool, error) {
 // readOnlyNames are the tools a planning turn may use. run_command is absent on
 // purpose: a shell can write a file through >, Out-File, tee or touch, so
 // "read-only" cannot be enforced from the prompt alone and the tool is withheld
-// instead of trusted.
+// instead of trusted. move_file and delete_file are absent for the same reason
+// at their own scale: they change the tree by name.
 //
 // The plan tools are here for the same reason they are in the full set: a plan
 // is a document, not an edit. Withholding them from plan mode would leave the
 // mode whose entire output is a plan unable to publish one.
+//
+// web_search and fetch_url are the two instruments that reach past the
+// workspace boundary on purpose — a search engine, a page it found — and both
+// only ever read, so they belong in a planning turn too.
 var readOnlyNames = map[string]bool{
-	"read_file":  true,
-	"list_dir":   true,
-	"grep":       true,
-	"glob":       true,
-	"web_search": true,
-	"todo_write": true,
-	"todo_set":   true,
-	"todo_read":  true,
+	"read_file":   true,
+	"list_dir":    true,
+	"project_map": true,
+	"grep":        true,
+	"glob":        true,
+	"web_search":  true,
+	"fetch_url":   true,
+	"todo_write":  true,
+	"todo_set":    true,
+	"todo_read":   true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the

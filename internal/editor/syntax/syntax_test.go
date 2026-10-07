@@ -1,0 +1,114 @@
+package syntax
+
+import (
+	"strings"
+	"testing"
+
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+)
+
+func TestHighlightBufferGo(t *testing.T) {
+	h := New("monokai")
+	code := "package main\n\nfunc main() {\n\tprintln(\"hello\")\n}\n"
+	hl := h.HighlightBuffer("main.go", code)
+	if len(hl) < 5 {
+		t.Fatalf("expected at least 5 lines, got %d", len(hl))
+	}
+	// package main should have runes with styles
+	if len(hl[0]) != len([]rune("package main")) {
+		t.Fatalf("expected line 0 length %d, got %d", len([]rune("package main")), len(hl[0]))
+	}
+}
+
+func TestHighlightCodeRows(t *testing.T) {
+	h := New("monokai")
+	rows := h.HighlightCode("main.go", "package main\n\nfunc f() {\n}\n", nil)
+	plain := []string{"package main", "", "func f() {", "}"}
+	if len(rows) != len(plain) {
+		t.Fatalf("expected %d rows, got %d", len(plain), len(rows))
+	}
+	for i := range plain {
+		if got := strings.TrimSpace(stripCode(rows[i])); got != plain[i] {
+			t.Fatalf("row %d = %q, want %q", i, got, plain[i])
+		}
+	}
+}
+
+func TestHighlightCodeDecorate(t *testing.T) {
+	h := New("monokai")
+	decorated := h.HighlightCode("main.go", "func f() {}\n", func(base lipgloss.Style) lipgloss.Style {
+		return base.Background(lipgloss.Color("22"))
+	})
+	if len(decorated) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(decorated))
+	}
+	// The decoration changes the paint, never the text.
+	if strings.Contains(decorated[0], "\x1b[48;5;22m") && !strings.Contains(stripCode(decorated[0]), "func f() {}") {
+		t.Fatalf("background lost the code: %q", decorated[0])
+	}
+}
+
+func stripCode(s string) string {
+	return ansi.Strip(s)
+}
+
+func TestHighlightBufferFallback(t *testing.T) {
+	h := New("monokai")
+	code := "some plain text"
+	hl := h.HighlightBuffer("unknown.xyz123", code)
+	if len(hl) != 1 {
+		t.Fatalf("expected 1 line, got %d", len(hl))
+	}
+	if len(hl[0]) != len([]rune(code)) {
+		t.Fatalf("expected line length %d, got %d", len([]rune(code)), len(hl[0]))
+	}
+}
+
+func TestCommentTokens(t *testing.T) {
+	cases := []struct {
+		file, content, prefix, suffix string
+	}{
+		{"main.go", "package main\n", "//", ""},
+		{"app.py", "print(1)\n", "#", ""},
+		{"x.c", "int main(void) {}\n", "//", ""},
+		{"style.css", "body {}\n", "/*", "*/"},
+		{"index.html", "<html></html>\n", "<!--", "-->"},
+		{"page.vue", "<template></template>\n", "<!--", "-->"},
+		{"Makefile", "all:\n", "#", ""},
+		{"a.sql", "SELECT 1;\n", "--", ""},
+		{"a.lua", "print('x')\n", "#", ""},
+		{"a.erl", "ok.\n", "%", ""},
+		{"a.hs", "main = putStrLn \"x\"\n", "--", ""},
+	}
+	for _, c := range cases {
+		p, s := CommentTokens(c.file, c.content)
+		if p != c.prefix || s != c.suffix {
+			t.Errorf("CommentTokens(%s) = (%q,%q), want (%q,%q)",
+				c.file, p, s, c.prefix, c.suffix)
+		}
+	}
+}
+
+func TestLang(t *testing.T) {
+	cases := []struct{ file, want string }{
+		{"main.go", "go"},
+		{"index.php", "php"},
+		{"server.py", "python"},
+		{"app.ts", "ts"},
+		{"notes.txt", "text"},
+		{"README", ""},
+	}
+	for _, c := range cases {
+		if got := Lang(c.file); got != c.want {
+			t.Errorf("Lang(%q) = %q, want %q", c.file, got, c.want)
+		}
+	}
+}
+
+func TestCommentTokensUnknown(t *testing.T) {
+	p, s := CommentTokens("blob.unknownext", "some text")
+	if p != "" || s != "" {
+		t.Fatalf("unknown type: got (%q,%q), want empty", p, s)
+	}
+}

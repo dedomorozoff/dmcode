@@ -28,6 +28,16 @@ type SetupOption struct {
 	// starts the server itself.
 	GGUF     bool
 	GGUFPath string
+	// Free marks an option whose whole catalogue is reachable without a paid
+	// plan: an anonymous or local endpoint, or a provider whose free tier is the
+	// point. It exists so /models can mark and filter a row, which is a
+	// question about the endpoint rather than about the model id — and it is a
+	// field rather than a word in the label so the label stays translatable and
+	// the flag cannot drift away from what it claims.
+	//
+	// A provider that mixes free and paid (OpenRouter, Kilo, Mistral) is not
+	// marked here: those are told apart by their model ids, which say so.
+	Free bool
 }
 
 // setupOptions is the single list of providers offered by both the interactive
@@ -38,22 +48,120 @@ type SetupOption struct {
 // talks to keyless hosts without any key anyway.
 func SetupOptions() []SetupOption {
 	return []SetupOption{
-		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low"},
-		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true},
+		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low", Free: true},
+		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true, Free: true},
 		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
-		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true},
+		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true, Free: true},
 		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
-		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "nemotron-3-ultra-free", EnvKey: "OPENCODE_API_KEY", API: APIResponses},
-		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses},
-		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIResponses},
+		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "big-pickle", EnvKey: "OPENCODE_API_KEY", API: APIResponses, Free: true},
+		{Label: i18n.T("Cline — gateway to Anthropic, OpenAI and Google models"), Signup: "https://app.cline.bot/settings/api-keys", BaseURL: "https://api.cline.bot/api/v1", Model: "anthropic/claude-sonnet-4-6", EnvKey: "CLINE_API_KEY", API: APIChat},
+		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses, Free: true},
+		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIResponses, Free: true},
 		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
-		{Label: i18n.T("Cerebras — free tier, no card, very fast"), Signup: "https://inference.cerebras.ai", BaseURL: "https://api.cerebras.ai/v1", Model: "qwen-3.8-27b", EnvKey: "CEREBRAS_API_KEY", API: APIChat},
+		{Label: i18n.T("Cerebras — free tier, no card, very fast"), Signup: "https://inference.cerebras.ai", BaseURL: "https://api.cerebras.ai/v1", Model: "qwen-3.8-27b", EnvKey: "CEREBRAS_API_KEY", API: APIChat, Free: true},
 		{Label: i18n.T("NVIDIA NIM — free credits, many coding models"), Signup: "https://build.nvidia.com", BaseURL: "https://integrate.api.nvidia.com/v1", Model: "z-ai/glm-5.3", EnvKey: "NVIDIA_API_KEY", API: APIChat},
-		{Label: i18n.T("SambaNova — free key, fast OpenAI-compatible"), Signup: "https://cloud.sambanova.ai", BaseURL: "https://api.sambanova.ai/v1", Model: "Meta-Llama-3.3-70B-Instruct", EnvKey: "SAMBANOVA_API_KEY", API: APIChat},
+		{Label: i18n.T("SambaNova — free key, fast OpenAI-compatible"), Signup: "https://cloud.sambanova.ai", BaseURL: "https://api.sambanova.ai/v1", Model: "Meta-Llama-3.3-70B-Instruct", EnvKey: "SAMBANOVA_API_KEY", API: APIChat, Free: true},
 		{Label: i18n.T("Hugging Face — free credits, OpenAI-compatible router"), Signup: "https://huggingface.co/settings/tokens", BaseURL: "https://router.huggingface.co/v1", Model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", EnvKey: "HF_TOKEN", API: APIChat},
 		{Label: i18n.T("Your own OpenAI-compatible endpoint"), EnvKey: "OPENAI_API_KEY", API: APIChat},
 	}
+}
+
+// FreeEndpoint reports whether every model this base URL serves is reachable
+// without paying for it.
+//
+// It answers a question about the endpoint, so it is asked of the endpoint: a
+// loopback address is somebody's own machine no matter what they run on it,
+// and anything else is matched against the free options /setup offers by host.
+// A host dmcode has never heard of is not claimed to be free — a wrong "free" is
+// a bill, and a missing badge is only a missing badge.
+func FreeEndpoint(baseURL string) bool {
+	if baseURL == "" {
+		return false
+	}
+	if isLoopback(baseURL) {
+		return true
+	}
+	host := endpointHost(baseURL)
+	if host == "" {
+		return false
+	}
+	for _, o := range SetupOptions() {
+		if o.Free && endpointHost(o.BaseURL) == host {
+			return true
+		}
+	}
+	return false
+}
+
+// FreeModelID reports whether the endpoint itself said this model is free, by
+// naming it so: OpenRouter's ":free", Kilo's "kilo-auto/free", a "-free"
+// suffix. The check is on whole segments rather than a substring, because
+// "freeplay" and "freestyle" are not free models and marking them would put a
+// paid row behind a free badge.
+func FreeModelID(id string) bool {
+	for _, part := range strings.FieldsFunc(strings.ToLower(id), func(r rune) bool {
+		return r == '-' || r == '_' || r == '/' || r == ':' || r == '.'
+	}) {
+		if part == "free" {
+			return true
+		}
+	}
+	return false
+}
+
+// FreeModel reports whether one row of /models can be used without paying. It is
+// the row's own answer — the endpoint's free tier, or the endpoint's own
+// naming — and never a guess made from the model alone.
+func FreeModel(p Provider, id string) bool {
+	return FreeModelID(id) || FreeEndpoint(p.BaseURL)
+}
+
+// endpointHost reduces a base URL to the host:port a second one would carry, so
+// two spellings of the same endpoint compare equal. A URL is compared this way
+// rather than as a string because .env holds whatever the user pasted, with or
+// without a trailing slash and with either spelling of the scheme.
+func endpointHost(baseURL string) string {
+	s := strings.TrimSpace(strings.ToLower(baseURL))
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	if i := strings.IndexAny(s, "/?#"); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.LastIndex(s, "@"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+// isLoopback reports whether the URL names this machine. An Ollama or a
+// llama-server on 127.0.0.1 costs nothing to call whatever model it holds,
+// which is the only thing "free" means here.
+//
+// An empty URL is not loopback: there is no endpoint at all, and a provider
+// built from one is not serving anything.
+func isLoopback(baseURL string) bool {
+	host := endpointHost(baseURL)
+	if host == "" {
+		return false
+	}
+	if strings.HasPrefix(host, "[") {
+		// A bracketed IPv6 literal carries its own colons, so the port can only
+		// be told from the address by the bracket.
+		if i := strings.LastIndex(host, "]"); i >= 0 {
+			return strings.Contains(host[:i], "::1")
+		}
+		return false
+	}
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	switch host {
+	case "localhost", "0.0.0.0", "::1", "::", "host.docker.internal", "ollama":
+		return true
+	}
+	return strings.HasPrefix(host, "127.")
 }
 
 // SetupVars is the .env content a chosen option produces. It is shared by the

@@ -18,3 +18,8 @@ llama/
 
 # Local model weights are gigabytes and never belong in history.
 model/*.gguf
+
+# workspace scratch
+tmp/
+i18n.new
+.dmcode-editor-session.json

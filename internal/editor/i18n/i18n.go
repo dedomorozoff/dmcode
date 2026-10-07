@@ -1,0 +1,696 @@
+// Package i18n provides UI string translation (en/ru).
+//
+// A Translator is an immutable value holding the active language; it is
+// stored on the editor model and resolved against read-only catalogs, so
+// there is no global mutable state.
+package i18n
+
+import (
+	"fmt"
+	"strings"
+)
+
+// Lang identifies a supported interface language.
+type Lang string
+
+const (
+	En Lang = "en"
+	Ru Lang = "ru"
+)
+
+// LangInfo describes one selectable interface language.
+type LangInfo struct {
+	Code   string // value stored in config ([ui] lang)
+	Native string // display name in its own language
+}
+
+// Supported returns every interface language dmed offers, in display order.
+// Adding a new language means appending one entry here and providing a catalog
+// (see ruCatalog) plus its keys in Resolve.
+func Supported() []LangInfo {
+	return []LangInfo{
+		{Code: "en", Native: "English"},
+		{Code: "ru", Native: "Русский"},
+	}
+}
+
+// Resolve maps a config value to a supported language, defaulting to English.
+func Resolve(name string) Lang {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "ru", "russian", "русский":
+		return Ru
+	default:
+		return En
+	}
+}
+
+// Translator resolves UI strings for a fixed language.
+type Translator struct {
+	lang Lang
+}
+
+// New returns a Translator for lang.
+func New(lang Lang) Translator { return Translator{lang: lang} }
+
+// Lang returns the active language.
+func (t Translator) Lang() Lang { return t.lang }
+
+// T returns the translated string for key, formatted with args.
+// Unknown keys fall back to English, then to the key itself.
+func (t Translator) T(key string, args ...any) string {
+	cat := enCatalog
+	if t.lang == Ru {
+		cat = ruCatalog
+	}
+	s := cat[key]
+	if s == "" {
+		s = enCatalog[key]
+	}
+	if s == "" {
+		s = key
+	}
+	if len(args) == 0 {
+		return s
+	}
+	return fmt.Sprintf(s, args...)
+}
+
+var enCatalog = map[string]string{
+	// Git status line / panel
+	"git.no_repo":         "no repository",
+	"git.init_hint":       "(i: init repo, esc/q: close)",
+	"git.hints":           "(space: stage, a: all, c: commit, d: diff, b: branch, f: fetch, p: push, q: close)",
+	"git.status_count":    "%d changed, %d staged",
+	"git.norepo_msg":      "no git repo",
+	"git.init_failed":     "git init failed: %s",
+	"git.init_ok":         "initialized git repo at %s",
+	"git.already_repo":    "already a git repo",
+	"git.no_dir":          "no directory to init",
+	"git.staged":          "staged: %s",
+	"git.unstaged":        "unstaged: %s",
+	"git.stage_error":     "stage error: %s",
+	"git.unstage_error":   "unstage error: %s",
+	"git.staged_all":      "staged all (%d files)",
+	"git.refreshed":       "refreshed",
+	"git.status_error":    "git status error: %s",
+	"git.commit_failed":   "commit failed: %s",
+	"git.committed":       "committed: %s",
+	"git.log_error":       "git log error: %s",
+	"git.branches_error":  "git branches error: %s",
+	"git.switched":        "switched to %s",
+	"git.switch_error":    "switch error: %s",
+	"git.already_on":      "already on %s",
+	"git.created":         "created branch %s",
+	"git.create_error":    "create error: %s",
+	"git.new_branch_name": "new branch name:",
+	"git.diff_error":      "diff error: %s",
+	"git.log_hint":        "(j/k: navigate, Tab: diff focus, esc/q: back, r: refresh)",
+	"git.no_commits":      "no commits",
+	"git.commit_count":    "(%d commits)",
+	"git.branch_hint":     "(j/k: switch, Enter: checkout, n: new branch, esc/q: back, r: refresh)",
+	"git.branch_new_hint": "(Enter: create, Esc: cancel)",
+	"git.op_fetch":        "fetch",
+	"git.op_push":         "push",
+	"git.no_remote":       "no remote (origin) configured",
+	"git.transferring":    "%s…",
+	"git.transfer_done":   "%s: done",
+	"git.transfer_error":  "%s failed: %s",
+	"git.blame_error":     "git blame: %s",
+
+	// Git labels rendered in the status line
+	"git.prefix_status":    " git ",
+	"git.prefix_log":       " LOG ",
+	"git.prefix_branch":    " BRANCH ",
+	"git.new_branch_label": " new branch: ",
+
+	// Status bar
+	"status.f1_help":    "F1 help ",
+	"status.f8_pane":    "F8 pane ",
+	"status.embed_chat": "Ctrl+E chat ",
+	"status.lncol":      "Ln %d, Col %d ",
+	"status.tip_editor": "Editor mode (Ctrl+E)",
+	"status.tip_tree":   "Project tree (Ctrl+B)",
+	"status.tip_git":    "Git panel (Ctrl+G)",
+	"status.tip_chat":   "AI chat (Alt+A)",
+	"status.tip_term":   "Terminal (Alt+T)",
+	"status.tip_splitv": "Vertical split (Ctrl+\\ / F6)",
+	"status.tip_splith": "Horizontal split (Ctrl+Alt+H / F7)",
+
+	// The buffer area with no file open in it.
+	"editor.nothing_open": "no file open — Ctrl+O to find one · Ctrl+P for a new file",
+
+	// A picture opened in a tab is drawn instead of its text, and cannot be
+	// edited — the caption and the reason a file would not decode both land here.
+	"editor.image_failed": "cannot draw this picture: %s",
+	"editor.image_hint":   "picture — read-only, Ctrl+E for chat",
+
+	// Prompt / commit lines
+	"prompt.open_file":    " open file: ",
+	"prompt.new_file":     " new file: ",
+	"prompt.new_folder":   " new folder: ",
+	"prompt.rename":       " rename to: ",
+	"prompt.delete_q":     " delete %s? (Y)es / (N)o / (Esc) Cancel ",
+	"prompt.trash_q":      " move %s to trash? (Y)es / (N)o / (Esc) Cancel ",
+	"prompt.save_as":      " save as: ",
+	"prompt.save_changes": " save changes? ",
+	"prompt.yes_no":       "(Y)es / (N)o / (Esc) Cancel",
+	"git.commit_line":     " git commit: ",
+	"git.commit_hint":     "(Enter: commit, Esc: close)",
+
+	// Editor messages
+	"msg.saved":               "saved",
+	"msg.save_failed":         "save failed: %s",
+	"msg.save_failed_gen":     "save failed",
+	"msg.cannot_save":         "cannot save: no file name",
+	"msg.image_readonly":      "this is a picture — there is nothing to edit or save",
+	"msg.image_failed":        "opened as text: %s",
+	"msg.new_file":            "new file: %s",
+	"msg.open_failed":         "open failed: %s",
+	"msg.watch_failed":        "cannot watch %s for external changes: %s",
+	"msg.created_folder":      "created folder: %s",
+	"msg.create_folder_fail":  "create folder failed: %s",
+	"msg.renamed":             "renamed to %s",
+	"msg.rename_failed":       "rename failed: %s",
+	"msg.duplicated":          "copy created: %s",
+	"msg.duplicate_failed":    "copy failed: %s",
+	"msg.deleted":             "deleted: %s",
+	"msg.delete_failed":       "delete failed: %s",
+	"msg.trashed":             "moved to trash: %s",
+	"msg.trash_failed":        "trash failed: %s",
+	"msg.already_exists":      "already exists: %s",
+	"msg.reloaded":            "reloaded from disk",
+	"msg.reloaded_name":       "reloaded: %s",
+	"msg.kept":                "kept buffer changes",
+	"msg.copied":              "copied to clipboard",
+	"msg.no_comment":          "no comment syntax for this file type",
+	"msg.word_wrap_on":        "word wrap on",
+	"msg.word_wrap_off":       "word wrap off",
+	"msg.blame_on":            "git blame: %d lines",
+	"msg.blame_off":           "git blame off",
+	"msg.blame_loading":       "git blame…",
+	"msg.blame_none":          "no committed lines to show",
+	"msg.cut":                 "cut to clipboard",
+	"msg.pasted":              "pasted",
+	"msg.external":            "file modified externally: (r)eload or (i)gnore?",
+	"msg.config_reloaded":     "config reloaded",
+	"msg.plugin_reloaded":     "plugin reloaded: %s",
+	"msg.plugin_installed":    "plugin installed: %s",
+	"msg.plugin_uninstalled":  "plugin uninstalled: %s",
+	"plugin.store_title":      " Plugin store — Enter to install/remove, Esc to close ",
+	"plugin.installed":        "installed",
+	"plugin.not_installed":    "not installed",
+	"plugin.loading":          " loading remote plugins... ",
+	"plugin.downloading":      "downloading %s...",
+	"msg.lsp_missing":         "LSP server missing, run: %s",
+	"msg.edit_config":         "edit config, save to apply",
+	"msg.no_git_changes":      "no git changes",
+	"msg.no_more_occurrences": "no more occurrences",
+	"msg.replaced_one":        "replaced 1 occurrence",
+	"msg.uppercased":          "uppercased",
+	"msg.project":             "project: %s",
+	"msg.added_cursor":        "added cursor",
+	"msg.bookmark_added":      "bookmark added: line %d",
+	"msg.bookmark_removed":    "bookmark removed: line %d",
+	"msg.bookmark_jump":       "bookmark: line %d",
+	"msg.no_bookmarks":        "no bookmarks",
+	"msg.selected":            "selected: type to replace all occurrences",
+	"msg.no_definition":       "no definition found",
+
+	// Project tree bottom hint bar (wrapped to the panel width at render time)
+	"tree.tip_new_file":  "new file · n",
+	"tree.tip_new_dir":   "new folder · N",
+	"tree.tip_rename":    "rename · r",
+	"tree.tip_duplicate": "duplicate · d",
+	"tree.tip_delete":    "delete · Del",
+
+	// Diff bottom bar
+	"git.diff_hint":  " Space stage  c commit  a stage-all  r refresh  d full-diff  l log  Tab diff",
+	"git.diff_focus": " j/k scroll  h/l h-scroll  Tab/Esc back",
+	"git.log_hint2":  " j/k commits  Tab diff  Esc files  r refresh",
+	"git.diff_label": " diff ",
+	"git.log_tag":    " LOG ",
+	"git.diff_stats": "  +%d ~%d -%d",
+
+	// Conflict / search / replace / AI / finder lines
+	"conflict.label":        " CONFLICT ",
+	"conflict.msg":          " File modified on disk: [R]eload / [I]gnore? (%s)",
+	"conflict.scroll":       "  (\u2191\u2193 scroll)",
+	"search.label":          " search: ",
+	"search.none":           " [no matches]",
+	"search.hint":           "  (Enter/F3: next, Shift+F3: prev, Esc: close)",
+	"goto.label":            " go to line: ",
+	"goto.hint":             "  (N or N:C, +/- relative; Enter: jump, Esc: close)",
+	"replace.find":          " find: ",
+	"replace.with":          " replace: ",
+	"replace.hint":          "  (Tab: switch, Enter: replace, Ctrl+A: all, Esc: close)",
+	"chat.tip_new":          "new thread · Ctrl+U",
+	"chat.tip_copy":         "copy reply · Ctrl+Y",
+	"chat.tip_clear":        "clear history · Ctrl+L",
+	"chat.tip_close":        "close · Esc",
+	"term.unfocused":        "terminal paused — click it to type again",
+	"chat.thread":           "thread: %s",
+	"chat.thread_new":       "new chat thread",
+	"chat.cleared":          "AI history cleared",
+	"chat.clear_confirm":    "press Ctrl+L again to clear ALL chat history",
+	"chat.nothing_copy":     "nothing to copy yet",
+	"chat.todo":             " Plan:",
+	"chat.ask_label":        "AI asks: ",
+	"chat.ask_hint":         "(Enter: answer, Esc: skip)",
+	"chat.ask_hint_choices": "\u2191\u2193 choose / Enter: answer / Tab: edit / Esc: skip",
+	"chat.ask_status":       "the AI is waiting for your answer",
+	"chat.mode_plan":        "plan mode: the AI can only read; switch back to let it edit",
+	"chat.mode_act":         "act mode: the AI can propose changes (you still review them)",
+	"chat.switch_status":    "the AI asks to leave plan mode  (y switch / n stay)",
+	"chat.subagent_status":  "the AI delegated a task to a sub-agent — working, Esc to cancel  (review in Alt+L)",
+	"chat.fallback_notice": "No local AI answered, so this session uses Pollinations (free, no key). " +
+		"Your prompts, files and tool output now leave this machine. " +
+		"Configure a provider (Ctrl+P → 'AI: Preferences') or set free_fallback = false to turn this off.",
+	"chat.fallback_status": "using Pollinations (free, no key)",
+	"chat.fallback_badge":  "CLOUD",
+	"finder.prompt":        " find file: ",
+
+	// Palette command titles & descriptions
+	"cmd.save_t": "File: Save", "cmd.save_d": "Ctrl+S — Save active buffer",
+	"cmd.save_as_t": "File: Save As...", "cmd.save_as_d": "Save active buffer to a new path",
+	"cmd.close_tab_t": "File: Close Tab", "cmd.close_tab_d": "Ctrl+W — Close active tab",
+	"cmd.open_t": "File: Open by Path...", "cmd.open_d": "Ctrl+T — Open file prompt",
+	"cmd.open_folder_t": "File: Open Folder...", "cmd.open_folder_d": "Choose a project folder with the system dialog",
+	"folder.title": " Open folder: ", "folder.up": ".. (parent directory)", "folder.empty": "— empty directory —",
+	"folder.hint":    " \u2193/\u2191 move · Enter/Right enter folder · o use this folder · `~` home · `/` root · Esc cancel",
+	"cmd.new_file_t": "File: New File...", "cmd.new_file_d": "Create a new file by path",
+	"cmd.new_folder_t": "File: New Folder...", "cmd.new_folder_d": "Create a directory by path",
+	"cmd.finder_t": "File: Fuzzy Finder...", "cmd.finder_d": "Ctrl+O — Quick file search",
+	"cmd.search_t": "Edit: Find in File...", "cmd.search_d": "Ctrl+F — Search text",
+	"cmd.replace_t": "Edit: Replace in File...", "cmd.replace_d": "Ctrl+H — Find and replace",
+	"cmd.goto_line_t": "Edit: Go to Line...", "cmd.goto_line_d": "Ctrl+L — Jump to line N (N:C or +/- relative)",
+	"cmd.word_wrap_t": "Edit: Toggle Word Wrap", "cmd.word_wrap_d": "Alt+Z — Wrap long lines to fit pane width",
+	"cmd.undo_t": "Edit: Undo", "cmd.undo_d": "Ctrl+Z — Undo change",
+	"cmd.redo_t": "Edit: Redo", "cmd.redo_d": "Ctrl+Y — Redo change",
+	"cmd.uppercase_t": "Edit: Uppercase", "cmd.uppercase_d": "Ctrl+U — Uppercase selection or buffer",
+	"cmd.duplicate_line_t": "Edit: Duplicate Line", "cmd.duplicate_line_d": "Duplicate the current line below",
+	"cmd.delete_line_t": "Edit: Delete Line", "cmd.delete_line_d": "Delete the current line",
+	"cmd.move_line_up_t": "Edit: Move Line Up", "cmd.move_line_up_d": "Move the current line up",
+	"cmd.move_line_down_t": "Edit: Move Line Down", "cmd.move_line_down_d": "Move the current line down",
+	"cmd.toggle_comment_t": "Edit: Toggle Comment", "cmd.toggle_comment_d": "Comment/uncomment the current line or selection",
+	"cmd.goto_definition_t": "Edit: Go to Definition", "cmd.goto_definition_d": "Jump to the symbol definition under the cursor",
+	"cmd.toggle_bookmark_t": "Edit: Toggle Bookmark", "cmd.toggle_bookmark_d": "Toggle a bookmark on the current line",
+	"cmd.git_commit_t": "Git: Commit Panel", "cmd.git_commit_d": "Ctrl+G — Status, stage & commit",
+	"cmd.git_diff_t": "Git: Diff Selected File", "cmd.git_diff_d": "D in panel — Side-by-side vs HEAD",
+	"cmd.git_next_t": "Git: Next Hunk", "cmd.git_next_d": "Alt+] — Jump next hunk",
+	"cmd.git_prev_t": "Git: Prev Hunk", "cmd.git_prev_d": "Alt+[ — Jump prev hunk",
+	"cmd.git_blame_t": "Git: Toggle Blame", "cmd.git_blame_d": "Alt+B — show who/when changed each line",
+	"cmd.split_v_t": "View: Split Vertical", "cmd.split_v_d": "Ctrl+\\ — Side-by-side split",
+	"cmd.split_h_t": "View: Split Horizontal", "cmd.split_h_d": "Ctrl+Alt+H — Stacked split",
+	"cmd.pane_focus_t": "View: Focus Other Pane", "cmd.pane_focus_d": "Ctrl+Alt+P — Switch pane",
+	"cmd.pane_close_t": "View: Close Current Pane", "cmd.pane_close_d": "Ctrl+Alt+W — Unsplit",
+	"cmd.tree_toggle_t": "View: Toggle Project Tree", "cmd.tree_toggle_d": "Ctrl+B — Sidebar tree",
+	"cmd.tree_rename_t": "Project: Rename", "cmd.tree_rename_d": "rename the selected file or folder",
+	"cmd.tree_duplicate_t": "Project: Duplicate", "cmd.tree_duplicate_d": "copy the selected file next to itself",
+	"cmd.tree_delete_t": "Project: Delete", "cmd.tree_delete_d": "delete the selected file or folder (with confirmation)",
+	"tree.no_selection": "select an entry in the project panel first",
+	"cmd.terminal_t":    "View: Toggle Terminal", "cmd.terminal_d": "Alt+T — ConPTY/PTY shell panel at the bottom",
+	"cmd.agent_tasks_t": "Agent: Task Panel", "cmd.agent_tasks_d": "Alt+L — Background agent task list",
+	"cmd.agent_new_t": "Agent: New Task", "cmd.agent_new_d": "Run a background refactoring task",
+	"cmd.settings_t": "Settings: Open Config", "cmd.settings_d": "Open .dmcode.conf for editing",
+	"cmd.help_t": "Help: Show Keybindings", "cmd.help_d": "F1 / Ctrl+E — Help panel",
+	"cmd.quit_t": "App: Quit Editor", "cmd.quit_d": "Ctrl+Q — Exit",
+	"cmd.lang_select_t": "Language: Select...", "cmd.lang_select_d": "Choose interface language",
+	"cmd.plugin_store_t": "Plugins: Install...", "cmd.plugin_store_d": "Install or remove built-in plugins",
+
+	// Language chooser
+	"lang.choose":  " Select language: ",
+	"lang.current": " (current)",
+
+	// Misc
+	"msg.lang_set": "language set to %s",
+
+	// Agent panel
+	"msg.agent_queued":        "agent task queued",
+	"msg.agent_cancelled":     "cancelled %s",
+	"agent.task_label":        " Agent task: ",
+	"agent.sub_badge":         " [sub]",
+	"msg.agent_nothing":       "nothing to review for this task",
+	"msg.agent_apply_fail":    "apply failed: %s",
+	"msg.agent_commit_fail":   "changes applied but commit failed: %s",
+	"msg.agent_applied":       "agent changes applied and committed",
+	"msg.agent_applied_files": "%d created, %d modified — opened in tabs",
+	"msg.agent_discarded":     "agent changes discarded",
+
+	// Agent review + AI settings
+	"agent.review_hint": "  (y: apply all, n: reject, Tab: next file, \u2191\u2193 scroll)",
+
+	// Help panel
+	"help.title":             "dmcode — keys",
+	"help.close_hint":        "(F1/Esc closes)",
+	"help.scroll_hint":       " (j/k/PgUp/PgDn/wheel scroll)",
+	"help.to_chat":           "back to the chat (the ▣ icon in the status bar)",
+	"help.complete":          "LSP completion popup",
+	"help.comment":           "toggle comment on the selection",
+	"help.save":              "save active tab (untitled: Save As)",
+	"help.palette":           "Command Palette (Ctrl+P / F2 / double Shift)",
+	"help.select":            "select text range",
+	"help.clipboard":         "copy / cut / paste",
+	"help.search":            "search in file (Enter/F3 next, Shift+F3 prev)",
+	"help.replace":           "search & replace (Tab switch, Enter rep, Ctrl+A all)",
+	"help.goto_line":         "go to line (N or N:C, +/- relative)",
+	"help.word_wrap":         "toggle word wrap",
+	"help.blame":             "toggle inline git blame",
+	"help.git_panel":         "Git panel; Ctrl+B switches back to tree",
+	"help.goto_def":          "go to definition (LSP)",
+	"help.git_diff":          "side-by-side diff vs HEAD",
+	"help.hunk":              "jump to previous / next Git hunk",
+	"help.bookmark":          "toggle bookmark (Alt+M or middle-click the gutter), jump next/prev (Alt+N / S+Alt+N)",
+	"help.finder":            "fuzzy file finder",
+	"help.open":              "open file by path",
+	"help.terminal":          "toggle PTY terminal (Alt+T closes)",
+	"help.tree":              "project tree; Ctrl+G switches to Git",
+	"help.tree_nav":          "navigate, open, fold; n/N new file/folder, r rename, d copy, Del delete, t trash",
+	"help.tab_switch":        "switch tabs in active pane",
+	"help.tab_jump":          "jump to tab N",
+	"help.split_vert":        "toggle vertical split (side by side)",
+	"help.split_horiz":       "toggle horizontal split (stacked)",
+	"help.split_focus":       "focus other pane",
+	"help.split_close":       "close pane (unsplit)",
+	"help.tab_close":         "close tab (last quits)",
+	"help.move":              "move cursor",
+	"help.image_scroll":      "scroll a picture",
+	"help.edit":              "edit text",
+	"help.undo":              "undo / redo",
+	"help.lines":             "delete line / duplicate line",
+	"help.uppercase":         "uppercase selection or buffer",
+	"help.multicursor_word":  "multi-cursor: add cursor at next occurrence of word",
+	"help.multicursor_click": "add cursor at click position",
+	"help.multicursor_esc":   "exit multi-cursor mode",
+	"help.move_line":         "move line up / down",
+	"help.toggle_help":       "toggle this help",
+	"help.quit":              "quit",
+}
+
+var ruCatalog = map[string]string{
+	"git.no_repo":         "репозиторий не найден",
+	"git.init_hint":       "(i: init, esc/q: закрыть)",
+	"git.hints":           "(space: stage, a: всё, c: commit, d: diff, b: ветки, f: fetch, p: push, q: закрыть)",
+	"git.status_count":    "изменено: %d, staged: %d",
+	"git.norepo_msg":      "нет git-репозитория",
+	"git.init_failed":     "git init не удался: %s",
+	"git.init_ok":         "репозиторий инициализирован: %s",
+	"git.already_repo":    "уже git-репозиторий",
+	"git.no_dir":          "нет каталога для init",
+	"git.staged":          "в индекс добавлено: %s",
+	"git.unstaged":        "из индекса убрано: %s",
+	"git.stage_error":     "ошибка stage: %s",
+	"git.unstage_error":   "ошибка unstage: %s",
+	"git.staged_all":      "в индекс добавлено файлов: %d",
+	"git.refreshed":       "обновлено",
+	"git.status_error":    "ошибка git status: %s",
+	"git.commit_failed":   "коммит не удался: %s",
+	"git.committed":       "закоммичено: %s",
+	"git.log_error":       "ошибка git log: %s",
+	"git.branches_error":  "ошибка списка веток: %s",
+	"git.switched":        "переключено на %s",
+	"git.switch_error":    "ошибка переключения: %s",
+	"git.already_on":      "уже на %s",
+	"git.created":         "создана ветка %s",
+	"git.create_error":    "ошибка создания: %s",
+	"git.new_branch_name": "имя новой ветки:",
+	"git.diff_error":      "ошибка diff: %s",
+	"git.log_hint":        "(j/k: навигация, Tab: diff, esc/q: назад, r: refresh)",
+	"git.no_commits":      "нет коммитов",
+	"git.commit_count":    "(%d коммитов)",
+	"git.branch_hint":     "(j/k: switch, Enter: checkout, n: new, esc/q: назад, r: refresh)",
+	"git.branch_new_hint": "(Enter: создать, Esc: отмена)",
+	"git.op_fetch":        "fetch",
+	"git.op_push":         "push",
+	"git.no_remote":       "не настроен remote (origin)",
+	"git.transferring":    "%s…",
+	"git.transfer_done":   "%s: готово",
+	"git.transfer_error":  "%s не удался: %s",
+	"git.blame_error":     "git blame: %s",
+
+	"git.prefix_status":    " git ",
+	"git.prefix_log":       " ЛОГ ",
+	"git.prefix_branch":    " ВЕТКИ ",
+	"git.new_branch_label": " новая ветка: ",
+
+	// Status bar
+	"status.f1_help":    "F1 справка ",
+	"status.f8_pane":    "F8 панель ",
+	"status.embed_chat": "Ctrl+E чат ",
+	"status.lncol":      "Стр %d, Кол %d ",
+	"status.tip_editor": "Редактор (Ctrl+E)",
+	"status.tip_tree":   "Дерево проекта (Ctrl+B)",
+	"status.tip_git":    "Панель git (Ctrl+G)",
+	"status.tip_chat":   "AI-чат (Alt+A)",
+	"status.tip_term":   "Терминал (Alt+T)",
+	"status.tip_splitv": "Вертикальный сплит (Ctrl+\\ / F6)",
+	"status.tip_splith": "Горизонтальный сплит (Ctrl+Alt+H / F7)",
+
+	// Область буфера, когда файл не открыт.
+	"editor.nothing_open": "файл не открыт — Ctrl+O найти · Ctrl+P новый файл",
+
+	// Картинка во вкладке рисуется вместо текста и не редактируется.
+	"editor.image_failed": "не удалось нарисовать картинку: %s",
+	"editor.image_hint":   "картинка — только чтение, Ctrl+E в чат",
+
+	// Prompt / commit lines
+	"prompt.open_file":    " открыть файл: ",
+	"prompt.new_file":     " новый файл: ",
+	"prompt.new_folder":   " новая папка: ",
+	"prompt.rename":       " переименовать в: ",
+	"prompt.delete_q":     " удалить %s? (Y/н) да / (N/т) нет / (Esc) отмена ",
+	"prompt.trash_q":      " в корзину %s? (Y/н) да / (N/т) нет / (Esc) отмена ",
+	"prompt.save_as":      " сохранить как: ",
+	"prompt.save_changes": " сохранить изменения? ",
+	"prompt.yes_no":       "(Y/\u043d) \u0434\u0430 / (N/\u0442) \u043d\u0435\u0442 / (Esc) \u043e\u0442\u043c\u0435\u043d\u0430",
+	"git.commit_line":     " git коммит: ",
+	"git.commit_hint":     "(Enter: коммит, Esc: закрыть)",
+
+	// Editor messages
+	"msg.saved":               "сохранено",
+	"msg.save_failed":         "ошибка сохранения: %s",
+	"msg.save_failed_gen":     "ошибка сохранения",
+	"msg.cannot_save":         "нельзя сохранить: нет имени файла",
+	"msg.image_readonly":      "это картинка — редактировать и сохранять нечего",
+	"msg.image_failed":        "открыто как текст: %s",
+	"msg.new_file":            "новый файл: %s",
+	"msg.open_failed":         "ошибка открытия: %s",
+	"msg.watch_failed":        "не удалось следить за %s: внешние изменения не обнаружатся (%s)",
+	"msg.created_folder":      "создана папка: %s",
+	"msg.create_folder_fail":  "ошибка создания папки: %s",
+	"msg.renamed":             "переименовано в %s",
+	"msg.rename_failed":       "ошибка переименования: %s",
+	"msg.duplicated":          "создана копия: %s",
+	"msg.duplicate_failed":    "ошибка копирования: %s",
+	"msg.deleted":             "удалено: %s",
+	"msg.delete_failed":       "ошибка удаления: %s",
+	"msg.trashed":             "перемещено в корзину: %s",
+	"msg.trash_failed":        "ошибка: нельзя в корзину: %s",
+	"msg.already_exists":      "уже существует: %s",
+	"msg.reloaded":            "перезагружено с диска",
+	"msg.reloaded_name":       "перезагружено: %s",
+	"msg.kept":                "изменения буфера сохранены",
+	"msg.copied":              "скопировано в буфер обмена",
+	"msg.no_comment":          "для этого типа файла нет синтаксиса комментариев",
+	"msg.word_wrap_on":        "перенос по словам включён",
+	"msg.word_wrap_off":       "перенос по словам выключен",
+	"msg.blame_on":            "git blame: строк %d",
+	"msg.blame_off":           "git blame выключен",
+	"msg.blame_loading":       "git blame…",
+	"msg.blame_none":          "нет закоммиченных строк",
+	"msg.cut":                 "вырезано в буфер обмена",
+	"msg.pasted":              "вставлено",
+	"msg.external":            "файл изменён извне: (r)перезагрузить или (i)проигнорировать?",
+	"msg.config_reloaded":     "конфиг перезагружен",
+	"msg.plugin_reloaded":     "плагин перезагружен: %s",
+	"msg.plugin_installed":    "плагин установлен: %s",
+	"msg.plugin_uninstalled":  "плагин удалён: %s",
+	"plugin.store_title":      " Магазин плагинов — Enter установить/удалить, Esc закрыть ",
+	"plugin.installed":        "установлен",
+	"plugin.not_installed":    "не установлен",
+	"plugin.loading":          " загрузка удалённых плагинов... ",
+	"plugin.downloading":      "скачивание %s...",
+	"msg.lsp_missing":         "LSP-сервер не найден, выполните: %s",
+	"msg.edit_config":         "отредактируйте конфиг, сохраните для применения",
+	"msg.no_git_changes":      "нет изменений git",
+	"msg.no_more_occurrences": "больше нет вхождений",
+	"msg.replaced_one":        "заменено 1 вхождение",
+	"msg.uppercased":          "переведено в верхний регистр",
+	"msg.project":             "проект: %s",
+	"msg.added_cursor":        "курсор добавлен",
+	"msg.bookmark_added":      "закладка добавлена: строка %d",
+	"msg.bookmark_removed":    "закладка удалена: строка %d",
+	"msg.bookmark_jump":       "закладка: строка %d",
+	"msg.no_bookmarks":        "нет закладок",
+	"msg.selected":            "выбрано: вводите, чтобы заменить все вхождения",
+	"msg.no_definition":       "определение не найдено",
+
+	// Project tree bottom hint bar (wrapped to the panel width at render time)
+	"tree.tip_new_file":  "новый файл · n",
+	"tree.tip_new_dir":   "новая папка · N",
+	"tree.tip_rename":    "переименовать · r",
+	"tree.tip_duplicate": "копия · d",
+	"tree.tip_delete":    "удалить · Del",
+
+	// Diff bottom bar
+	"git.diff_hint":  " Space stage  c commit  a все  r refresh  d full-diff  l log  Tab diff",
+	"git.diff_focus": " j/k скролл  h/l гориз.скролл  Tab/Esc назад",
+	"git.log_hint2":  " j/k коммиты  Tab diff  Esc файлы  r refresh",
+	"git.diff_label": " diff ",
+	"git.log_tag":    " ЛОГ ",
+	"git.diff_stats": "  +%d ~%d -%d",
+
+	// Conflict / search / replace / AI / finder lines
+	"conflict.label":        " КОНФЛИКТ ",
+	"conflict.msg":          " Файл изменён на диске: [R]перезагрузить / [I]проигнорировать? (%s)",
+	"conflict.scroll":       "  (\u2191\u2193 скролл)",
+	"search.label":          " поиск: ",
+	"search.none":           " [нет совпадений]",
+	"search.hint":           "  (Enter/F3: далее, Shift+F3: назад, Esc: закрыть)",
+	"goto.label":            " перейти к строке: ",
+	"goto.hint":             "  (N или N:C, +/- относительно; Enter: переход, Esc: закрыть)",
+	"replace.find":          " найти: ",
+	"replace.with":          " заменить: ",
+	"replace.hint":          "  (Tab: переключить, Enter: заменить, Ctrl+A: все, Esc: закрыть)",
+	"chat.tip_new":          "новый поток · Ctrl+U",
+	"chat.tip_copy":         "копировать ответ · Ctrl+Y",
+	"chat.tip_clear":        "очистить историю · Ctrl+L",
+	"chat.tip_close":        "закрыть · Esc",
+	"term.unfocused":        "терминал на паузе — кликните по нему, чтобы вводить",
+	"chat.thread":           "поток: %s",
+	"chat.thread_new":       "новый поток чата",
+	"chat.cleared":          "история ИИ очищена",
+	"chat.clear_confirm":    "нажмите Ctrl+L ещё раз, чтобы очистить ВСЮ историю ИИ",
+	"chat.nothing_copy":     "пока нечего копировать",
+	"chat.todo":             " План:",
+	"chat.ask_label":        "ИИ спрашивает: ",
+	"chat.ask_hint":         "(Enter: ответить, Esc: пропустить)",
+	"chat.ask_hint_choices": "\u2191\u2193 выбор / Enter: ответить / Tab: править / Esc: пропустить",
+	"chat.ask_status":       "ИИ ждёт вашего ответа",
+	"chat.mode_plan":        "режим плана: ИИ только читает; вернитесь в рабочий режим, чтобы разрешить правки",
+	"chat.mode_act":         "рабочий режим: ИИ может предлагать правки (вы всё равно их проверяете)",
+	"chat.switch_status":    "ИИ просит выйти из режима плана  (y переключить / n остаться)",
+	"chat.subagent_status":  "ИИ передал задачу под-агенту — идёт работа, Esc отменить  (ревью в Alt+L)",
+	"chat.fallback_notice": "Локальный ИИ не ответил, поэтому сессия использует Pollinations " +
+		"(бесплатно, без ключа). Ваши запросы, файлы и результаты инструментов " +
+		"теперь уходят с этой машины. Настройте провайдер (Ctrl+P → 'AI: Настройки') " +
+		"или поставьте free_fallback = false.",
+	"chat.fallback_status": "используется Pollinations (бесплатно, без ключа)",
+	"chat.fallback_badge":  "ОБЛАКО",
+	"finder.prompt":        " найти файл: ",
+
+	// Palette command titles & descriptions
+	"cmd.save_t": "Файл: Сохранить", "cmd.save_d": "Ctrl+S — сохранить активный буфер",
+	"cmd.save_as_t": "Файл: Сохранить как...", "cmd.save_as_d": "Сохранить активный буфер в новый путь",
+	"cmd.close_tab_t": "Файл: Закрыть вкладку", "cmd.close_tab_d": "Ctrl+W — закрыть активную вкладку",
+	"cmd.open_t": "Файл: Открыть по пути...", "cmd.open_d": "Ctrl+T — открыть файл по промпту",
+	"cmd.open_folder_t": "Файл: Открыть папку...", "cmd.open_folder_d": "Открыть проект-папку во встроенном браузере",
+	"folder.title": " Открыть папку: ", "folder.up": ".. (родительский каталог)", "folder.empty": "— пустой каталог —",
+	"folder.hint":    " \u2193/\u2191 навигация · Enter/Право войти · o — открыть эту папку · `~` дом · `/` корень · Esc отмена",
+	"cmd.new_file_t": "Файл: Новый файл...", "cmd.new_file_d": "Создать новый файл по пути",
+	"cmd.new_folder_t": "Файл: Новая папка...", "cmd.new_folder_d": "Создать каталог по пути",
+	"cmd.finder_t": "Файл: Быстрый поиск...", "cmd.finder_d": "Ctrl+O — быстрый поиск файлов",
+	"cmd.search_t": "Правка: Найти в файле...", "cmd.search_d": "Ctrl+F — поиск текста",
+	"cmd.replace_t": "Правка: Заменить в файле...", "cmd.replace_d": "Ctrl+H — найти и заменить",
+	"cmd.goto_line_t": "Правка: Перейти к строке...", "cmd.goto_line_d": "Ctrl+L — переход к строке N (N:C или +/- относительно)",
+	"cmd.word_wrap_t": "Правка: Перенос по словам", "cmd.word_wrap_d": "Alt+Z — переносить длинные строки по ширине панели",
+	"cmd.undo_t": "Правка: Отменить", "cmd.undo_d": "Ctrl+Z — отменить изменение",
+	"cmd.redo_t": "Правка: Повторить", "cmd.redo_d": "Ctrl+Y — повторить изменение",
+	"cmd.uppercase_t": "Правка: Верхний регистр", "cmd.uppercase_d": "Ctrl+U — верхний регистр выделения или буфера",
+	"cmd.duplicate_line_t": "Правка: Дублировать строку", "cmd.duplicate_line_d": "Дублировать текущую строку ниже",
+	"cmd.delete_line_t": "Правка: Удалить строку", "cmd.delete_line_d": "Удалить текущую строку",
+	"cmd.move_line_up_t": "Правка: Строку вверх", "cmd.move_line_up_d": "Переместить текущую строку вверх",
+	"cmd.move_line_down_t": "Правка: Строку вниз", "cmd.move_line_down_d": "Переместить текущую строку вниз",
+	"cmd.toggle_comment_t": "Правка: Переключить комментарий", "cmd.toggle_comment_d": "Закомментировать/раскомментировать строку или выделение",
+	"cmd.goto_definition_t": "Правка: К определению", "cmd.goto_definition_d": "Перейти к определению символа под курсором",
+	"cmd.toggle_bookmark_t": "Правка: Переключить закладку", "cmd.toggle_bookmark_d": "Поставить/снять закладку на текущей строке",
+	"cmd.git_commit_t": "Git: Панель коммита", "cmd.git_commit_d": "Ctrl+G — статус, stage и коммит",
+	"cmd.git_diff_t": "Git: Diff выбранного файла", "cmd.git_diff_d": "D в панели — side-by-side против HEAD",
+	"cmd.git_next_t": "Git: Следующий хунк", "cmd.git_next_d": "Alt+] — переход к следующему хунку",
+	"cmd.git_prev_t": "Git: Предыдущий хунк", "cmd.git_prev_d": "Alt+[ — переход к предыдущему хунку",
+	"cmd.git_blame_t": "Git: Показать Blame", "cmd.git_blame_d": "Alt+B — кто и когда менял каждую строку",
+	"cmd.split_v_t": "Вид: Вертикальный сплит", "cmd.split_v_d": "Ctrl+\\ — сплит рядом",
+	"cmd.split_h_t": "Вид: Горизонтальный сплит", "cmd.split_h_d": "Ctrl+Alt+H — сплит друг над другом",
+	"cmd.pane_focus_t": "Вид: Фокус на другой панели", "cmd.pane_focus_d": "Ctrl+Alt+P — переключить панель",
+	"cmd.pane_close_t": "Вид: Закрыть текущую панель", "cmd.pane_close_d": "Ctrl+Alt+W — без сплита",
+	"cmd.tree_toggle_t": "Вид: Показать дерево проекта", "cmd.tree_toggle_d": "Ctrl+B — дерево в сайдбаре",
+	"cmd.tree_rename_t": "Проект: Переименовать", "cmd.tree_rename_d": "переименовать выбранный файл или папку",
+	"cmd.tree_duplicate_t": "Проект: Копия", "cmd.tree_duplicate_d": "скопировать выбранный файл рядом",
+	"cmd.tree_delete_t": "Проект: Удалить", "cmd.tree_delete_d": "удалить выбранный файл или папку (с подтверждением)",
+	"tree.no_selection": "сначала выберите запись в панели проекта",
+	"cmd.terminal_t":    "Вид: Включить терминал", "cmd.terminal_d": "Alt+T — панель ConPTY/PTY снизу",
+	"cmd.agent_tasks_t": "Агент: Панель задач", "cmd.agent_tasks_d": "Alt+L — список фоновых задач агента",
+	"cmd.agent_new_t": "Агент: Новая задача", "cmd.agent_new_d": "Запустить фоновую задачу рефакторинга",
+	"cmd.settings_t": "Настройки: Открыть конфиг", "cmd.settings_d": "Открыть .dmcode.conf для редактирования",
+	"cmd.help_t": "Справка: Клавиши", "cmd.help_d": "F1 / Ctrl+E — панель справки",
+	"cmd.quit_t": "Приложение: Выйти", "cmd.quit_d": "Ctrl+Q — выход",
+	"cmd.lang_select_t": "Язык: Выбрать...", "cmd.lang_select_d": "Выбрать язык интерфейса",
+	"cmd.plugin_store_t": "Плагины: Установить...", "cmd.plugin_store_d": "Установить или удалить встроенные плагины",
+
+	// Language chooser
+	"lang.choose":  " Выберите язык: ",
+	"lang.current": " (текущий)",
+
+	// Misc
+	"msg.lang_set": "язык установлен: %s",
+
+	// Agent panel
+	"msg.agent_queued":        "задача агента поставлена в очередь",
+	"msg.agent_cancelled":     "отменено %s",
+	"agent.task_label":        " Задача агента: ",
+	"agent.sub_badge":         " [под]",
+	"msg.agent_nothing":       "нечего просматривать для этой задачи",
+	"msg.agent_apply_fail":    "ошибка применения: %s",
+	"msg.agent_commit_fail":   "изменения применены, но коммит не удался: %s",
+	"msg.agent_applied":       "изменения агента применены и закоммичены",
+	"msg.agent_applied_files": "создано %d, изменено %d — открыто во вкладках",
+	"msg.agent_discarded":     "изменения агента отклонены",
+
+	// Agent review + AI settings
+	"agent.review_hint": "  (Y/\u043d: \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c \u0432\u0441\u0451, N/\u0442: \u043e\u0442\u043a\u043b\u043e\u043d\u0438\u0442\u044c, Tab: \u0441\u043b\u0435\u0434.\u0444\u0430\u0439\u043b, \u2191\u2193 \u0441\u043a\u0440\u043e\u043b\u043b)",
+
+	// Help panel
+	"help.title":             "dmed — клавиши",
+	"help.close_hint":        "(F1/Esc закрывает)",
+	"help.scroll_hint":       " (j/k/PgUp/PgDn/колесо — прокрутка)",
+	"help.to_chat":           "назад в чат (иконка ▣ в строке состояния)",
+	"help.complete":          "всплывашка подсказок LSP",
+	"help.comment":           "закомментировать / раскомментировать выделение",
+	"help.save":              "сохранить активную вкладку (без имени: Сохранить как)",
+	"help.palette":           "Палитра команд (Ctrl+P / F2 / двойной Shift)",
+	"help.select":            "выделить текст",
+	"help.clipboard":         "копировать / вырезать / вставить",
+	"help.search":            "поиск в файле (Enter/F3 далее, Shift+F3 назад)",
+	"help.replace":           "поиск и замена (Tab переключить, Enter заменить, Ctrl+A все)",
+	"help.goto_line":         "перейти к строке (N или N:C, +/- относительно)",
+	"help.word_wrap":         "переключить перенос по словам",
+	"help.blame":             "показать inline git blame",
+	"help.git_panel":         "Git-панель; Ctrl+B возврат к дереву",
+	"help.goto_def":          "перейти к определению (LSP)",
+	"help.git_diff":          "side-by-side diff против HEAD",
+	"help.hunk":              "перейти к предыдущему / следующему хунку",
+	"help.bookmark":          "закладка (Alt+M или клик колёсиком по гуттеру), след./пред. закладка (Alt+N / S+Alt+N)",
+	"help.finder":            "быстрый поиск файлов",
+	"help.open":              "открыть файл по пути",
+	"help.terminal":          "включить/выключить PTY-терминал (Alt+T закрыть)",
+	"help.tree":              "дерево проекта; Ctrl+G переход к Git",
+	"help.tree_nav":          "навигация, открыть, свернуть; n/N файл/папка, r переименовать, d копия, Del удалить, t корзина",
+	"help.tab_switch":        "переключение вкладок в активной панели",
+	"help.tab_jump":          "перейти к вкладке N",
+	"help.split_vert":        "вертикальный сплит (рядом), вкл/выкл",
+	"help.split_horiz":       "горизонтальный сплит (друг над другом), вкл/выкл",
+	"help.split_focus":       "фокус на другой панели",
+	"help.split_close":       "закрыть панель (без сплита)",
+	"help.tab_close":         "закрыть вкладку (последняя закрывает редактор)",
+	"help.move":              "двигать курсор",
+	"help.image_scroll":      "прокрутить картинку",
+	"help.edit":              "редактировать текст",
+	"help.undo":              "отменить / повторить",
+	"help.lines":             "удалить строку / дублировать строку",
+	"help.uppercase":         "верхний регистр выделения или буфера",
+	"help.multicursor_word":  "мультикурсор: добавить курсор на следующем вхождении слова",
+	"help.multicursor_click": "добавить курсор по месту клика",
+	"help.multicursor_esc":   "выход из мультикурсора",
+	"help.move_line":         "переместить строку вверх / вниз",
+	"help.toggle_help":       "переключить эту справку",
+	"help.quit":              "выйти",
+}

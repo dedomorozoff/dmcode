@@ -3,6 +3,7 @@ package memsession
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/session"
@@ -56,6 +57,37 @@ func appendEvent(t *testing.T, s *Service, sess session.Session, ev *session.Eve
 	t.Helper()
 	if err := s.AppendEvent(context.Background(), sess, ev); err != nil {
 		t.Fatalf("AppendEvent: %v", err)
+	}
+}
+
+// TestApproxCharsCountsToolCallArgsBySize pins the fallback estimate's most
+// load-bearing branch. A function call's arguments are a map, and len(map)
+// would count keys — a write_file carrying a whole file would then count as
+// two or three characters instead of the thousands the next request will
+// actually carry, and the context meter would under-report a session heavy on
+// tool traffic by orders of magnitude.
+func TestApproxCharsCountsToolCallArgsBySize(t *testing.T) {
+	s := newTestService(t)
+	sess := mustCreate(t, s, "s1")
+
+	ev := session.NewEvent(context.Background(), "inv-1")
+	ev.Author = "dmcode"
+	content := strings.Repeat("line of real code\n", 500)
+	ev.Content = &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{{
+			FunctionCall: &genai.FunctionCall{
+				Name: "write_file",
+				Args: map[string]any{"path": "internal/x.go", "content": content},
+			},
+		}},
+	}
+	appendEvent(t, s, sess, ev)
+
+	got := s.ApproxChars(testApp, testUser, "s1")
+	// The args alone are ~8000 bytes; counting keys would report ~2.
+	if got < len(content) {
+		t.Fatalf("ApproxChars = %d, less than the single argument's %d bytes", got, len(content))
 	}
 }
 
@@ -376,7 +408,7 @@ func TestTranscriptOfPairsPromptsWithAnswers(t *testing.T) {
 	if len(tr.Turns) != 2 {
 		t.Fatalf("got %d turns, want 2", len(tr.Turns))
 	}
-	if tr.Turns[0].User != "вопрос" || tr.Turns[0].Agent != "ответ" {
+	if tr.Turns[0].User != "вопрос" || tr.Turns[0].Prose() != "ответ" {
 		t.Errorf("turn 1 = %+v, want the first exchange", tr.Turns[0])
 	}
 	if tr.Turns[1].User != "ещё вопрос" {

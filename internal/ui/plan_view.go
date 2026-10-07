@@ -13,9 +13,9 @@ import (
 // sidebar draw them. A glyph rather than a word: a plan is read at a glance,
 // and three characters do that where three words do not.
 var planMarks = map[todo.Status]string{
-	todo.Done:       "✓", // ✓
-	todo.InProgress: "▸", // ▸
-	todo.Pending:    "○", // ○
+	todo.Done:       "✓", // done
+	todo.InProgress: "▸", // in progress
+	todo.Pending:    "○", // pending
 }
 
 // showPlan prints the current plan into the transcript.

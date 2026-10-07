@@ -24,7 +24,7 @@ type sessionsState struct {
 	open     bool
 	all      []memsession.Summary
 	filtered []int // indexes into all, so the highlight survives filtering
-	selected int
+	list     listView
 	query    string
 	// confirmDelete holds the id awaiting a second keypress. Deleting a
 	// conversation is not undoable — ctrl+z rewinds a turn, not a session —
@@ -68,17 +68,17 @@ func (s *sessionsState) refilter() {
 			s.filtered = append(s.filtered, i)
 		}
 	}
-	if s.selected >= len(s.filtered) {
-		s.selected = max(len(s.filtered)-1, 0)
+	if s.list.sel >= len(s.filtered) {
+		s.list.sel = max(len(s.filtered)-1, 0)
 	}
 }
 
 // current is the summary under the highlight, or nil when the list is empty.
 func (s *sessionsState) current() *memsession.Summary {
-	if s.selected < 0 || s.selected >= len(s.filtered) {
+	if s.list.sel < 0 || s.list.sel >= len(s.filtered) {
 		return nil
 	}
-	return &s.all[s.filtered[s.selected]]
+	return &s.all[s.filtered[s.list.sel]]
 }
 
 // sessionsKey drives the overlay.
@@ -86,55 +86,68 @@ func (s *sessionsState) current() *memsession.Summary {
 // Escape closes it from any state, including the delete confirmation: a user
 // who reached a destructive prompt by accident must never be trapped in it.
 func (m *uiModel) sessionsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	list := &m.sessionsList
+	s := &m.sessionsList
 	switch msg.String() {
 	case "esc", "ctrl+p", "q":
-		list.open = false
-		list.confirmDelete = ""
+		s.open = false
+		s.confirmDelete = ""
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	case "up":
-		if list.selected > 0 {
-			list.selected--
+		if s.list.sel > 0 {
+			s.list.sel--
 		}
 		return m, nil
 	case "down":
-		if list.selected < len(list.filtered)-1 {
-			list.selected++
+		if s.list.sel < len(s.filtered)-1 {
+			s.list.sel++
 		}
 		return m, nil
+	case "pgup":
+		s.list.sel = max(s.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		s.list.sel = min(s.list.sel+m.floatPage(), len(s.filtered)-1)
+		return m, nil
+	case "home":
+		s.list.sel = 0
+		return m, nil
+	case "end":
+		s.list.sel = max(len(s.filtered)-1, 0)
+		return m, nil
 	case "backspace":
-		if q := []rune(list.query); len(q) > 0 {
-			list.query = string(q[:len(q)-1])
-			list.refilter()
+		if q := []rune(s.query); len(q) > 0 {
+			s.query = string(q[:len(q)-1])
+			s.list = listView{}
+			s.refilter()
 		}
 		return m, nil
 	case "d":
-		cur := list.current()
+		cur := s.current()
 		if cur == nil {
 			return m, nil
 		}
-		if list.confirmDelete == cur.ID {
-			list.confirmDelete = ""
+		if s.confirmDelete == cur.ID {
+			s.confirmDelete = ""
 			m.deleteSession(cur.ID)
 			return m, nil
 		}
-		list.confirmDelete = cur.ID
+		s.confirmDelete = cur.ID
 		return m, nil
 	case "enter":
-		cur := list.current()
+		cur := s.current()
 		if cur == nil {
 			return m, nil
 		}
-		list.open = false
+		s.open = false
 		m.switchSession(cur.ID)
 		return m, nil
 	}
 	if len(msg.Text) > 0 {
-		list.query += msg.Text
-		list.selected = 0
-		list.refilter()
+		s.query += msg.Text
+		s.list = listView{}
+		s.refilter()
 	}
 	return m, nil
 }
@@ -168,15 +181,15 @@ func (m *uiModel) deleteSession(id string) {
 // sessionsBox renders the list: * marks the current session, the age and the
 // message count say what a row is worth before it is opened.
 func (m *uiModel) sessionsBox() string {
-	list := &m.sessionsList
+	s := &m.sessionsList
 	inner := m.floatingWidth() - panelBorder
 	var entries [][]string
-	for i, idx := range list.filtered {
-		sum := list.all[idx]
+	for i, idx := range s.filtered {
+		sum := s.all[idx]
 		marker, style := "   ", styleHint
 		switch {
-		case i == list.selected:
-			marker, style = " ? ", styleTool
+		case i == s.list.sel:
+			marker, style = " ▸ ", styleTool
 		case sum.ID == m.sessionID:
 			marker, style = " * ", styleTool
 		}
@@ -189,7 +202,7 @@ func (m *uiModel) sessionsBox() string {
 		// lookup has no way to fill in.
 		text := fmt.Sprintf("%s · %s · %d %s", title, relativeTime(sum.Updated), sum.Events, i18n.T("events"))
 		rows := wrapIndent(text, inner, marker, "     ")
-		if i != list.selected {
+		if i != s.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
@@ -197,10 +210,10 @@ func (m *uiModel) sessionsBox() string {
 		entries = append(entries, rows)
 	}
 	header := i18n.T("? sessions  (* — current, enter — switch, d — delete, esc — close)")
-	if list.confirmDelete != "" {
+	if s.confirmDelete != "" {
 		header = i18n.T("? press d again to delete that session for good")
 	}
-	return m.floatingPanel(header, list.query, entries, list.selected)
+	return m.floatingPanel(header, s.query, entries, &s.list)
 }
 
 // relativeTime renders a timestamp as "3 min ago", degrading to a date once

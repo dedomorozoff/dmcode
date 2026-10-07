@@ -41,6 +41,76 @@ func TestSetRootRejectsFile(t *testing.T) {
 	}
 }
 
+// TestResolveAcceptsOneFileUnderTwoSpellings is the boundary's one real bug, and
+// it only shows on a machine where the two spellings differ. SetRoot follows
+// links on the root and nothing followed them on the argument, so a path inside
+// the workspace spelled through a link read as outside it — and the failure is
+// invisible locally, where the temp directory and its resolved form are the same
+// string. %TEMP% as a short name on a Windows runner, /var against /private/var
+// on macOS, and a symlinked checkout are all this bug wearing a different hat.
+func TestResolveAcceptsOneFileUnderTwoSpellings(t *testing.T) {
+	real := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(real, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	symlinkable(t, real, link)
+	withRoot(t, real)
+
+	// Spelled through the link, and through a path that does not exist yet —
+	// which is every write_file call there is.
+	for _, p := range []string{
+		filepath.Join(link, "sub", "f.go"),
+		filepath.Join(link, "sub", "not", "created", "yet.txt"),
+		filepath.Join(real, "sub", "f.go"),
+	} {
+		if _, err := resolve(p); err != nil {
+			t.Errorf("resolve(%q) = %v, want it accepted", p, err)
+		}
+	}
+}
+
+// TestReadFileJudgesTheSameFileTheSameWayUnderEitherSpelling is the counterweight
+// to the test above, and it is the tool rather than resolve that has to hold it:
+// retrying a refused path with its links followed must not become a way out. The
+// link sits inside the root and points nowhere near it, and the path arrives
+// through a second spelling of the root — so the boundary has to be right twice,
+// once for each spelling.
+func TestReadFileJudgesTheSameFileTheSameWayUnderEitherSpelling(t *testing.T) {
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "inside.txt"), []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "secrets")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "id_rsa"), []byte("s3cr3t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkable(t, outside, filepath.Join(base, "escape"))
+	link := filepath.Join(t.TempDir(), "root-link")
+	symlinkable(t, base, link)
+	withRoot(t, base)
+
+	for _, p := range []string{
+		filepath.Join(base, "inside.txt"),
+		filepath.Join(link, "inside.txt"),
+	} {
+		if _, err := readFile(nil, readFileArgs{Path: p}); err != nil {
+			t.Errorf("read_file(%q) = %v, want it allowed", p, err)
+		}
+	}
+	for _, p := range []string{
+		filepath.Join(base, "escape", "id_rsa"),
+		filepath.Join(link, "escape", "id_rsa"),
+	} {
+		if _, err := readFile(nil, readFileArgs{Path: p}); !errors.Is(err, ErrOutsideRoot) {
+			t.Errorf("read_file(%q) = %v, want ErrOutsideRoot", p, err)
+		}
+	}
+}
+
 // TestResolveAcceptsPathsInsideWorkspace is the core guarantee: everything under
 // the root passes, and a relative path is judged by the absolute path it denotes
 // rather than by its spelling.

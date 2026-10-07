@@ -13,11 +13,24 @@ import (
 // detectProvider is the single-endpoint view of detectProviders, kept for
 // callers that only need the one it will use first.
 func DetectProvider() (config.Provider, error) {
-	pool, err := DetectProviders()
+	sess, err := DetectProviders()
 	if err != nil {
 		return config.Provider{}, err
 	}
-	return pool[0], nil
+	return sess.Pool[0], nil
+}
+
+// Session is what a start-up found: the pool to run on, plus a GGUF load still
+// in flight if there is one.
+//
+// The pending load is a separate field rather than something folded into the
+// pool because it answers a different question. The pool is what the session can
+// talk to *now*; a launch is a model that will exist in a minute. Handing a UI
+// only the pool would tell it the model is available, and the first message of
+// the session would go to a port nothing is listening on yet.
+type Session struct {
+	Pool    []config.Provider
+	Loading *Launch
 }
 
 // keyedPreset ties an environment variable to the endpoint it selects, so a
@@ -38,7 +51,8 @@ type keyedPreset struct {
 
 func keyedPresets() []keyedPreset {
 	return []keyedPreset{
-		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "nemotron-3-ultra-free", config.APIResponses, "OpenCode Zen"},
+		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "big-pickle", config.APIResponses, "OpenCode Zen"},
+		{"CLINE_API_KEY", "https://api.cline.bot/api/v1", "anthropic/claude-sonnet-4-6", config.APIChat, "Cline"},
 		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", config.APIResponses, "Groq"},
 		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIResponses, "GitHub Models"},
 		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", config.APIResponses, "Mistral"},
@@ -61,15 +75,21 @@ func keyedPresets() []keyedPreset {
 // surprise. When nothing is configured, every working free endpoint is returned
 // rather than the first hit, so a host that dies mid-session has somewhere to
 // go without a fresh probe.
-func DetectProviders() ([]config.Provider, error) {
+func DetectProviders() (Session, error) {
 	// A .gguf file named by DMCODE_GGUF is the most explicit configuration
 	// there is — the user pointed at a specific file — so it outranks even a
 	// configured endpoint. A failed launch is reported but not fatal: the
 	// ordinary detection below still finds something to run on.
+	//
+	// It is started, not waited for. Everything that can be checked instantly is:
+	// a missing .gguf or a missing llama-server is reported here, before a single
+	// frame is drawn, because a user who mistyped a path learns it in
+	// milliseconds instead of after the load timeout. Loading the weights is the
+	// other kind of wait — tens of seconds to minutes — and that is the UI's to
+	// show, not startup's to sit through.
 	if os.Getenv("DMCODE_GGUF") != "" {
-		fmt.Fprintln(os.Stderr, "dmcode: "+i18n.T("starting llama-server for the GGUF model…"))
-		if p, err := LaunchGGUF(); err == nil {
-			return []config.Provider{p}, nil
+		if l, err := StartGGUF(); err == nil {
+			return Session{Pool: []config.Provider{l.Provider()}, Loading: l}, nil
 		} else {
 			fmt.Fprintln(os.Stderr, "dmcode: gguf: "+err.Error())
 		}
@@ -85,47 +105,47 @@ func DetectProviders() ([]config.Provider, error) {
 	// into .env. DMCODE_API=chat forces the /chat/completions wire for
 	// endpoints that speak both, or that only speak chat.
 	if BaseURL != "" {
-		return []config.Provider{{
+		return Session{Pool: []config.Provider{{
 			BaseURL: BaseURL,
 			APIKey:  APIKey,
 			Model:   config.OrDefaultModel(modelName),
 			API:     config.EnvAPI(),
 			Label:   i18n.T("OpenAI-compatible"),
-		}}, nil
+		}}}, nil
 	}
 
 	for _, p := range keyedPresets() {
 		if key := os.Getenv(p.env); key != "" {
-			return []config.Provider{{
+			return Session{Pool: []config.Provider{{
 				BaseURL: p.url,
 				APIKey:  key,
 				Model:   config.OrDefaultModel(config.FirstNonEmpty(modelName, p.Model)),
 				API:     p.API,
 				Label:   p.Label,
-			}}, nil
+			}}}, nil
 		}
 	}
 
 	// Nothing configured: look for something free that already works, so a
 	// fresh checkout is usable with no setup at all.
 	if pool := DiscoverFreeProviders(); len(pool) > 0 {
-		return pool, nil
+		return Session{Pool: pool}, nil
 	}
 
 	if err := config.SetupWizard(); err != nil {
-		return nil, err
+		return Session{}, err
 	}
 	BaseURL = os.Getenv("OPENAI_BASE_URL")
 	APIKey = os.Getenv("OPENAI_API_KEY")
 	if BaseURL == "" || APIKey == "" {
-		return nil, fmt.Errorf("no provider configured — %s", config.FreeProviderHint())
+		return Session{}, fmt.Errorf("no provider configured — %s", config.FreeProviderHint())
 	}
-	return []config.Provider{{
+	return Session{Pool: []config.Provider{{
 		BaseURL:   BaseURL,
 		APIKey:    APIKey,
 		Model:     config.OrDefaultModel(os.Getenv("DMCODE_MODEL")),
 		API:       config.EnvAPI(),
 		Label:     i18n.T("OpenAI-compatible"),
 		Reasoning: os.Getenv("DMCODE_REASONING_EFFORT"),
-	}}, nil
+	}}}, nil
 }

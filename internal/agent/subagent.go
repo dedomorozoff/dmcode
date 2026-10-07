@@ -25,6 +25,11 @@ import (
 // instruction, not a prefix of the main one: a sub-agent is a specialist with
 // one job, and the main agent's rules about editing the workspace would only
 // tell it to do things it must not do.
+//
+// It still carries projectBriefing. A sub-agent starts from nothing — its own
+// throwaway session, no memory of the parent's reading — so a delegation sent
+// into a project with its own conventions would otherwise report findings in
+// terms the parent has to translate before it can use them.
 const subInstruction = `You are a research sub-agent working for another agent.
 
 You investigate and report. You never modify anything: you have no write tools, and you must not try to work around that.
@@ -35,7 +40,7 @@ Method:
 3. Report what you found, what you expected to find and did not, and anything that contradicts the task as given.
 4. Stop when you can answer the task. A short report that answers it beats a long one that pads it.
 
-Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.`
+Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.` + projectBriefing
 
 // SubAgentName is the tool name, for the caller keeping the read-only set in
 // step with the full one.

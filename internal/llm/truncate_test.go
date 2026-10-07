@@ -195,24 +195,39 @@ func TestTruncatedToolCallIsAskedAgain(t *testing.T) {
 	}
 }
 
-// TestTruncationAfterTextIsNotAskedAgain pins the rule that makes the recovery
-// safe: once the user is looking at text, a second answer would print twice.
-func TestTruncationAfterTextIsNotAskedAgain(t *testing.T) {
+// TestTruncationAfterTextIsAskedAgainWithABreak pins the recovery when the
+// model narrated before the oversized call: the turn is still worth saving —
+// a duplicated sentence is cheaper than a lost one — but the second attempt's
+// text must start on its own line, not glued to the half-answer the first
+// attempt left on screen.
+func TestTruncationAfterTextIsAskedAgainWithABreak(t *testing.T) {
 	attempt := append([]string{
 		`{"choices":[{"delta":{"content":"Правлю файл."}}]}`,
 	}, truncatedEdit(t, "")...)
-	srv, bodies := scriptedChatServer(t, attempt)
+	srv, bodies := scriptedChatServer(t,
+		attempt,
+		[]string{wholeEdit(t), `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`},
+	)
 
 	m := NewChatModel(srv.URL+"/v1", "", "test-coder")
-	_, err := readTruncated(t, m, editRequest())
-	if err == nil {
-		t.Fatal("a truncation after visible text must still fail the turn")
+	sawBreak := false
+	for resp, err := range m.GenerateContent(context.Background(), editRequest(), true) {
+		if err != nil || resp == nil {
+			continue
+		}
+		if resp.Partial && resp.Content != nil {
+			for _, p := range resp.Content.Parts {
+				if strings.Contains(p.Text, "\n\n") {
+					sawBreak = true
+				}
+			}
+		}
 	}
-	if !strings.Contains(err.Error(), "finish_reason=length") {
-		t.Errorf("error = %q, want the truncation named", err)
+	if !sawBreak {
+		t.Error("the second attempt must be separated from the first attempt's text by a blank line")
 	}
-	if len(*bodies) != 1 {
-		t.Errorf("endpoint saw %d requests, want 1 — nothing may be shown twice", len(*bodies))
+	if len(*bodies) != 2 {
+		t.Errorf("endpoint saw %d requests, want 2 — the turn is worth one more try", len(*bodies))
 	}
 }
 

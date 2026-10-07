@@ -2,11 +2,14 @@ package ui
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 
 	"google.golang.org/adk/v2/session"
 
 	"github.com/dedomorozoff/dmcode/internal/i18n"
+	"github.com/dedomorozoff/dmcode/internal/memsession"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
@@ -87,6 +90,9 @@ func (m *uiModel) rewind() {
 	if mark.idx <= len(m.history) {
 		m.history = m.history[:mark.idx]
 	}
+	// The walk into the transcript starts again, because the rows it was counting
+	// are not all there any more.
+	m.jumpFrom = -1
 	// The pictures come back with the prompt. A turn sent as nothing but a
 	// screenshot has no text for the store to hand back, so without this the user
 	// would find an empty input box and have to go and find the file again.
@@ -112,6 +118,20 @@ func (m *uiModel) rewind() {
 	m.input.SetValue(prompt)
 	m.input.CursorEnd()
 	m.history = append(m.history, line{kindSys, "↩ " + i18n.T("rolled back to the previous message")})
+	// The transcript cut is only half of a rewind: the turn also changed files
+	// on disk, and the tools journaled every one of them. Undo the last turn's
+	// group and say what came back — and, just as loudly, what a shell command
+	// changed that nobody can take back.
+	rep := dmtools.UndoTurn()
+	if len(rep.Restored) > 0 {
+		m.history = append(m.history, line{kindSys, "↩ " + i18n.T("files restored on disk: ") + shortList(rep.Restored, 4)})
+	}
+	for _, e := range rep.Errors {
+		m.history = append(m.history, line{kindErr, "↩ " + i18n.T("could not restore a file: ") + e})
+	}
+	if len(rep.Unrestorable) > 0 {
+		m.history = append(m.history, line{kindErr, i18n.T("changed by a shell command and not restored: ") + shortList(rep.Unrestorable, 4)})
+	}
 	m.historyDirty = true
 	m.statusText = i18n.T("the message is back in the input — edit it and send again")
 	// A picture that came back with the prompt reappears in the pending strip, and
@@ -119,6 +139,32 @@ func (m *uiModel) rewind() {
 	// viewport is re-synced, or the frame ends up taller than the terminal.
 	m.layout()
 	m.followVP()
+}
+
+// shortList renders a file list for a transcript line: relative to the
+// workspace when the file is inside it, otherwise just the base name, capped at
+// n entries with the remainder counted rather than dumped — a rewind that
+// restored two hundred files must say "+196", not wrap the screen.
+func shortList(paths []string, n int) string {
+	short := make([]string, 0, len(paths))
+	for _, p := range paths {
+		short = append(short, shortPath(p))
+	}
+	if len(short) <= n {
+		return strings.Join(short, ", ")
+	}
+	return strings.Join(short[:n], ", ") + fmt.Sprintf(" … +%d", len(short)-n)
+}
+
+// shortPath trims a workspace path to the form a user recognises: relative
+// inside the root, base name outside it.
+func shortPath(p string) string {
+	if root := dmtools.Root(); root != "" {
+		if rel, err := filepath.Rel(root, p); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return rel
+		}
+	}
+	return filepath.Base(p)
 }
 
 // dropLastPrompt removes the most recent prompt from the in-memory recall list.
@@ -163,6 +209,10 @@ func (m *uiModel) newSession(title string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.promptMarks = nil
+	// The jump key's walk is a position in this session's transcript, and a new
+	// session has a different one. Carried over it would start the walk halfway
+	// down a transcript it has never seen.
+	m.jumpFrom = -1
 	// An attachment belongs to the prompt it was going to ride with, and /new is
 	// a different conversation. Carrying it over would attach the previous
 	// session's screenshot to the first message of this one.
@@ -171,6 +221,14 @@ func (m *uiModel) newSession(title string) {
 	// numbers into a fresh session would report edits the new one never made,
 	// against files it has never opened.
 	dmtools.ResetChanges()
+	// The workspace's tabs belong to the session that opened them: a new
+	// conversation starting from the previous one's open files reads as the
+	// old session continuing. The change tally reset above is what makes the
+	// tabs stop coming back on the next ctrl+e; this is what clears the ones
+	// already open.
+	if m.ed != nil {
+		m.ed.CloseAllTabs()
+	}
 	if m.sessions != nil {
 		if id, err := m.sessions.Ensure(m.ctx, sessionApp, sessionUser, m.sessionID); err == nil {
 			m.sessionID = id
@@ -226,6 +284,11 @@ func (m *uiModel) switchSession(id string) {
 	m.turnCount = 0
 	m.toolCallCount = 0
 	m.lastTool = ""
+	// The workspace's tabs belong to the conversation that opened them; a
+	// resumed one starts from its own files, not the previous session's.
+	if m.ed != nil {
+		m.ed.CloseAllTabs()
+	}
 	m.history = append(m.history, line{kindSys, i18n.T("switched session from ") + prev})
 	m.summariseSession(id)
 	m.statusText = i18n.T("session: ") + id
@@ -265,10 +328,41 @@ func (m *uiModel) summariseSession(id string) {
 			m.history = append(m.history, line{kindSys, i18n.T("(no answer — that turn was cut short)")})
 			continue
 		}
-		m.history = append(m.history, line{kindAgent, truncate(t.Agent, 800)})
+		m.printTurn(t)
 	}
 	m.historyDirty = true
 	m.followVP()
+}
+
+// printTurn draws one restored turn.
+//
+// Every entry is drawn, and through the same functions the live turn draws them:
+// a tool result carrying a diff becomes the result row *and* the change block,
+// because that is what it became when it happened. The prose-only version is how
+// this used to render, and it dropped the whole of a turn's working — a
+// resumed session read as a conversation with none of the code in it, while the
+// store had every call, result and diff all along.
+func (m *uiModel) printTurn(t memsession.Turn) {
+	for _, e := range t.Entries {
+		switch e.Kind {
+		case memsession.EntryAgent:
+			m.history = append(m.history, line{kindAgent, truncate(e.Text, 800)})
+		case memsession.EntryTool:
+			if e.Call == nil {
+				continue
+			}
+			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, toolArgs(e.Call.Args))})
+		case memsession.EntryToolResult:
+			if e.Result == nil {
+				continue
+			}
+			summary, diff := renderToolResponse(e.Result)
+			m.history = append(m.history, line{kindToolRes, summary})
+			if diff != "" {
+				m.history = append(m.history, line{kindDiff, diff})
+			}
+		}
+	}
 }
 
 // reportStoreProblem surfaces a failed session write once, in the transcript

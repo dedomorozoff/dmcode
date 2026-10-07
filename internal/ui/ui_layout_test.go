@@ -75,8 +75,11 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	}
 
 	full := m.sidebarView(200)
-	if !strings.Contains(full, "HOTKEYS") {
-		t.Error("tall sidebar should show every section")
+	// LAST TOOL is the deepest section this model has: the plan is empty and
+	// nothing has changed, so anything deeper would mean the panel is drawing a
+	// section that has nothing to say.
+	if !strings.Contains(full, "LAST TOOL") {
+		t.Errorf("tall sidebar does not reach its last section:\n%s", full)
 	}
 	if got := lipgloss.Width(full); got != sidebarBoxWidth+sidebarGap {
 		t.Errorf("sidebar is %d cells wide, want %d", got, sidebarBoxWidth+sidebarGap)
@@ -89,7 +92,7 @@ func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	if !strings.Contains(short, "…") {
 		t.Error("trimmed sidebar should mark the cut with an ellipsis")
 	}
-	if strings.Contains(short, "esc     stop turn") {
+	if strings.Contains(short, "LAST TOOL") {
 		t.Error("trimmed sidebar must not keep rendering cut-off lines")
 	}
 }
@@ -167,7 +170,7 @@ func TestPasteTargetPerOverlay(t *testing.T) {
 	if m.palette.query != "set" {
 		t.Errorf("palette query = %q, want %q", m.palette.query, "set")
 	}
-	if m.palette.selected != 0 {
+	if m.palette.list.sel != 0 {
 		t.Error("paste into the palette must reset the cursor")
 	}
 
@@ -315,7 +318,7 @@ func TestLogoArtSurvivesIntact(t *testing.T) {
 		}
 	}
 
-	wide := rowRows(logo, 200, m0(kindLogo))
+	wide := rowRows(logo, 200, m0(kindLogo)).rows
 	if len(wide) != len(art) {
 		t.Fatalf("logo at 200 cells produced %d rows, want %d", len(wide), len(art))
 	}
@@ -327,13 +330,13 @@ func TestLogoArtSurvivesIntact(t *testing.T) {
 
 	// Art that cannot fit is dropped entirely: no partial banner, no re-wrap.
 	for width := 8; width < widest; width++ {
-		if got := rowRows(logo, width, m0(kindLogo)); got != nil {
+		if got := rowRows(logo, width, m0(kindLogo)).rows; got != nil {
 			t.Errorf("logo at %d cells leaked a partial banner: %q", width, got)
 		}
 	}
 
 	// Exactly wide enough: it must come back, whole.
-	if got := rowRows(logo, widest, m0(kindLogo)); len(got) != len(art) {
+	if got := rowRows(logo, widest, m0(kindLogo)).rows; len(got) != len(art) {
 		t.Errorf("logo at its exact width (%d) produced %d rows, want %d", widest, len(got), len(art))
 	}
 }
@@ -393,6 +396,15 @@ func TestWrapCellsBreaksOverlongWord(t *testing.T) {
 
 // The palette and the model picker list unbounded model identifiers, so their
 // frames must stay inside the terminal in both directions.
+//
+// The cursor sits on the LAST row, which is the case the box used to get wrong.
+// Trimming the tail and stopping once the cursor was included did keep the
+// cursor on screen — by making the panel as tall as the distance to it. Three
+// hundred entries in a 24-row terminal then produced a box that ran off the
+// bottom while lipgloss.Place pushed its own title off the top, and the row the
+// user was looking for was somewhere in the middle of the overflow. A cursor near
+// the top passes either way, so the fixture that finds this has to be near the
+// bottom.
 func TestOverlayPanelsFitTerminal(t *testing.T) {
 	ids := []string{
 		"gpt-4o-mini", "openai/gpt-oss-120b",
@@ -402,8 +414,8 @@ func TestOverlayPanelsFitTerminal(t *testing.T) {
 	}
 	for _, size := range [][2]int{{200, 60}, {120, 40}, {90, 24}, {70, 20}, {40, 12}} {
 		m := &uiModel{prov: config.Provider{Model: "gpt-4o-mini"}, width: size[0], height: size[1]}
-		m.picker = modelPicker{open: true, Models: ids, selected: 3}
-		m.palette = paletteState{open: true, query: "модел"}
+		m.picker = modelPicker{open: true, Models: ids, list: listView{sel: len(ids) - 1}}
+		m.palette = paletteState{open: true, query: "модел", list: listView{sel: 30}}
 
 		for name, box := range map[string]string{"picker": m.modelPickerBox(), "palette": m.paletteBox()} {
 			if w := lipgloss.Width(box); w > m.width {
@@ -443,11 +455,11 @@ func framedModel(w, h int, model string) *uiModel {
 		{kindSys, i18n.T("— session reset —")},
 	}
 	m.suggest = []suggestion{
-		{"/model " + model, i18n.T("switch to this model")},
-		{"/models", i18n.T("list models")},
-		{"/new", i18n.T("start a new session")},
-		{"/clear", i18n.T("clear the screen")},
-		{"/quit", i18n.T("leave")},
+		{text: "/model " + model, desc: i18n.T("switch to this model")},
+		{text: "/models", desc: i18n.T("list models")},
+		{text: "/new", desc: i18n.T("start a new session")},
+		{text: "/clear", desc: i18n.T("clear the screen")},
+		{text: "/quit", desc: i18n.T("leave")},
 	}
 	m.width, m.height = w, h
 	m.layout()

@@ -23,54 +23,170 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 )
 
-// ggupState remembers the server this process started, so a second launch
-// (a /setup pick while the startup one is already loading) reuses it instead of
+// ggufState remembers the server this process started, so a second launch
+// (a /setup pick while the startup one is still loading) reuses it instead of
 // spawning a second llama-server on the same file.
+//
+// It is set when the process is *spawned*, not when it is ready. That is the
+// difference between a load that can be abandoned and one that cannot: with the
+// state registered at spawn, quitting mid-load takes the child down with it,
+// where a state registered after the wait left an orphan llama-server holding a
+// large model in memory with nothing left to serve.
 var (
 	ggufMu    sync.Mutex
-	ggufState *ggufServer
+	ggufState *Launch
 )
 
-type ggufServer struct {
-	prov    config.Provider
-	stop    func()
-	logPath string
+// Launch is a llama-server that has been started and is not necessarily ready
+// yet. Everything that can be known before the model is in memory is known here:
+// the port, the URL, the log file. Only the model's own name waits for the
+// server, because llama-server is what knows it.
+//
+// The two-step shape is the whole point. A 7B quant off a cold disk takes tens
+// of seconds and a 70B on CPU takes minutes, and blocking a caller on that is a
+// caller with nothing to show until it ends. Spawning is instant; only the wait
+// is long, so only the wait is somebody else's problem.
+type Launch struct {
+	// Prov is the provider to reach the server through. Its model name is the
+	// file's stem until the server reports its own; Provider returns the
+	// corrected one once it has.
+	Prov config.Provider
+	// LogPath is where llama-server's output goes, or "" when the filesystem
+	// refused to open it.
+	LogPath string
+
+	done      chan struct{}
+	err       error
+	finalProv config.Provider
+	logPath   string
+	stop      func()
 }
 
-// LaunchGGUF starts llama-server on the .gguf file DMCODE_GGUF names and
-// returns the provider to reach it through. It blocks until the server answers
-// /v1/models — a model load can take minutes on a slow disk, so callers running
-// on a UI thread should call this from a goroutine.
+// ErrCancelled says a load was abandoned rather than failed. It is its own
+// value because the two need opposite reactions from a caller: a failure belongs
+// in the transcript with the log path to look at, while a cancellation is
+// something the user asked for and repeating it would be noise.
+var ErrCancelled = errors.New("the model load was cancelled")
+
+// Provider is the provider to build a runner against: the server's own model id
+// if it has answered, the file's stem if it has not.
+func (l *Launch) Provider() config.Provider {
+	select {
+	case <-l.done:
+		return l.finalProv
+	default:
+		return l.Prov
+	}
+}
+
+// Wait blocks until the model is loaded and answering, or the load failed. It is
+// safe to call from several goroutines and safe to call after the launch has
+// already finished.
+func (l *Launch) Wait() error {
+	<-l.done
+	return l.err
+}
+
+// Tail is the last thing llama-server printed, for a UI that has to wait and
+// should say why.
 //
-// The server is a child of this process: StopGGUF takes it down, and main
-// defers that call so the model never outlives the session.
-func LaunchGGUF() (config.Provider, error) {
+// llama.cpp draws its load progress with carriage returns on a single line, so
+// the last line of the file is one enormous run of them. Splitting on both
+// endings and keeping the last non-empty segment is what turns that into the
+// one line a person would recognise.
+func (l *Launch) Tail() string {
+	if l.logPath == "" {
+		return ""
+	}
+	f, err := os.Open(l.logPath)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	// Only the tail is read: the file grows for the life of the process, and a
+	// progress bar redraws into it hundreds of times.
+	const tailBytes = 4096
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return ""
+	}
+	n := min(tailBytes, st.Size())
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, st.Size()-int64(n)); err != nil && err != io.EOF {
+		return ""
+	}
+	parts := strings.FieldsFunc(string(buf), func(r rune) bool { return r == '\n' || r == '\r' })
+	for i := len(parts) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(parts[i]); line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+// StartGGUF starts llama-server on the .gguf file DMCODE_GGUF names and returns
+// as soon as the process is running. It does not wait for the model to load: the
+// caller decides who does, and a UI hands that to a goroutine and shows progress
+// while it happens.
+//
+// The failures this reports are the instant ones — DMCODE_GGUF unset, the file
+// missing, llama-server not on disk — which is exactly what should stay
+// synchronous. A user who pointed at a path that does not exist finds out in
+// milliseconds instead of after the load timeout, and finding out before the
+// interface appears is worth more than finding out after.
+//
+// The server is a child of this process: StopGGUF takes it down, including
+// mid-load, and main defers that call so the model never outlives the session.
+func StartGGUF() (*Launch, error) {
 	ggufMu.Lock()
 	defer ggufMu.Unlock()
 	if ggufState != nil {
-		return ggufState.prov, nil
+		return ggufState, nil
 	}
-	srv, err := startGGUF()
+	l, err := spawnGGUF()
+	if err != nil {
+		return nil, err
+	}
+	ggufState = l
+	return l, nil
+}
+
+// LaunchGGUF starts llama-server and waits for the model to load, returning the
+// provider to reach it through. It is the blocking form, for callers with no
+// user waiting on them; a UI should use StartGGUF and Wait on its own goroutine.
+//
+// A launch already in flight is shared rather than restarted: the second caller
+// waits on the first one's result. Serialising on a mutex instead would have
+// been the obvious implementation and is what this used to do, which meant a
+// /setup pick during the startup load froze the UI's event loop for the whole
+// load and could not be cancelled.
+func LaunchGGUF() (config.Provider, error) {
+	l, err := StartGGUF()
 	if err != nil {
 		return config.Provider{}, err
 	}
-	ggufState = srv
-	return srv.prov, nil
+	if err := l.Wait(); err != nil {
+		return config.Provider{}, err
+	}
+	return l.Provider(), nil
 }
 
 // StopGGUF shuts down the llama-server this process started, if any. Safe to
-// call more than once and safe to call when nothing was ever started.
+// call more than once, safe to call when nothing was ever started, and safe to
+// call while the model is still loading — which is the case that leaves an
+// otherwise unreachable process behind.
 func StopGGUF() {
 	ggufMu.Lock()
-	srv := ggufState
+	l := ggufState
 	ggufState = nil
 	ggufMu.Unlock()
-	if srv != nil {
-		srv.stop()
+	if l != nil {
+		l.stop()
 	}
 }
 
-func startGGUF() (*ggufServer, error) {
+// spawnGGUF validates, claims a port and starts the process. It does not wait.
+func spawnGGUF() (*Launch, error) {
 	ggufPath := os.Getenv("DMCODE_GGUF")
 	if ggufPath == "" {
 		return nil, errors.New("DMCODE_GGUF is not set")
@@ -112,35 +228,78 @@ func startGGUF() (*ggufServer, error) {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Start(); err != nil {
+		logFile.Close()
 		return nil, fmt.Errorf("could not start %s: %w", binPath, err)
 	}
 
 	died := make(chan error, 1)
 	go func() { died <- cmd.Wait() }()
 
-	timeout := ggufStartupTimeout()
-	if err := waitReady(ggufBaseURL(port), timeout, died); err != nil {
-		cmd.Process.Kill()
-		<-died
-		return nil, fmt.Errorf("%w; the server's output is in %s", err, logPath)
+	base := ggufBaseURL(port)
+	stem := fileStem(abs)
+	// Closing this ends the wait below without killing anything: it is how a
+	// cancellation stops the poll from running on until the timeout and then
+	// reporting a failure for a model the user chose to give up on.
+	cancelled := make(chan struct{})
+	var cancelOnce, stopOnce sync.Once
+
+	l := &Launch{
+		// The file's stem is the best name available before the server answers.
+		// llama-server serves one model per invocation, so the name it is sent
+		// with is not what decides anything — and a caller that needs the server's
+		// own id can wait and ask.
+		Prov:      ggufProvider(base, stem, 0),
+		LogPath:   logPath,
+		done:      make(chan struct{}),
+		logPath:   logPath,
+		finalProv: ggufProvider(base, stem, 0),
+		stop: func() {
+			stopOnce.Do(func() {
+				cancelOnce.Do(func() { close(cancelled) })
+				if err := cmd.Process.Kill(); err != nil {
+					logFile.Close()
+					return
+				}
+				select {
+				case <-died:
+				case <-time.After(5 * time.Second):
+				}
+				logFile.Close()
+			})
+		},
 	}
 
-	model := ggufModelName(abs, ggufBaseURL(port))
-	prov := config.Provider{
-		BaseURL: ggufBaseURL(port),
+	go func() {
+		err := waitReady(base, ggufStartupTimeout(), died, cancelled)
+		switch {
+		case errors.Is(err, ErrCancelled):
+			// Reported as itself, so a caller can stay quiet about a load the user
+			// walked away from.
+		case err == nil:
+			// Now the server can be asked what it is serving: the model id it
+			// reports, and the context window it was started with, which the
+			// meter and the compaction threshold run on.
+			model, context := ggufModelName(abs, base)
+			l.finalProv = ggufProvider(base, model, context)
+		default:
+			if logPath != "" {
+				err = fmt.Errorf("%w; the server's output is in %s", err, logPath)
+			}
+		}
+		l.err = err
+		close(l.done)
+	}()
+	return l, nil
+}
+
+func ggufProvider(base, model string, context int) config.Provider {
+	return config.Provider{
+		BaseURL: base,
 		Model:   model,
+		Context: context,
 		API:     config.APIChat,
 		Label:   i18n.T("llama.cpp GGUF"),
 	}
-	return &ggufServer{
-		prov:    prov,
-		logPath: logPath,
-		stop: func() {
-			cmd.Process.Kill()
-			<-died
-			logFile.Close()
-		},
-	}, nil
 }
 
 func ggufBaseURL(port int) string {
@@ -192,11 +351,15 @@ func freePort() (int, error) {
 	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
-// waitReady polls the server until /v1/models answers, the process dies, or
-// the deadline passes. A dead process is reported immediately rather than
-// after the full timeout: a missing model file should fail in seconds, not
-// after three minutes of silence.
-func waitReady(base string, timeout time.Duration, died <-chan error) error {
+// waitReady polls the server until /v1/models answers, the process dies, the load
+// is cancelled, or the deadline passes.
+//
+// Two of those four are reported at once rather than after a wait, and both
+// matter for the same reason: a missing model file should fail in seconds, not
+// after three minutes of silence. A dead process is one, and a cancelled load is
+// the other — the user already knows they stopped it, and a failure report for
+// it would be the tool arguing with them.
+func waitReady(base string, timeout time.Duration, died <-chan error, cancelled <-chan struct{}) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		if _, err := fetchModels(base, "", 800*time.Millisecond); err == nil {
@@ -205,6 +368,8 @@ func waitReady(base string, timeout time.Duration, died <-chan error) error {
 		select {
 		case err := <-died:
 			return fmt.Errorf("llama-server exited before it was ready: %v", err)
+		case <-cancelled:
+			return ErrCancelled
 		default:
 		}
 		if time.Now().After(deadline) {
@@ -216,12 +381,14 @@ func waitReady(base string, timeout time.Duration, died <-chan error) error {
 
 // ggufModelName prefers the id the server itself reports — llama-server knows
 // the model's real name — and falls back to the file's stem, which is what a
-// /v1/models that answers unusually would leave us with.
-func ggufModelName(ggufPath, base string) string {
-	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0] != "" {
-		return served[0]
+// /v1/models that answers unusually would leave us with. The context length the
+// server stated travels back too, so a GGUF session's meter and compaction
+// threshold use the cap llama-server was actually started with.
+func ggufModelName(ggufPath, base string) (string, int) {
+	if served, err := fetchModels(base, "", 2*time.Second); err == nil && len(served) > 0 && served[0].ID != "" {
+		return served[0].ID, served[0].Context
 	}
-	return fileStem(ggufPath)
+	return fileStem(ggufPath), 0
 }
 
 // fileStem strips a model file's directory and extension. The path may name a
@@ -237,9 +404,9 @@ func fileStem(p string) string {
 	return strings.TrimSuffix(p, filepath.Ext(p))
 }
 
-// ggufStartupTimeout is how long LaunchGGUF waits for the model to load.
-// DMCODE_GGUF_STARTUP sets it in seconds; the default of 180 covers a 7B
-// quant from a cold disk, and a 70B on CPU needs the override.
+// ggufStartupTimeout is how long the wait for the model runs. DMCODE_GGUF_STARTUP
+// sets it in seconds; the default of 180 covers a 7B quant from a cold disk, and
+// a 70B on CPU needs the override.
 func ggufStartupTimeout() time.Duration {
 	v, err := strconv.Atoi(os.Getenv("DMCODE_GGUF_STARTUP"))
 	if err != nil || v <= 0 {

@@ -54,8 +54,8 @@ func TestConfirmSendsTheHighlightedOption(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("down")) // move to "нет"
-	m.askKey(key("enter"))
+	m.askKey(pressKey("down")) // move to "нет"
+	m.askKey(pressKey("enter"))
 
 	got := receivedAnswer(t, reply)
 	if len(got.Selected) != 1 || got.Selected[0] != "нет" {
@@ -74,10 +74,10 @@ func TestMultiSelectTicksSeveralOptions(t *testing.T) {
 	req.Multi = true
 	reply := openQuestion(t, m, req, 0)
 
-	m.askKey(key("space")) // tick "да"
-	m.askKey(key("down"))
-	m.askKey(key("space")) // tick "нет"
-	m.askKey(key("enter"))
+	m.askKey(pressKey("space")) // tick "да"
+	m.askKey(pressKey("down"))
+	m.askKey(pressKey("space")) // tick "нет"
+	m.askKey(pressKey("enter"))
 
 	got := receivedAnswer(t, reply)
 	if len(got.Selected) != 2 {
@@ -97,9 +97,9 @@ func TestMultiSelectUntick(t *testing.T) {
 	req.Multi = true
 	reply := openQuestion(t, m, req, 0)
 
-	m.askKey(key("space"))
-	m.askKey(key("space")) // the same row again
-	m.askKey(key("enter"))
+	m.askKey(pressKey("space"))
+	m.askKey(pressKey("space")) // the same row again
+	m.askKey(pressKey("enter"))
 
 	got := receivedAnswer(t, reply)
 	if len(got.Selected) != 1 {
@@ -113,10 +113,10 @@ func TestSingleChoiceSpaceReplaces(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("space")) // "да"
-	m.askKey(key("down"))
-	m.askKey(key("space")) // "нет"
-	m.askKey(key("enter"))
+	m.askKey(pressKey("space")) // "да"
+	m.askKey(pressKey("down"))
+	m.askKey(pressKey("space")) // "нет"
+	m.askKey(pressKey("enter"))
 
 	got := receivedAnswer(t, reply)
 	if len(got.Selected) != 1 || got.Selected[0] != "нет" {
@@ -130,14 +130,14 @@ func TestCustomAnswerReachesTheTool(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("c"))
+	m.askKey(pressKey("c"))
 	if !m.ask.customOpen {
 		t.Fatal("c did not open the text field")
 	}
 	for _, r := range "свой" {
 		m.askKey(typed(r))
 	}
-	m.askKey(key("enter"))
+	m.askKey(pressKey("enter"))
 
 	got := receivedAnswer(t, reply)
 	if got.Custom != "свой" {
@@ -151,8 +151,8 @@ func TestEmptyCustomFieldConfirmsNothing(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("c"))
-	m.askKey(key("enter")) // empty field
+	m.askKey(pressKey("c"))
+	m.askKey(pressKey("enter")) // empty field
 
 	if !m.ask.open {
 		t.Error("an empty field closed the question")
@@ -170,9 +170,9 @@ func TestEscapeInTheFieldGoesBackNotOut(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("c"))
+	m.askKey(pressKey("c"))
 	m.askKey(typed('а'))
-	m.askKey(key("esc"))
+	m.askKey(pressKey("esc"))
 
 	if !m.ask.open {
 		t.Fatal("escape closed the whole question instead of the field")
@@ -193,7 +193,7 @@ func TestEscapeSkipsTheQuestion(t *testing.T) {
 	m := newSessionModel(t)
 	reply := openQuestion(t, m, askTwoOptions(), 0)
 
-	m.askKey(key("esc"))
+	m.askKey(pressKey("esc"))
 
 	got := receivedAnswer(t, reply)
 	if !got.Skipped {
@@ -258,7 +258,7 @@ func TestNoCustomRowWithoutAllowCustom(t *testing.T) {
 	if m.customRow() != -1 {
 		t.Error("the custom row is present although the question did not ask for one")
 	}
-	m.askKey(key("down")) // must not move past the last option
+	m.askKey(pressKey("down")) // must not move past the last option
 	if m.ask.cursor != 0 {
 		t.Errorf("cursor = %d, want it pinned to the only option", m.ask.cursor)
 	}

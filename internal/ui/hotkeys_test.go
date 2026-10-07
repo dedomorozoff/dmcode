@@ -78,7 +78,7 @@ func TestCtrlLMatchesTheSlashCommand(t *testing.T) {
 	viaCommand := newSessionModel(t)
 	sendTurn(t, viaCommand, "что-то")
 	viaCommand.input.SetValue("/clear")
-	viaCommand = press(t, viaCommand, key("enter"))
+	viaCommand = press(t, viaCommand, pressKey("enter"))
 
 	if len(viaKey.history) != len(viaCommand.history) {
 		t.Errorf("ctrl+l left %d lines, /clear left %d",
@@ -186,7 +186,7 @@ func TestNewShortcutsDoNotFireUnderAnOverlay(t *testing.T) {
 
 			// Once the overlay is gone the same key has to work, or the test
 			// above would pass simply because the binding does not exist.
-			m = press(t, m, key("esc"))
+			m = press(t, m, pressKey("esc"))
 			m = press(t, m, ctrl('n'))
 			if m.sessionID == old {
 				t.Errorf("ctrl+n does not work once the %s overlay is closed", tc.name)
@@ -214,7 +214,7 @@ func TestNewShortcutsAreAdvertised(t *testing.T) {
 	}
 
 	m.input.SetValue("/help")
-	m = press(t, m, key("enter"))
+	m = press(t, m, pressKey("enter"))
 	for _, l := range m.history {
 		if strings.Contains(l.text, "ctrl+l") && strings.Contains(l.text, "ctrl+n") {
 			return
@@ -233,7 +233,8 @@ func TestNewShortcutsAreTranslated(t *testing.T) {
 	for _, s := range []string{
 		"clear the screen (ctrl+l)",
 		"start a new session, the old one is kept (ctrl+n)",
-		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session",
+		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit",
+		"ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · ctrl+q quit · up/down history · esc stop",
 	} {
 		if got := i18n.T(s); got == s {
 			t.Errorf("no Russian translation for %q", s)

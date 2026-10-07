@@ -75,7 +75,7 @@ var hostedCandidates = []freeCandidate{
 // default without the user picking.
 var preferKeywords = []string{"coder", "code", "starcoder", "deepseek-coder"}
 
-func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]string, error) {
+func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]servedModel, error) {
 	client := config.Client(timeout)
 	url := strings.TrimRight(BaseURL, "/") + "/models"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -97,27 +97,47 @@ func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]string, error
 	}
 	var body struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID               string `json:"id"`
+			MaxModelLen      int    `json:"max_model_len"`
+			ContextLength    int    `json:"context_length"`
+			MaxContextLength int    `json:"max_context_length"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(body.Data))
+	out := make([]servedModel, 0, len(body.Data))
 	for _, m := range body.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
+		if m.ID == "" {
+			continue
 		}
+		ctx := m.MaxModelLen
+		if ctx <= 0 {
+			ctx = m.ContextLength
+		}
+		if ctx <= 0 {
+			ctx = m.MaxContextLength
+		}
+		out = append(out, servedModel{ID: m.ID, Context: ctx})
 	}
-	return ids, nil
+	return out, nil
+}
+
+// servedModel is one entry of an OpenAI-compatible /v1/models listing. Context
+// is the window the server stated for the model, zero when it stated none; it
+// travels onto config.Provider so the meter and the compaction threshold can
+// use the endpoint's own number rather than a name-to-tokens guess.
+type servedModel struct {
+	ID      string
+	Context int
 }
 
 // pickModel resolves the model to use for a candidate: the first configured
 // preference the server lists, otherwise the best-ranked model it reports.
-func pickModel(cand freeCandidate, served []string) string {
+func pickModel(cand freeCandidate, served []servedModel) string {
 	has := func(id string) bool {
 		for _, s := range served {
-			if s == id {
+			if s.ID == id {
 				return true
 			}
 		}
@@ -134,7 +154,11 @@ func pickModel(cand freeCandidate, served []string) string {
 		}
 		return ""
 	}
-	ranked := append([]string(nil), served...)
+	ids := make([]string, 0, len(served))
+	for _, s := range served {
+		ids = append(ids, s.ID)
+	}
+	ranked := append([]string(nil), ids...)
 	score := func(id string) int {
 		lower := strings.ToLower(id)
 		for i, kw := range preferKeywords {
@@ -159,16 +183,22 @@ func pickModel(cand freeCandidate, served []string) string {
 // is the fast half of the decision. Whether that model can actually call tools
 // is a separate, slower question answered off the startup path — see
 // VerifyTools, which the UI runs in the background.
-func probe(cand freeCandidate, timeout time.Duration) (string, bool) {
+func probe(cand freeCandidate, timeout time.Duration) (modelName string, context int, ok bool) {
 	served, err := fetchModels(cand.BaseURL, cand.APIKey, timeout)
 	if err != nil {
-		return "", false
+		return "", 0, false
 	}
-	modelName := pickModel(cand, served)
+	modelName = pickModel(cand, served)
 	if modelName == "" {
-		return "", false
+		return "", 0, false
 	}
-	return modelName, true
+	for _, s := range served {
+		if s.ID == modelName {
+			context = s.Context
+			break
+		}
+	}
+	return modelName, context, true
 }
 
 // discoverFreeProviders probes every candidate and returns the working ones in
@@ -180,9 +210,10 @@ func DiscoverFreeProviders() []config.Provider {
 	all := append(append([]freeCandidate{}, localCandidates...), hostedCandidates...)
 
 	type result struct {
-		cand  freeCandidate
-		Model string
-		ok    bool
+		cand    freeCandidate
+		Model   string
+		Context int
+		ok      bool
 	}
 	results := make([]result, len(all))
 
@@ -197,8 +228,8 @@ func DiscoverFreeProviders() []config.Provider {
 			if !cand.local {
 				timeout = 5 * time.Second
 			}
-			model, ok := probe(cand, timeout)
-			results[i] = result{cand: cand, Model: model, ok: ok}
+			model, context, ok := probe(cand, timeout)
+			results[i] = result{cand: cand, Model: model, Context: context, ok: ok}
 		}(i, cand)
 	}
 	wg.Wait()
@@ -213,6 +244,7 @@ func DiscoverFreeProviders() []config.Provider {
 				BaseURL:   r.cand.BaseURL,
 				APIKey:    r.cand.APIKey,
 				Model:     r.Model,
+				Context:   r.Context,
 				API:       config.APIChat,
 				Label:     r.cand.name,
 				Reasoning: r.cand.Reasoning,

@@ -7,6 +7,7 @@ import (
 	"iter"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/genai"
 )
 
 // A tool call whose arguments the output limit cut short is worth one more
@@ -33,7 +34,7 @@ func (e *truncatedCallError) Error() string {
 	if e.spent > 0 {
 		spent = fmt.Sprintf(", упёрся в %d токенов", e.spent)
 	}
-	return fmt.Sprintf("dmcode: вызов %s дошёл не целиком — модель упёрлась в лимит вывода (finish_reason=length%s): %v", e.tool, spent, e.err)
+	return fmt.Sprintf("dmcode: вызов %s дошёл не целиком — модель упёрлась в лимит вывода (finish_reason=length%s): %v. Попросите модель писать файл по частям — короткий write_file, остальное добавлением через edit_file — или поднимите лимит вывода модели.", e.tool, spent, e.err)
 }
 
 func (e *truncatedCallError) Unwrap() error { return e.err }
@@ -41,8 +42,11 @@ func (e *truncatedCallError) Unwrap() error { return e.err }
 // truncationNote is what the second attempt is told. It has to be true as well
 // as useful: the call really was discarded, so "do it again" is not a request
 // to repeat work that already landed, and saying so is what keeps the model from
-// re-reading a file to check whether the edit applied.
-const truncationNote = "Your previous call to %s was cut off by the output limit before its arguments were complete. Nothing was applied: the call was discarded, not half-applied. Make the call again now, in smaller pieces — several small calls rather than one large one — and keep any text before the call down to a single sentence."
+// re-reading a file to check whether the edit applied. The write_file tail is
+// the recipe the failure actually calls for: a file too big for one call is
+// written as a head plus anchored appends, which no model guesses on its own
+// after being told "smaller pieces" once.
+const truncationNote = "Your previous call to %s was cut off by the output limit before its arguments were complete. Nothing was applied: the call was discarded, not half-applied. Make the call again now, in smaller pieces — several small calls rather than one large one — and keep any text before the call down to a single sentence. If it was write_file: write only the head of the file first (a few dozen lines), then append the rest with edit_file, anchoring each edit on the last line the previous chunk wrote."
 
 // Bounds on the second attempt's output budget. The floor keeps a server that
 // stopped at a few dozen tokens from being asked for a few dozen more; the
@@ -63,12 +67,14 @@ type chatCall func(context.Context, chatRequest) iter.Seq2[*model.LLMResponse, e
 //
 // Two rules keep the second attempt honest:
 //
-//   - It only happens while nothing has been shown. A re-ask after text has
-//     streamed prints the answer twice and the transcript cannot take the first
-//     copy back. Same rule the failover pool follows, for the same reason.
-//   - It happens once. A model that will not split a call after being told to
-//     is not going to on the third try either, and each try costs a full
-//     generation.
+//   - It only happens once. A model that will not split a call after being
+//     told to is not going to on the third try either, and each try costs a
+//     full generation.
+//   - Text the first attempt already streamed stays on screen — the
+//     transcript cannot take it back — but a lost turn is worse than a
+//     duplicated sentence. The second attempt is preceded by a blank line,
+//     so the narration it redoes lands on its own row instead of glued to
+//     the half-answer the first attempt left behind.
 //
 // Anything that goes wrong on the second attempt — a transport failure, a
 // rejected budget, a second truncation — is reported as the truncation it grew
@@ -96,9 +102,19 @@ func withReAsk(ctx context.Context, body chatRequest, call chatCall) iter.Seq2[*
 		if trunc == nil {
 			return
 		}
-		if emitted || ctx.Err() != nil || !reAskable(body) {
+		if ctx.Err() != nil || !reAskable(body) {
 			yield(nil, trunc)
 			return
+		}
+		if emitted {
+			// The blank line between the first attempt's text and the redo.
+			sep := &model.LLMResponse{
+				Partial: true,
+				Content: genai.NewContentFromText("\n\n", genai.RoleModel),
+			}
+			if !yield(sep, nil) {
+				return
+			}
 		}
 		// A second attempt that runs to completion has answered the question, and
 		// the truncation it grew out of is no longer anything the user needs to

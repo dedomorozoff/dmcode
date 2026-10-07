@@ -145,6 +145,27 @@ func shortenPath(p string, n int) string {
 	return p
 }
 
+// trimLeft cuts a value to n cells from the left, keeping the tail.
+//
+// It is shortenPath without the separator rule, for the values where the head is
+// boilerplate and the tail is the identity: a proxy address, where the scheme and
+// the leading host label say little and the port is the half a reader is looking
+// for. truncate would keep the head and drop the tail, so "socks5://vpn.example
+// .com:21001" in 29 cells would become "socks5://vpn.example.com:…" — a row naming
+// the host and hiding the port. shortenPath cannot do this job because its rule
+// gives up when the cut part holds no separator, and "socks5://vpn." has none.
+func trimLeft(s string, n int) string {
+	if n <= 1 || ansi.StringWidth(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	keep := n - 1
+	if keep > len(runes) {
+		keep = len(runes)
+	}
+	return "…" + string(runes[len(runes)-keep:])
+}
+
 // changeDir moves the session to path and re-fences the tools there.
 //
 // os.Chdir is what actually moves the agent: the tools address files relative
@@ -175,9 +196,14 @@ func (m *uiModel) changeDir(path string) tea.Cmd {
 	m.workDirShort = filepath.Base(m.workDir)
 	m.history = append(m.history, line{kindSys, i18n.T("folder changed to: ") + m.workDir})
 	m.historyDirty = true
+	// The repository the sidebar's GIT section names is a property of the folder,
+	// so it is re-read here. Until the refresh lands the old folder's branch is
+	// still drawn — which is why the state is cleared rather than left: a branch
+	// that is known to belong somewhere else is worse than no section at all.
+	m.gitState = gitState{}
 	// The agent is told where it is through its instruction, so a stale one
 	// would have it reasoning about the previous directory.
-	return m.rebuildRunner()
+	return tea.Batch(m.rebuildRunner(), m.gitStatusCmd())
 }
 
 // savePrompt records a sent prompt for ↑/↓ recall and persists it to disk.

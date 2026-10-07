@@ -3,11 +3,15 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -17,7 +21,6 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 
@@ -25,16 +28,22 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/editor/editor"
+	"github.com/dedomorozoff/dmcode/internal/editor/syntax"
+	"github.com/dedomorozoff/dmcode/internal/editor/vcs"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/imgprev"
 	"github.com/dedomorozoff/dmcode/internal/llm"
+	"github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
+	"github.com/dedomorozoff/dmcode/internal/tools"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/runner"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/session/compaction"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 )
@@ -46,6 +55,7 @@ const (
 	kindAgent
 	kindTool
 	kindToolRes
+	kindDiff
 	kindSys
 	kindErr
 	kindLogo
@@ -72,6 +82,8 @@ func kindName(k lineKind) string {
 		return "tool"
 	case kindToolRes:
 		return "toolres"
+	case kindDiff:
+		return "diff"
 	case kindSys:
 		return "sys"
 	case kindErr:
@@ -96,6 +108,11 @@ var (
 	cWarning = lipgloss.Color("11")
 	cBgBar   = lipgloss.Color("236")
 	cFgBar   = lipgloss.Color("253")
+	// The diff block's row backgrounds, matched to the editor's own diff
+	// palette: a dim green or red wash under the syntax colours reads as
+	// "this changed" without drowning the code out.
+	cDiffAddBg = lipgloss.Color("22")
+	cDiffDelBg = lipgloss.Color("52")
 
 	styleUser    = lipgloss.NewStyle().Bold(true).Foreground(cUser)
 	styleAgent   = lipgloss.NewStyle().Foreground(cAgent)
@@ -157,6 +174,12 @@ const (
 	// pending-image strip are added on top when they are shown — see
 	// chromeHeight(), the one place the three combine.
 	chromeHeight = statusHeight + inputHeight + panelBorder
+
+	// panelTopBorder is how many rows of the frame sit between the top of the
+	// chat panel and its first transcript row: the panel's own top border, which
+	// panelBorder counts together with the bottom one. A row-to-file test needs
+	// the top one alone, which is why it is named rather than divided out.
+	panelTopBorder = 1
 )
 
 // deltaMsg carries one text part of a round to the event loop. It is a spoken
@@ -243,8 +266,16 @@ type toolCallMsg struct {
 type toolResMsg struct {
 	name   string
 	output string
+	diff   string
 }
-type turnDoneMsg struct{ err error }
+
+// turnDoneMsg ends a turn. timing is what the turn cost, measured on the
+// goroutine that ran it — the event loop cannot time it, because the loop is
+// what the clock would have to be read from.
+type turnDoneMsg struct {
+	err    error
+	timing turnTiming
+}
 
 // retryMsg reports an endpoint about to be tried again, so the wait shows up
 // as itself rather than as a spinner that looks hung.
@@ -259,7 +290,12 @@ type modelSwitchedMsg struct {
 	name   string
 	runner *runner.Runner
 	pool   []config.Provider
-	err    error
+	// prov is the provider the runner was actually built for, carrying the
+	// window the endpoint reported for the picked model when it reported one.
+	// It is what applyWindow reads in the handler, so the meter cannot describe
+	// the previous model's window while the runner compacts for the new one.
+	prov config.Provider
+	err  error
 }
 
 type errMsg string
@@ -280,13 +316,42 @@ type setupCheckMsg struct {
 	forced bool
 }
 
-// launchGGUF is the launcher behind the GGUF setup option. It is a variable so
-// the tests can stand in for a model load, which no test wants to wait out.
-var launchGGUF = discover.LaunchGGUF
+// startGGUF starts llama-server for the .gguf file DMCODE_GGUF names, without
+// waiting for the model. A variable so the tests can stand in for a load, which
+// no test wants to wait out — and it is the non-blocking half that matters: the
+// whole point of loading behind the interface is that this returns immediately.
+var startGGUF = func() (ggufLoad, error) { return discover.StartGGUF() }
 
-// ggufReadyMsg reports the outcome of starting llama-server on the .gguf file
-// the user named in /setup. The load happens off the event loop because it can
-// take minutes; the message is how the loop learns it is done.
+// stopGGUF takes down a load in progress. A variable for the same reason as
+// startGGUF, and for a second one: a test must be able to watch the loading
+// state end without a real llama-server behind it.
+var stopGGUF = discover.StopGGUF
+
+// ggufLoad is what the interface needs from a model being loaded: whether it
+// finished, which provider to switch to, and what the server is printing.
+//
+// It is an interface rather than *discover.Launch because every behaviour worth
+// testing here — refusing a message, cancelling, swapping the provider in — is
+// about what the UI does while a load runs, and none of it can be driven from a
+// test if the only way to have a load is to start a real llama-server. The
+// interface is the seam; the real launch satisfies it unchanged.
+type ggufLoad interface {
+	// Wait blocks until the model answers or the load fails.
+	Wait() error
+	// Provider is the provider to run on. Meaningful after Wait.
+	Provider() config.Provider
+	// Tail is the last thing the server printed, for a wait that needs progress.
+	Tail() string
+}
+
+// ggufReadyMsg reports the outcome of a llama-server load. The load happens off
+// the event loop because it can take minutes; the message is how the loop learns
+// it is done.
+//
+// It carries two paths: the /setup one, where the user is switching to a local
+// model mid-session, and the start-up one, where the session was built around a
+// model that had not finished loading. Both end in the same place — a provider to
+// run on — so they arrive as the same message.
 type ggufReadyMsg struct {
 	prov config.Provider
 	err  error
@@ -333,13 +398,36 @@ type uiModel struct {
 	// They live beside tools because they are not flattened into it: the
 	// MCP connection opens on the first turn that needs it.
 	mcpToolsets []tool.Toolset
-	prog        *tea.Program
-	toolNames   []string
-	palette     paletteState
-	picker      modelPicker
-	setup       setupState
-	lang        langState
-	suggest     []suggestion
+	// mcpStates is what the one eager listing made of each configured server,
+	// for the sidebar's MCP section. It is kept beside mcpToolsets rather than
+	// derived from it because a toolset's tools are only knowable by opening it:
+	// asking again here would connect to every server on the first frame.
+	mcpStates []mcp.ServerState
+	prog      *tea.Program
+	toolNames []string
+	// gitState is the repository the session is working in, as of the last
+	// refresh: which branch, and how much of the tree is dirty. It is a value
+	// rather than a *vcs.Repo because the panel only ever draws the summary, and
+	// holding a handle would invite a status walk on the frame path.
+	gitState gitState
+	// gitRepo is the open repository itself, kept for the same reason the panel
+	// keeps a snapshot rather than the answer: reading the branch means walking
+	// to .git, and the render path must not do I/O.
+	gitRepo *vcs.Repo
+	// ggufLoad is a local model loading in the background, if one is. Non-nil
+	// means the model is not answering yet: the session is fully usable, the
+	// provider in it is a name and a port, and a message sent now would go to a
+	// port nothing is listening on. Nothing about it blocks the interface, which
+	// is the entire change from waiting for the load before drawing a frame.
+	ggufLoad ggufLoad
+	// ggufLoadStart is when the wait began, so the note counts seconds against a
+	// clock the user can watch rather than against the 180s timeout.
+	ggufLoadStart time.Time
+	palette       paletteState
+	picker        modelPicker
+	setup         setupState
+	lang          langState
+	suggest       []suggestion
 	// suggestSel is the highlighted row of the command list. It is reset on every
 	// keystroke, so a narrowed list always starts at the top.
 	suggestSel int
@@ -407,6 +495,13 @@ type uiModel struct {
 	// sessionsList is the /sessions overlay. It lives on the model rather than
 	// being rebuilt per frame so the highlight and the filter survive redraws.
 	sessionsList sessionsState
+	// dirPick is the /cd folder browser, open while the user navigates to the
+	// folder the next turn should work in.
+	dirPick dirPickState
+	// help is the F1 reference: the keybindings and the slash commands in one
+	// scrollable box. Its content is static, so the state is only where the
+	// user is looking, not a filter or a draft.
+	help helpState
 	// ask is the choice overlay, open while the agent waits for an answer.
 	// Answers to it go back over a channel, so the field also carries the
 	// pending reply.
@@ -442,7 +537,17 @@ type uiModel struct {
 	cachedWidth   int
 	historyDirty  bool
 	cachedRows    []cachedLine
-	proxy         proxyState
+	// rowRefs is what each row of the rendered transcript stands for, index-
+	// aligned with renderHistory's output. It is the answer to "which line of
+	// which file is under the pointer", and it is the only copy: the rendered
+	// rows are strings by the time a click arrives.
+	rowRefs []codeRef
+	// sideRefs is the sidebar's half of the same question: what each row of the
+	// panel stands for, index-aligned with the body sidebarView built. Only the
+	// changed-file rows carry a path; every other row holds a zero ref, which is
+	// what keeps the index aligned and makes a click on a heading do nothing.
+	sideRefs []codeRef
+	proxy    proxyState
 	// pending are the images attached to the next turn. They live on the model
 	// rather than inside the input text so a preview can be drawn and the bytes
 	// sent without re-reading the file, and so a rewind can put them back.
@@ -451,28 +556,126 @@ type uiModel struct {
 	// image preview is drawn. It is recorded rather than asked for at draw time
 	// because the renderer is the only thing that knows it.
 	profile colorprofile.Profile
+	// synDiff is the diff block's highlighter, created lazily when the first
+	// change block is drawn. The editor's own highlighter is preferred — same
+	// theme the user already reads code in — and survives even if the editor
+	// is gone.
+	synDiff *syntax.Highlighter
 	// watchedPath is the picture path last looked at in the input. It exists so
 	// that a path already attached is not attached again on every keystroke — the
 	// input is watched on each one, and re-decoding the same file for each is a
 	// stall the user can see.
 	watchedPath string
+	// ed is the workspace: the merged dmed editor with its project tree, git
+	// panel and terminal. It is created on the first ctrl+e and lives for the
+	// rest of the session — tabs, tree state and the PTY survive the switches
+	// between the editor's main area and the chat (ed.Chat).
+	ed *editor.Model
+	// hostCall guards the re-entrancy in the host callbacks: the editor calls
+	// back into the chat's key handling, which is the same Update — the flag
+	// tells it the message has already been routed past the editor once.
+	hostCall bool
+	// pendingEditor is a switch into the editor mode asked for from inside the
+	// editor's own Update (a host callback: ctrl+e, the /editor command). The
+	// editor's Update returns its own copy and editorUpdate would clobber a
+	// direct flip of m.ed — so the flip is deferred until the copy lands.
+	pendingEditor bool
+	// pendingJump is the place in a file the chat asked the editor to go to, by
+	// a click on a change row or by the jump key. It is applied by enterEditor,
+	// because OpenChangedTabs runs first and would otherwise focus a tab for the
+	// same file and leave the cursor somewhere else in it.
+	pendingJump *codeRef
+	// jumpFrom is how far the jump key's walk into the transcript has got: the
+	// row after the change it went to last, and -1 before it has gone anywhere.
+	// The transcript's scroll offset cannot stand in for it — two presses in a
+	// row do not move the view, so a walk derived from where the user is looking
+	// would return the same change for ever.
+	jumpFrom   int
+	winW, winH int
+
+	// turnStart is when the turn in flight began, and timing is what the last
+	// finished one cost. They are separate because the two are read at
+	// different times: turnStart by the live counter on every frame while a
+	// turn runs, timing by the sidebar and /stats after it ends. Overwriting
+	// timing mid-turn would make the sidebar's reading move under the user
+	// while they were still watching the turn that produced it.
+	turnStart time.Time
+	timing    turnTiming
+	// total is the session's running cost, kept beside the last turn's figures
+	// because "how long was that one" and "what has this session cost me" are
+	// different questions and only the first of them survives a single line in
+	// the transcript.
+	total sessionTotal
+	// shownSecond is the elapsed second the progress note last drew. It is what
+	// makes the spinner tick a redraw trigger rather than a repaint: without
+	// it, either the timer never advances or the transcript is rebuilt ten
+	// times a second. Reset at the start of a turn, or the first second of the
+	// next one would be suppressed by the previous turn's last value.
+	shownSecond int
+	// window is the model's context size for the endpoint now answering, and
+	// windowGuess whether that size is a real figure or the fallback. Zero
+	// means compaction is off: an invented threshold is a decision made on a
+	// guess, which is not one worth making, even though the meter can show one.
+	window      int
+	windowGuess bool
+	// exactWindow is the real context size, zero when the model is not one this
+	// build recognises. Compaction reads this rather than window: the meter may
+	// draw an assumed denominator, a compaction threshold may not.
+	exactWindow int
+	// compacted records that the context has been summarized at least once in
+	// this session, so the sidebar can say so. Compaction is invisible
+	// otherwise: the model's answers keep coming, only the history behind them
+	// got shorter.
+	compacted bool
+}
+
+// diffHighlighter returns the highlighter the transcript's change blocks are
+// coloured with. The editor's own comes first — the theme the user already
+// reads code in — and a standalone one is created otherwise, so a diff drawn
+// before the editor exists still gets its colours.
+func (m *uiModel) diffHighlighter() *syntax.Highlighter {
+	if m.ed != nil {
+		if h := m.ed.Highlighter(); h != nil {
+			return h
+		}
+	}
+	if m.synDiff == nil {
+		m.synDiff = syntax.New("")
+	}
+	return m.synDiff
 }
 
 // cachedLine holds the rendered rows of one history line. It is index-aligned
 // with m.history: a streamed token rewrites the text of the last agent line,
 // so on the next frame every earlier line still matches its cache entry and is
 // reused as-is, and only the line that changed is re-rendered and re-wrapped.
+//
+// The refs travel inside the rendered rows rather than beside them, which is
+// the whole reason they are in the cache at all: a cache that kept the styled
+// strings and dropped the places they stand for would empty the click index on
+// exactly the frames that reuse the cache, so the jump would work once and then
+// stop working on every message that scrolled past.
 type cachedLine struct {
 	kind  lineKind
 	text  string
 	width int
-	rows  []string
+	rows  renderedRows
 }
 
+// modelPicker is /models: the endpoint's catalogue, narrowed by a filter and
+// by a free-only toggle. list is a value rather than two fields because the
+// highlight and the scroll offset are one piece of state — a window whose offset
+// outlives its cursor is the bug panelWindow exists to prevent.
 type modelPicker struct {
-	open     bool
-	query    string
-	selected int
+	open  bool
+	query string
+	// onlyFree keeps the rows this endpoint serves without a paid plan, which
+	// is a question about the endpoint and about the ids it hands out, and not
+	// something a filter string can answer: Groq's free tier has no ":free" in
+	// any of its names, and OpenRouter's paid half is named exactly like its
+	// free one.
+	onlyFree bool
+	list     listView
 	Models   []string
 }
 
@@ -492,9 +695,9 @@ type promptMark struct {
 }
 
 type paletteState struct {
-	open     bool
-	query    string
-	selected int
+	open  bool
+	query string
+	list  listView
 }
 
 // langState drives the /lang overlay: a short list with no text field, since
@@ -517,11 +720,11 @@ const (
 // stdin prompt, while the error message that points at it promised a command
 // that was never there; the two now share one option list and one apply path.
 type setupState struct {
-	open     bool
-	stage    int
-	selected int
-	opt      config.SetupOption
-	buf      string
+	open  bool
+	stage int
+	list  listView
+	opt   config.SetupOption
+	buf   string
 	// force saves the configuration even though the endpoint rejected the key.
 	// It is only set after a failed check, so a bad key is still one retry away
 	// from being saved on the first attempt.
@@ -539,10 +742,10 @@ func (s *setupState) reset() {
 // path prompt. Directories are entered with enter; a .gguf file is picked the
 // same way. It lives inside setupState so a wizard reset closes it too.
 type ggufPickState struct {
-	open     bool
-	dir      string
-	entries  []ggufEntry
-	selected int
+	open    bool
+	dir     string
+	entries []ggufEntry
+	list    listView
 }
 
 type ggufEntry struct {
@@ -551,14 +754,26 @@ type ggufEntry struct {
 	dir   bool
 }
 
-// proxyState drives the /proxy dialog: a short menu of actions, then a text
-// stage for whichever one needs a value. It exists because "set one with:
-// /proxy <url>" asked the user to remember a command syntax on top of the
-// proxy address itself, and to know in advance whether the address worked.
+// proxyState drives the /proxy dialog: a short menu of actions, then a form for
+// whichever one needs a value. It exists because "set one with: /proxy <url>"
+// asked the user to remember a command syntax on top of the proxy address
+// itself, and to know in advance whether the address worked.
 const (
 	proxyPick = iota
 	proxyURL
 	proxyNo
+)
+
+// The address form's fields, in the order they are shown and tabbed through.
+// The type comes first because it decides the port's default, and the password
+// last because it is the only field whose value must never reach the screen.
+const (
+	pfScheme = iota
+	pfHost
+	pfPort
+	pfUser
+	pfPass
+	pfCount
 )
 
 type proxyState struct {
@@ -566,16 +781,405 @@ type proxyState struct {
 	stage    int
 	selected int
 	buf      string
+	// fields holds the address form's values, one string per pf* index. It is a
+	// slice rather than five named fields so that typing, backspace, paste and
+	// rendering can all be written once against "the focused field" instead of
+	// five times against five fields — the repetition is where a form like this
+	// rots, because the fifth copy is the one nobody edits.
+	fields [pfCount]string
+	// focus is which field the form is on.
+	focus int
+}
+
+// field returns a pointer to the focused field, so a handler can append to it
+// without knowing which field that is.
+func (s *proxyState) field() *string {
+	if s.focus < 0 || s.focus >= pfCount {
+		return nil
+	}
+	return &s.fields[s.focus]
+}
+
+// spec reads the form out as the parts it describes.
+//
+// An unrecognised scheme is passed through rather than replaced with http. The
+// type field is stepped through Schemes and so cannot hold anything else, but
+// substituting a scheme here would turn a value Validate is about to reject into
+// a valid-looking one — the rejection and the fix would be in different places.
+func (s *proxyState) spec() config.Spec {
+	scheme := strings.ToLower(strings.TrimSpace(s.fields[pfScheme]))
+	if !slices.Contains(config.Schemes, scheme) {
+		return config.Spec{Scheme: scheme}
+	}
+	return config.Spec{
+		Scheme: scheme,
+		Host:   strings.TrimSpace(s.fields[pfHost]),
+		Port:   strings.TrimSpace(s.fields[pfPort]),
+		User:   strings.TrimSpace(s.fields[pfUser]),
+		Pass:   s.fields[pfPass],
+	}
+}
+
+// setSpec fills the form from a configured address, so reopening the dialog shows
+// what is set instead of five empty boxes.
+func (s *proxyState) setSpec(sp config.Spec) {
+	s.fields[pfScheme] = sp.Scheme
+	s.fields[pfHost] = sp.Host
+	s.fields[pfPort] = sp.Port
+	s.fields[pfUser] = sp.User
+	s.fields[pfPass] = sp.Pass
+}
+
+// schemeIndex is the form's type field as an index into config.Schemes, and -1
+// when it holds something that is not a scheme. left and right step through the
+// list rather than typing into it: a type is one of four names, and letting the
+// user type one is how it becomes "socks" — which SetProxy accepts as a bare host
+// and then dials on port 80.
+func (s *proxyState) schemeIndex() int {
+	return slices.Index(config.Schemes, strings.ToLower(strings.TrimSpace(s.fields[pfScheme])))
 }
 
 func (s *proxyState) reset() {
 	*s = proxyState{}
 }
 
+// openForm seeds the address form from the proxy already in effect, so "turn on
+// or change it" starts from the current value instead of blank — a user editing
+// one field should not have to retype the four they are keeping.
+func (s *proxyState) openForm() {
+	s.stage = proxyURL
+	s.focus = pfScheme
+	s.buf = ""
+	if cur := config.CurrentProxy().Effective(); cur != "" {
+		s.setSpec(config.ParseSpec(cur))
+	}
+	// An unset proxy still opens with a type and a port on screen, not with two
+	// empty fields the user has to guess at: the defaults are what most setups
+	// want, and a value already filled in can be read, corrected or cleared —
+	// where an empty one has to be understood first.
+	if s.fields[pfScheme] == "" {
+		s.fields[pfScheme] = config.Schemes[0]
+	}
+	if s.fields[pfPort] == "" {
+		s.fields[pfPort] = config.DefaultPort(s.fields[pfScheme])
+	}
+}
+
 type command struct {
 	name string
 	desc string
 	run  func(m *uiModel) tea.Cmd
+	// takesArg marks a command whose bare form is not what the user wants, so
+	// the command list completes such a row into the prompt instead of running
+	// it. /image and /resume do nothing without an argument; /proxy, /cd and
+	// /new all have a useful bare form, so they keep running.
+	takesArg bool
+}
+
+// editorUpdate forwards a message into the embedded editor and keeps the
+// pointer fresh: the editor's Update has a value receiver, so the state that
+// survived the message is the value it returns.
+func (m *uiModel) editorUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
+	nm, cmd := m.ed.Update(msg)
+	if em, ok := nm.(editor.Model); ok {
+		m.ed = &em
+	}
+	if m.pendingEditor {
+		m.pendingEditor = false
+		m.enterEditor()
+	}
+	return m, cmd
+}
+
+// quitCmd tears the workspace down — the terminal's shell above all — and
+// ends the program. Every exit path goes through it, so closing dmcode never
+// leaves a shell running behind the terminal.
+func (m *uiModel) quitCmd() tea.Cmd {
+	if m.ed != nil {
+		m.ed.Shutdown()
+	}
+	return tea.Quit
+}
+
+// openEditor switches the workspace into the editor mode. Called either from
+// the plain chat (the editor does not exist yet) or from inside the editor's
+// own Update — a host callback — where a direct flip of m.ed would be
+// clobbered by the copy the editor's Update returns, so the flip defers.
+func (m *uiModel) openEditor() tea.Cmd {
+	init := m.ensureEditor()
+	if m.hostCall {
+		m.pendingEditor = true
+		return init
+	}
+	m.enterEditor()
+	return init
+}
+
+// enterEditor flips the (already existing) workspace into the editor mode:
+// the tabs for the files the agent changed open on top. The project tree and the
+// other panels stay as the user last left them — closed until asked for
+// with ctrl+b, F9 or the status-bar icons.
+//
+// A jump the chat asked for is applied here, at the end, and not where it was
+// asked for: OpenChangedTabs above focuses a tab per changed file, so a cursor
+// set before it would be replaced by whichever of those files came last.
+func (m *uiModel) enterEditor() {
+	m.ed.Chat = false
+	m.ed.OpenChangedTabs()
+	if m.pendingJump != nil {
+		j := *m.pendingJump
+		m.pendingJump = nil
+		m.applyJump(j)
+	}
+}
+
+// ensureEditor creates the workspace the first time it is needed, on the
+// folder the session is scoped to, and wires the chat side of it: the keys
+// and clicks its main-area callbacks hand back, and the transcript rendered
+// at the editor's geometry. The returned command is the editor's Init — its
+// watchers are channel listeners that must run exactly once.
+func (m *uiModel) ensureEditor() tea.Cmd {
+	if m.ed != nil {
+		return nil
+	}
+	var args []string
+	if m.workDir != "" {
+		args = append(args, m.workDir)
+	}
+	ed := editor.NewEmbedded(args...)
+	ed.Chat = true
+	ed.ApplyTerminalCompat()
+	// The panels start closed: the first screen is the chat, the panels are
+	// one key or one status-bar icon away.
+	ed.ClosePanels()
+	if m.winW > 0 {
+		nm, _ := ed.Update(tea.WindowSizeMsg{Width: m.winW, Height: m.winH})
+		if em, ok := nm.(editor.Model); ok {
+			ed = em
+		}
+	}
+	ed.Host = &editor.Host{
+		Key: func(msg tea.KeyPressMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			_, cmd := m.Update(msg)
+			return cmd
+		},
+		// The mouse callbacks are wrapped like Key is, and for the same reason:
+		// a click that jumps to the editor asks for a mode flip from inside the
+		// editor's own Update, and a direct flip of m.ed would be undone by the
+		// copy that Update returns. openEditor defers on the strength of this
+		// flag, so a click routed only through MouseClick/Motion/Release —
+		// without the flag set — would lose the jump every time.
+		Click: func(msg tea.MouseClickMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatClick(msg)
+		},
+		Wheel: func(msg tea.MouseWheelMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			return m.chatWheel(msg)
+		},
+		Motion: func(msg tea.MouseMotionMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatMotion(msg)
+		},
+		Release: func(msg tea.MouseReleaseMsg) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			x0, y0, _, _ := m.ed.MainArea()
+			msg.X, msg.Y = msg.X-x0, msg.Y-y0
+			return m.chatRelease(msg)
+		},
+		// Wrapped like Key is, and for the same reason: Init builds this
+		// workspace on the first frame, so every paste enters through the editor
+		// block at the top of Update and never reaches the chat's own PasteMsg
+		// case or the textinput behind it. A copy that answered only the
+		// picture question dropped the text on the floor — the clipboard read
+		// below returned ErrNoImage, the message was nil, and a paste of three
+		// lines into the prompt did nothing at all, silently. Handing the text
+		// back to Update is what keeps one code path for pasted text instead of
+		// three that answer different questions.
+		Paste: func(text string) tea.Cmd {
+			m.hostCall = true
+			defer func() { m.hostCall = false }()
+			_, cmd := m.Update(tea.PasteMsg{Content: text})
+			return cmd
+		},
+		View:         m.chatFrame,
+		ChangedFiles: func() []string { return tools.ChangedFiles() },
+	}
+	m.ed = &ed
+	return ed.Init()
+}
+
+// chatClick starts a transcript selection drag with the button that went down.
+// Right and middle are left to the terminal so a user who wants the terminal's
+// own paste menu keeps it.
+func (m *uiModel) chatClick(msg tea.MouseClickMsg) tea.Cmd {
+	if !m.mouseEnabled {
+		return nil
+	}
+	if tea.Mouse(msg).Button == tea.MouseLeft {
+		m.selAnchorX, m.selAnchorY = msg.X, msg.Y
+		m.selFocusX, m.selFocusY = msg.X, msg.Y
+		m.selDown, m.selMoved = true, false
+	}
+	return nil
+}
+
+func (m *uiModel) chatMotion(msg tea.MouseMotionMsg) tea.Cmd {
+	if !m.mouseEnabled || !m.selDown {
+		return nil
+	}
+	m.selFocusX, m.selFocusY = msg.X, msg.Y
+	if msg.X != m.selAnchorX || msg.Y != m.selAnchorY {
+		m.selMoved = true
+	}
+	return nil
+}
+
+func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
+	if !m.mouseEnabled || !m.selDown {
+		return nil
+	}
+	m.selDown = false
+	if !m.selMoved {
+		// A click, not a drag: nothing is copied, and a click on a change row
+		// opens the file at the line that row stands for. Anything else — a
+		// reply, the input, the sidebar — is still nothing, which is the rule
+		// that keeps a click from becoming a copy of one character.
+		m.selMoved = false
+		if m.chatOverlayUp() {
+			// A box owns those pixels. The frame on screen is the box, so the
+			// arithmetic that maps a row to a transcript row is answering about a
+			// screen that is not there — and the row under the pointer is the
+			// command list, not the diff behind it.
+			return nil
+		}
+		m.syncVP()
+		// The sidebar's own rows come first in the column test, because a click to
+		// the right of the chat panel is a click on the panel and not a click that
+		// missed: the changed-file list is there, and the transcript's index would
+		// refuse the column as out of range and silently drop it.
+		if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
+			m.jumpFrom = -1
+			return m.jumpToRef(ref)
+		}
+		i, ref, ok := m.refAtPointer(msg.X, msg.Y)
+		if !ok {
+			return nil
+		}
+		// The walk continues from here, so pressing the key after a click steps
+		// on to the next change rather than back to the one already open.
+		m.jumpFrom = i + 1
+		return m.jumpToRef(ref)
+	}
+	m.selFocusX, m.selFocusY = msg.X, msg.Y
+	text := m.selectedText()
+	m.selMoved = false
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	if err := writeClipboardText(text); err != nil {
+		m.statusText = i18n.T("clipboard error: ") + err.Error()
+		return nil
+	}
+	// The character count, because a selection can be a single word or three
+	// screens of build output and "copied" alone does not say which happened.
+	m.statusText = fmt.Sprintf(i18n.T("selection copied (%d characters)"), len([]rune(text)))
+	return nil
+}
+
+// overlayWheel moves the cursor of whichever list overlay is open, and reports
+// whether it took the wheel.
+//
+// The cursor moves rather than the window because a picker is a choice: a list
+// scrolled without moving the highlight leaves the row under enter somewhere off
+// screen, which is a scrollbar behaviour borrowed from a view the user is only
+// reading. Two entries per notch is a screenful on a short terminal and a couple
+// of rows on a tall one, which is what a wheel means in either.
+func (m *uiModel) overlayWheel(msg tea.MouseWheelMsg) bool {
+	if !m.mouseEnabled {
+		return false
+	}
+	step := 0
+	switch msg.Button {
+	case tea.MouseWheelDown:
+		step = 2
+	case tea.MouseWheelUp:
+		step = -2
+	default:
+		// A sideways wheel is meaningless over a list. Swallowing it keeps the
+		// transcript behind the box still, rather than panning a pane the user
+		// cannot see.
+		return m.modalUp()
+	}
+	var sel *int
+	n := 0
+	switch {
+	case m.picker.open:
+		sel, n = &m.picker.list.sel, len(m.filteredModels())
+	case m.palette.open:
+		sel, n = &m.palette.list.sel, len(m.filteredCommands())
+	case m.sessionsList.open:
+		sel, n = &m.sessionsList.list.sel, len(m.sessionsList.filtered)
+	case m.dirPick.open:
+		sel, n = &m.dirPick.list.sel, len(m.dirPick.entries)
+	case m.setup.open && m.setup.gguf.open:
+		sel, n = &m.setup.gguf.list.sel, len(m.setup.gguf.entries)
+	case m.setup.open && m.setup.stage == setupPick:
+		sel, n = &m.setup.list.sel, len(config.SetupOptions())
+	case m.lang.open:
+		sel, n = &m.lang.selected, len(i18n.Langs)
+	default:
+		return false
+	}
+	*sel = min(max(*sel+step, 0), max(n-1, 0))
+	return true
+}
+
+// chatWheel scrolls the transcript. The wheel is routed through the viewport's
+// own handler, which already knows the shift-modifier horizontal case; what it
+// cannot know is that scrolling up must release the follow-the-tail stick.
+func (m *uiModel) chatWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if !m.mouseEnabled {
+		return nil
+	}
+	switch msg.Button {
+	case tea.MouseWheelDown:
+		m.scrollBy(m.vp.MouseWheelDelta)
+	case tea.MouseWheelUp:
+		m.scrollBy(-m.vp.MouseWheelDelta)
+	default:
+		m.vp, _ = m.vp.Update(msg)
+		m.syncVP()
+	}
+	return nil
+}
+
+// chatFrame renders the chat inside the workspace main area. While the editor
+// exists, the model's width and height are the main area's size — the frame
+// callback is the only place they are set, straight from the editor geometry.
+func (m *uiModel) chatFrame(w, h int) []string {
+	if m.width != w || m.height != h {
+		m.width, m.height = w, h
+		m.layout()
+	}
+	rows := strings.Split(m.buildFrame(), "\n")
+	for len(rows) < h {
+		rows = append(rows, "")
+	}
+	if len(rows) > h {
+		rows = rows[:h]
+	}
+	return rows
 }
 
 func (m *uiModel) commands() []command {
@@ -596,13 +1200,28 @@ func (m *uiModel) commands() []command {
 			m.followVP()
 			return nil
 		}},
+		{name: "editor", desc: i18n.T("open the code editor: tree, git, terminal (ctrl+e)"), run: func(m *uiModel) tea.Cmd {
+			return m.openEditor()
+		}},
+		{name: "changes", desc: fmt.Sprintf("%s (%s)", i18n.T("open the next change in the editor"), jumpKey.Help().Key), run: func(m *uiModel) tea.Cmd {
+			return m.jumpToNextChange()
+		}},
+		{name: "stats", desc: i18n.T("how long the last turn took and how full the context is"), run: func(m *uiModel) tea.Cmd {
+			// Printed into the transcript rather than the status bar, for the
+			// reason the per-turn timing line is: these are numbers about a turn
+			// that has ended, and a bar can only hold the newest of them.
+			m.history = append(m.history, line{kindSys, m.statsLine()})
+			m.historyDirty = true
+			m.followVP()
+			return nil
+		}},
 		{name: "mode", desc: i18n.T("switch plan/act mode (tab)"), run: func(m *uiModel) tea.Cmd {
 			return m.toggleMode()
 		}},
-		{name: "cd", desc: i18n.T("change the working folder"), run: func(m *uiModel) tea.Cmd {
-			return m.changeDir("")
+		{name: "cd", desc: i18n.T("change the working folder (/cd opens a folder browser)"), run: func(m *uiModel) tea.Cmd {
+			return m.openDirPick()
 		}},
-		{name: "image", desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
+		{name: "image", takesArg: true, desc: i18n.T("attach a picture to the next message (/image <path>)"), run: func(m *uiModel) tea.Cmd {
 			return m.attachImageCmd("")
 		}},
 		{name: "unimage", desc: i18n.T("drop the last attached picture"), run: func(m *uiModel) tea.Cmd {
@@ -620,10 +1239,12 @@ func (m *uiModel) commands() []command {
 		{name: "sessions", desc: i18n.T("switch between saved sessions"), run: func(m *uiModel) tea.Cmd {
 			return m.openSessions()
 		}},
-		{name: "resume", desc: i18n.T("open a session by id (/resume <id>)"), run: func(m *uiModel) tea.Cmd {
+		{name: "resume", takesArg: true, desc: i18n.T("open a session by id (/resume <id>)"), run: func(m *uiModel) tea.Cmd {
 			// The palette runs a command with no argument, and this one is
 			// meaningless without an id — so it says how to use itself rather
-			// than opening a prompt the palette would immediately lose.
+			// than opening a prompt the palette would immediately lose. The
+			// command list does not reach here for the same command: takesArg
+			// completes the row into the prompt instead of running it.
 			m.statusText = i18n.T("usage: /resume <id> — /sessions lists the ids")
 			return nil
 		}},
@@ -647,6 +1268,9 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
 				line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
+				// The key is asked of the binding rather than written into the text,
+				// so the line cannot advertise a key the handler no longer answers.
+				line{kindSys, fmt.Sprintf(i18n.T("click a change in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
@@ -664,10 +1288,14 @@ func (m *uiModel) commands() []command {
 			m.historyDirty = true
 			return nil
 		}},
+		{name: "debug", desc: i18n.T("diagnostics for the transcript renderer"), run: func(m *uiModel) tea.Cmd {
+			m.showDebug()
+			return nil
+		}},
 		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
 			return m.openProxy()
 		}},
-		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return tea.Quit }},
+		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return m.quitCmd() }},
 	}
 }
 
@@ -691,8 +1319,8 @@ var styleVersion = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 // solid-block style. Only ▀▄█ are used: the one-cell width of these three is
 // the one thing every terminal agrees on, and a logo whose width depends on
 // the terminal is not a logo.
-const miniLogo = `█▀█ ▄▄ ▄▄ ▄▄▄ ▄▄▄   █ ▄▄▄
-█ ▐ █ █ █ █   █ █ █▀█ █▄
+const miniLogo = `█▀█ ▄▄ ▄▄ ▄▄▄ ▄▄▄ ▄▄█ ▄▄▄
+█ ▐ █ █ █ █   █ █ █ █ █▄
 █▄█ █ █ █ █▄▄ █▄█ █▄█ █▄▄`
 
 func newSessionID() string {
@@ -740,10 +1368,26 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		workDir:       wd,
 		workDirShort:  filepath.Base(wd),
 		historyDirty:  true,
+		// -1 rather than the zero value: the jump key's walk has not started
+		// yet, and 0 would mean "after the first transcript row", skipping the
+		// very first change on a fresh session.
+		jumpFrom: -1,
 		// Act by default, and the mode shift+tab returns to when yolo is left.
 		// Starting in yolo would be a session the user never asked for.
 		beforeYolo: modeAct,
 	}
+	// The repository facts for the first frame, read here rather than by the
+	// refresh command: the program does not exist yet, so a message could not be
+	// delivered, and a panel that opens with no GIT section and gains one a
+	// frame later looks like a flicker rather than a measurement. Init asks again
+	// for the same reason the turn does — the counts are about now, not about
+	// start-up.
+	_, m.gitState = readGitState(wd)
+	// Resolved once here rather than at each use: the window is a property of
+	// the model, so every reader wants the same answer, and a lookup repeated
+	// at the sidebar and again in the compaction threshold is two chances for
+	// them to disagree.
+	m.applyWindow(p)
 	if len(yolo) > 0 {
 		m.yoloTools = yolo[0]
 	}
@@ -761,12 +1405,111 @@ func (m *uiModel) printWelcome() {
 		line{kindSys, ""},
 		line{kindLogo, logo},
 		line{kindSys, ""},
-		line{kindSys, i18n.T("ctrl+p commands · ctrl+b panel · ctrl+y copy · up/down history · esc stop")},
+		line{kindSys, i18n.T("ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · ctrl+q quit · up/down history · esc stop")},
 		line{kindSys, ""})
 }
 
 func (m *uiModel) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd())
+	// The workspace exists from the first frame — the terminal, the tree and
+	// the git panel are one key (or one status-bar icon) away — but every
+	// panel starts closed: the first screen is the chat, not furniture.
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd(), m.gitStatusCmd())
+}
+
+// ggufLoadCmd waits for the background model load and reports the outcome.
+//
+// It is a command and not something done during construction because the load
+// can take minutes and the interface has to be on screen throughout. The wait
+// happens on Bubble Tea's goroutine, so the user is typing into a live session
+// while the weights are read — which is the whole point: before this, the two
+// lines on stderr were the entire feedback available for those minutes.
+func (m *uiModel) ggufLoadCmd() tea.Cmd {
+	l := m.ggufLoad
+	if l == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		err := l.Wait()
+		// The provider is read after the wait, not before: a struct literal
+		// evaluates its fields in order, and asking first would ask a server
+		// that cannot answer yet and keep the file's stem for ever.
+		return ggufReadyMsg{prov: l.Provider(), err: err}
+	}
+}
+
+// beginGGUFLoad puts the session into its loading state and says so.
+//
+// The transcript lines are the caller's because there are two callers and they
+// have different things to say: at start-up the model was chosen before the
+// interface existed, and in /setup the user is watching the switch they just
+// made. What they share is the state, and the state is set here so it cannot be
+// set without the clock starting — a note counting from zero is a note that
+// looks stuck.
+func (m *uiModel) beginGGUFLoad(l ggufLoad, lines []line) {
+	m.ggufLoad = l
+	m.ggufLoadStart = time.Now()
+	m.history = append(m.history, lines...)
+	m.historyDirty = true
+	m.followVP()
+}
+
+// ggufLoadNote is the live text shown while a local model is loading.
+//
+// It carries the three things a wait needs: that it is happening, how long it has
+// been going, and what the server is actually doing. The last one is llama-server's
+// own last line of output — a model load is silent from the outside for minutes
+// otherwise, and "silent for four minutes" and "hung" look identical until you
+// can see it counting layers.
+func (m *uiModel) ggufLoadNote() string {
+	if m.ggufLoad == nil {
+		return ""
+	}
+	note := i18n.T("loading the local model — the interface is ready, messages will not send until it is")
+	if !m.ggufLoadStart.IsZero() {
+		note += "  " + formatWait(time.Since(m.ggufLoadStart))
+	}
+	if tail := m.ggufLoad.Tail(); tail != "" {
+		note += " · " + truncate(tail, 64)
+	}
+	return note
+}
+
+// cancelGGUFLoad gives up on a background load and takes the server down with it.
+//
+// Without it a 180-second wait is a wait nobody can escape: the load was moved off
+// the startup path precisely so the session is usable while it runs, and a wait
+// that can only be suffered is a wait that has to be shown. Esc is the right key
+// because there is no turn to stop while a model loads, so nothing else claims it.
+func (m *uiModel) cancelGGUFLoad() tea.Cmd {
+	if m.ggufLoad == nil {
+		return nil
+	}
+	m.ggufLoad = nil
+	stopGGUF()
+	m.statusText = i18n.T("model load cancelled")
+	m.history = append(m.history, line{kindSys, i18n.T("stopped loading the local model — llama-server was shut down")})
+	m.historyDirty = true
+	m.followVP()
+	return nil
+}
+
+// replaceProvider puts p at the head of the pool, replacing the entry it
+// supersedes.
+//
+// It replaces by URL rather than by position because that is what actually
+// identifies an endpoint: a switch keeps the URL and changes the model, a
+// failover keeps the URL and changes neither. A GGUF load is a third case, where
+// both change, so the old entry has to go or the pool would offer a dead port as
+// a reserve — and a failover to a port nothing is listening on is a failure that
+// looks like a network problem.
+func replaceProvider(pool []config.Provider, p config.Provider) []config.Provider {
+	out := []config.Provider{p}
+	for _, q := range pool {
+		if q.BaseURL != p.BaseURL {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // upgradeColorProfile asks the terminal what it actually supports.
@@ -816,7 +1559,7 @@ func (m *uiModel) handleToolCheck(msg toolCheckMsg) {
 	}
 	m.statusText = i18n.T("provider without tools")
 	m.history = append(m.history, line{kindErr, fmt.Sprintf(
-		i18n.T("⚠ %s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another."),
+		i18n.T("%s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another."),
 		msg.Label, msg.Model)})
 	m.historyDirty = true
 }
@@ -843,6 +1586,12 @@ func (m *uiModel) toolCheckCmd() tea.Cmd {
 // that just failed.
 func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	m.prov = msg.to
+	// The new endpoint is a different model as often as not, so its window is
+	// re-read: a backup picked for being available is frequently a smaller
+	// model, and the meter continuing to describe the one that just failed
+	// would make a nearly-full context look like a nearly-empty one.
+	m.applyWindow(msg.to)
+	m.timing.Prompt = 0
 	rest := make([]config.Provider, 0, len(m.pool))
 	rest = append(rest, msg.to)
 	for _, p := range m.pool {
@@ -858,7 +1607,7 @@ func (m *uiModel) handleFailover(msg failoverMsg) tea.Cmd {
 	m.pool = rest
 	m.statusText = i18n.T("failover: ") + msg.to.Label
 	m.history = append(m.history, line{kindSys, fmt.Sprintf(
-		i18n.T("⚡ %s is unavailable (%s) — %s (%s) answered"),
+		i18n.T("%s is unavailable (%s) — %s (%s) answered"),
 		msg.from.Label, msg.reason, msg.to.Label, msg.to.Model)})
 	m.historyDirty = true
 	// The reserve has not been checked for tool calling, and a host that
@@ -881,17 +1630,67 @@ func (m *uiModel) copyLastResponse() {
 		m.statusText = i18n.T("nothing to copy")
 		return
 	}
-	if err := clipboard.WriteAll(text); err != nil {
+	if err := writeClipboardText(text); err != nil {
 		m.history = append(m.history, line{kindErr, i18n.T("clipboard error: ") + err.Error()})
 	} else {
 		m.statusText = i18n.T("reply copied to the clipboard!")
-		m.history = append(m.history, line{kindSys, i18n.T("📋 the last reply was copied to the clipboard")})
+		m.history = append(m.history, line{kindSys, i18n.T("the last reply was copied to the clipboard")})
 	}
 	m.historyDirty = true
 	m.followVP()
 }
 
 func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// The workspace editor owns keys, mouse and geometry for as long as it
+	// runs; in chat mode (ed.Chat) it passes the main-area keys and clicks
+	// back through the Host callbacks below. The rest of the traffic — agent
+	// events, ticks, transport messages — keeps flowing through the chat
+	// below, so a running turn is not stalled while the user is reading code.
+	if m.ed != nil && !m.hostCall {
+		switch msg := msg.(type) {
+		case editor.CloseEditorMsg:
+			// ctrl+q in the editor: back to the chat, and the panels fold —
+			// closed is the chat mode's default.
+			m.ed.Chat = true
+			m.ed.DropPanelFocus()
+			m.ed.ClosePanels()
+			// The tree can have moved under the editor's own feet, and this is the
+			// one place a session learns that without a turn having run. The
+			// section is refreshed on the way out rather than on the way in so the
+			// panel the user comes back to is already right.
+			return m, m.gitStatusCmd()
+		case editor.ToggleEditorMsg:
+			// The status-bar icon at the head of the strip. The mode is the
+			// host's to flip — the editor only asks — and it reads the current
+			// one off Chat, so the same message serves both directions.
+			if m.ed.Chat {
+				init := m.ensureEditor()
+				m.enterEditor()
+				return m, init
+			}
+			m.ed.Chat = true
+			m.ed.DropPanelFocus()
+			m.ed.ClosePanels()
+			return m, nil
+		case tea.WindowSizeMsg:
+			// The editor owns the geometry in embedded mode; the chat is
+			// re-laid-out by its frame callback at the main area's size.
+			m.winW, m.winH = msg.Width, msg.Height
+			return m.editorUpdate(msg)
+		case tea.KeyPressMsg, tea.PasteMsg, tea.MouseClickMsg, tea.MouseMotionMsg, tea.MouseReleaseMsg, tea.MouseWheelMsg:
+			return m.editorUpdate(msg)
+		}
+		// The editor's lifecycle traffic — terminal output, file watches, LSP
+		// diagnostics, git transfers — must reach it in chat mode too, or the
+		// listener chains die and the panels freeze. The chat's own switch
+		// below ignores what it does not know.
+		if editor.OwnsMsg(msg) {
+			_, edCmd := m.editorUpdate(msg)
+			if edCmd != nil {
+				return m, edCmd
+			}
+		}
+	}
 	// extra carries a follow-up command a case wants to run after the switch,
 	// batched with the textinput's own command at the tail.
 	var extra tea.Cmd
@@ -902,11 +1701,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// as a field of wrong-coloured blocks, and the ramp is the fallback that
 		// still carries the picture.
 		m.profile = msg.Profile
+		// The editor draws pictures too — a picture opened in a tab is rendered
+		// with the same renderer as the transcript's preview — and it has no other
+		// way to learn the profile: it never sees the terminal. Handing it over
+		// here is the whole of the wiring, and it has to happen before the first
+		// picture is drawn or the tab opens in the wrong palette.
+		if m.ed != nil {
+			nm, _ := m.ed.Update(msg)
+			if em, ok := nm.(editor.Model); ok {
+				m.ed = &em
+			}
+		}
 		// The renderer has already adopted the reported profile; all that is left
 		// is to ask for the finer capabilities when this one is not enough.
 		return m, upgradeColorProfile(msg.Profile)
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		m.winW, m.winH = msg.Width, msg.Height
 		// No followVP here on purpose: the tail of Update re-syncs the viewport
 		// for every message, which is what re-wraps the transcript at the new
 		// width. Calling it twice would render the whole history twice.
@@ -934,71 +1745,20 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			extra = cmd
 		}
 	case tea.MouseClickMsg:
-		if !m.mouseEnabled {
-			break
-		}
-		// Only the left button drags a selection. Right and middle are left to the
-		// terminal so a user who wants the terminal's own paste menu keeps it.
-		if tea.Mouse(msg).Button == tea.MouseLeft {
-			m.selAnchorX, m.selAnchorY = msg.X, msg.Y
-			m.selFocusX, m.selFocusY = msg.X, msg.Y
-			m.selDown, m.selMoved = true, false
-		}
-		return m, nil
+		return m, m.chatClick(msg)
 	case tea.MouseMotionMsg:
-		if !m.mouseEnabled || !m.selDown {
-			break
-		}
-		m.selFocusX, m.selFocusY = msg.X, msg.Y
-		if msg.X != m.selAnchorX || msg.Y != m.selAnchorY {
-			m.selMoved = true
-		}
-		return m, nil
+		return m, m.chatMotion(msg)
 	case tea.MouseReleaseMsg:
-		if !m.mouseEnabled || !m.selDown {
-			break
-		}
-		m.selDown = false
-		if !m.selMoved {
-			// A click, not a drag: clear the highlight and leave the clipboard be.
-			m.selMoved = false
-			return m, nil
-		}
-		m.selFocusX, m.selFocusY = msg.X, msg.Y
-		text := m.selectedText()
-		m.selMoved = false
-		if strings.TrimSpace(text) == "" {
-			return m, nil
-		}
-		if err := clipboard.WriteAll(text); err != nil {
-			m.statusText = i18n.T("clipboard error: ") + err.Error()
-			return m, nil
-		}
-		// The character count, because a selection can be a single word or three
-		// screens of build output and "copied" alone does not say which happened.
-		m.statusText = fmt.Sprintf(i18n.T("selection copied (%d characters)"), len([]rune(text)))
-		return m, nil
+		return m, m.chatRelease(msg)
 	case tea.MouseWheelMsg:
-		// The wheel is routed through the viewport's own handler, which already
-		// knows the shift-modifier horizontal case. What it cannot know is that
-		// scrolling up must release the follow-the-tail stick: without this the
-		// tail of Update would call followVP and snap straight back to the
-		// bottom on the very next frame, making the wheel look dead.
-		if !m.mouseEnabled {
-			break
+		// A box owns the frame, so the wheel belongs to the box. Handed to the
+		// transcript instead, it scrolled a conversation that is not on screen
+		// while the list the user was pointing at stood still — the same
+		// reason the click hit test stops at an overlay.
+		if m.overlayWheel(msg) {
+			return m, nil
 		}
-		switch msg.Button {
-		case tea.MouseWheelDown:
-			m.scrollBy(m.vp.MouseWheelDelta)
-		case tea.MouseWheelUp:
-			m.scrollBy(-m.vp.MouseWheelDelta)
-		default:
-			// Left/right wheel and the horizontal modifiers stay with the
-			// viewport, which scrolls sideways without touching the stick.
-			m.vp, _ = m.vp.Update(msg)
-			m.syncVP()
-		}
-		return m, nil
+		return m, m.chatWheel(msg)
 	case tea.KeyPressMsg:
 		if m.setup.open {
 			model, cmd := m.setupKey(msg)
@@ -1024,9 +1784,26 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.sessionsKey(msg)
 			return model, cmd
 		}
+		if m.dirPick.open {
+			model, cmd := m.dirPickKey(msg)
+			return model, cmd
+		}
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
 			return model, cmd
+		}
+		if m.help.open {
+			model, cmd := m.helpKey(msg)
+			return model, cmd
+		}
+		// Before the switch, and matched through the binding rather than a
+		// literal: /help prints the binding's own help text, and a key written
+		// out in two places is a key that will be wrong in one of them. alt+g is
+		// where the mnemonic would put ctrl+g, which is unusable — the editor
+		// answers it with the git panel before the chat sees it, so ctrl+g would
+		// work in a bare chat and do nothing once the editor existed.
+		if jumpPressed(msg) {
+			return m, m.jumpToNextChange()
 		}
 		switch msg.String() {
 		case "ctrl+v":
@@ -1038,7 +1815,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// a clipboard holding a screenshot has no text to give, and one holding
 			// a command line has no picture, so the two never really compete.
 			if m.pasteTarget() != nil {
-				text, err := clipboard.ReadAll()
+				text, err := readClipboardText()
 				if err != nil {
 					m.statusText = i18n.T("clipboard error: ") + err.Error()
 					return m, nil
@@ -1062,10 +1839,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.busy = false
 				m.statusText = i18n.T("turn stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Esc)")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped by the user (Esc)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
+			}
+			// No turn means nothing to stop, so a model still loading takes the
+			// key. It is the only other thing escape can mean here, and a wait that
+			// cannot be left would make the background load worse than the
+			// blocking one it replaced.
+			if m.ggufLoad != nil {
+				return m, m.cancelGGUFLoad()
 			}
 		case "ctrl+c":
 			if m.busy {
@@ -1075,12 +1859,18 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.busy = false
 				m.statusText = i18n.T("turn stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped by the user (Ctrl+C)")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped by the user (Ctrl+C)")})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
 			}
-			return m, tea.Quit
+			return m, m.quitCmd()
+		case "ctrl+q":
+			// The chat's quit. ctrl+c is taken by stopping a turn, so the
+			// program's exit gets its own key — the one /help lists. Inside the
+			// editor ctrl+q still means "back to the chat": the editor answers it
+			// with CloseEditorMsg before the chat ever sees the key.
+			return m, m.quitCmd()
 		case "ctrl+p":
 			m.palette = paletteState{open: true}
 			return m, nil
@@ -1089,6 +1879,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.followVP()
 			return m, nil
+		case "ctrl+e":
+			return m, m.openEditor()
 		case "ctrl+y":
 			m.copyLastResponse()
 			return m, nil
@@ -1109,6 +1901,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.newSession("")
+			return m, nil
+		case "f1":
+			// F1 is help in the chat, exactly as it is inside the editor — the
+			// editor owns the key while it is open, so the two never compete.
+			if m.help.open {
+				m.help.open = false
+				m.help.top = 0
+			} else {
+				m.openHelp()
+			}
 			return m, nil
 		case "pgup":
 			m.scrollBy(-10)
@@ -1174,9 +1976,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// highlighted. Without this the arrows would only move a cursor and
 			// the user would still have to type the command exactly.
 			if m.suggestSel < len(m.suggest) && len(m.suggest) > 0 {
-				text := strings.TrimSpace(m.suggest[m.suggestSel].text)
-				m.input.SetValue(text)
+				row := m.suggest[m.suggestSel]
+				text := strings.TrimSpace(row.text)
 				m.suggest = nil
+				if row.takesArg {
+					// A command that needs an argument is completed, not run.
+					// Running "/image" with no path prints a usage line and
+					// empties the prompt, so the path the user types next is sent
+					// to the model as a question about a filename — which is
+					// exactly what "the command is broken" looks like, and it is
+					// what the list invites you to do when it offers a row for
+					// what you typed.
+					m.input.SetValue(text + " ")
+					m.input.CursorEnd()
+					m.updateSuggest()
+					return m, nil
+				}
+				m.input.SetValue(text)
 				m.updateSuggest()
 				// A /model row carries its argument already; anything else goes
 				// through the command switch below as typed.
@@ -1202,15 +2018,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			switch text {
 			case "/quit", "/exit":
-				return m, tea.Quit
+				return m, m.quitCmd()
 			case "/help":
 				m.history = append(m.history,
-					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
+					line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit")},
 					line{kindSys, i18n.T("esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll")},
 					line{kindSys, i18n.T("tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel")},
+					line{kindSys, i18n.T("ctrl+e — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -1324,6 +2141,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.busy {
 					return m, nil
 				}
+				// Bare /cd opens the folder browser; /cd <path> keeps the typed
+				// fast path, like /proxy's split between dialog and syntax.
+				if strings.TrimSpace(arg) == "" {
+					return m, m.openDirPick()
+				}
 				return m, m.changeDir(strings.TrimSpace(arg))
 			}
 			if arg, ok := strings.CutPrefix(text, "/image"); ok {
@@ -1332,29 +2154,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// exactly the user who wants to try a different picture next.
 				return m, m.attachImageCmd(arg)
 			}
-			if strings.HasPrefix(text, "/debug") {
-				// Diagnostics for the transcript pipeline: which line kind the
-				// reply is stored under, and whether the markdown renderer saw
-				// it. A reply that renders as raw markup is stored under some
-				// kind other than kindAgent, so every non-empty line is listed
-				// rather than guessed at.
-				m.history = append(m.history, line{kindSys, fmt.Sprintf(
-					"width=%d renderCalls=%d lines=%d",
-					m.contentWidth(), renderCalls, len(m.history))})
-				shown := 0
-				for i := len(m.history) - 1; i >= 0 && shown < 6; i-- {
-					l := m.history[i]
-					if strings.TrimSpace(l.text) == "" {
-						continue
-					}
-					row := m.rowStyle(l.kind)
-					m.history = append(m.history, line{kindSys, fmt.Sprintf(
-						"  [%d] %-7s md=%-5v %q",
-						i, kindName(l.kind), row.markdown, truncate(oneLine(l.text), 46))})
-					shown++
+			if arg, ok := strings.CutPrefix(text, "/debug"); ok {
+				// Cut by prefix rather than by HasPrefix, so "/debugger" is a prompt
+				// like any other: a command that answers to a longer word is a command
+				// nobody can see the end of.
+				if strings.TrimSpace(arg) != "" || m.busy {
+					return m, nil
 				}
-				m.historyDirty = true
-				m.followVP()
+				m.showDebug()
 				return m, nil
 			}
 			if id, ok := strings.CutPrefix(text, "/model "); ok {
@@ -1363,6 +2170,48 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				return m, m.switchModelCmd(id)
+			}
+			// "/models <query>" opens the list already filtered, the same split
+			// /proxy and /cd make between their dialog and their one-line form.
+			// Bare "/models" keeps running the whole list above it.
+			//
+			// The one word that is not a filter is "free": it is the question a
+			// user with three hundred models on screen actually has, and typing it
+			// as a filter would only match the gateways whose ids say so. Asking the
+			// endpoint instead is the answer that holds for all of them.
+			if arg, ok := strings.CutPrefix(text, "/models "); ok {
+				if m.busy {
+					return m, nil
+				}
+				arg = strings.TrimSpace(arg)
+				m.picker = modelPicker{open: true}
+				if strings.EqualFold(arg, "free") {
+					m.picker.onlyFree = true
+				} else {
+					m.picker.query = arg
+				}
+				return m, m.fetchModelsCmd()
+			}
+			// A model still loading cannot answer, and sending anyway produces a
+			// connection error the user cannot act on: the endpoint is not broken,
+			// it is not up yet, and "connection refused" says nothing about which of
+			// those it is.
+			//
+			// The prompt goes back into the input rather than being held or dropped.
+			// Holding it would need a queue the pictures have to be threaded
+			// through; dropping it loses a sentence the user already typed. The cost
+			// is one more enter, and the text is in the one place they can see it.
+			//
+			// It sits after the command dispatch, because /help and /quit are not
+			// messages to the model and a session waiting on a load should still
+			// answer them.
+			if m.ggufLoad != nil {
+				m.input.SetValue(text)
+				m.statusText = i18n.T("the model is still loading")
+				m.history = append(m.history, line{kindSys, i18n.T("kept your prompt — the model is still loading, press enter again when it is ready")})
+				m.historyDirty = true
+				m.followVP()
+				return m, nil
 			}
 			// A picture dropped into the prompt as a path is taken out of the text
 			// and attached, so what the model reads is the question without a
@@ -1428,6 +2277,23 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// The spinner already ticks for as long as the program lives, so it is
+		// the one clock a turn can borrow to redraw its own timer without
+		// scheduling a second ticker that would have to be cancelled when the
+		// turn ends.
+		//
+		// Only when the displayed second has actually changed: the tick is ten
+		// times a second, and re-rendering the transcript ten times a second to
+		// show the same "3s" is work the user would pay for in a stalled
+		// interface on a long session.
+		if m.busy && !m.turnStart.IsZero() {
+			secs := int(time.Since(m.turnStart).Seconds())
+			if secs != m.shownSecond {
+				m.shownSecond = secs
+				m.syncVP()
+				m.followVP()
+			}
+		}
 		return m, cmd
 	case deltaMsg:
 		m.applyAgentText(msg)
@@ -1435,14 +2301,17 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastTool = msg.name
 		m.toolCallCount++
 		m.statusText = i18n.T("calling: ") + msg.name
-		m.history = append(m.history, line{kindTool, msg.name + "(" + msg.args + ")"})
+		m.history = append(m.history, line{kindTool, toolLine(msg.name, msg.args)})
 		m.historyDirty = true
 	case toolResMsg:
 		m.statusText = i18n.T("returned: ") + msg.name
-		// Stored raw: renderHistory owns the "⎿" gutter and the wrapping, so
+		// Stored raw: renderHistory owns the "⎟" gutter and the wrapping, so
 		// pre-wrapping here would both double the prefix and measure against a
 		// width that ignores it.
 		m.history = append(m.history, line{kindToolRes, msg.output})
+		if msg.diff != "" {
+			m.history = append(m.history, line{kindDiff, msg.diff})
+		}
 		m.historyDirty = true
 	case modelsListMsg:
 		if msg.err != nil {
@@ -1450,7 +2319,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyDirty = true
 			m.followVP()
 		} else {
-			m.picker = modelPicker{open: true, Models: msg.Models}
+			// The models land in the picker that asked for them rather than in a
+			// fresh one: "/models llama" has already set the filter, and replacing
+			// the state here would answer a different question than the one the
+			// user typed and hand back the whole catalogue.
+			m.picker.Models = msg.Models
+			m.picker.open = true
+			m.picker.list = listView{}
 		}
 	case setupCheckMsg:
 		cmd := m.handleSetupCheck(msg)
@@ -1462,13 +2337,34 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.history = append(m.history, line{kindErr, "Model: " + msg.err.Error()})
 		} else {
-			m.prov.Model = msg.name
+			if msg.prov.Model != "" {
+				m.prov = msg.prov
+			} else {
+				// A message built without its provider (a test, or an older
+				// caller) must not wipe the one that is serving.
+				m.prov.Model = msg.name
+			}
 			m.runner = msg.runner
+			// The window travels with the model that was actually built, so the
+			// sidebar's meter cannot describe the previous model's size while
+			// the runner is compacting for the new one.
+			m.applyWindow(m.prov)
+			// The prompt count belonged to the old model's window too, and a
+			// percentage is only meaningful against the window it was measured
+			// in — so the meter starts empty rather than reading a number that
+			// no longer describes anything.
+			m.timing.Prompt = 0
 			if len(msg.pool) > 0 {
 				m.pool = msg.pool
 			}
 			// Preserve m.sessionID so conversation context is retained!
 			m.history = append(m.history, line{kindSys, i18n.T("model activated: ") + msg.name + i18n.T(" (context kept)")})
+			// A model chosen in a session that the next start does not remember is
+			// a choice the user has to make again every morning, which is what
+			// "switch the model" is supposed to stop being. Written only once the
+			// runner exists, so a switch that failed to build cannot leave .env
+			// naming a model nothing is serving.
+			m.persistModelChoice(msg.name)
 			// A different model may or may not support tools, so check again.
 			extra = m.toolCheckCmd()
 		}
@@ -1493,19 +2389,57 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			i18n.T("in"), formatWait(msg.ev.Wait),
 		)})
 		m.historyDirty = true
+	case gitStatusMsg:
+		// A refresh that found no repository clears the section rather than
+		// leaving the previous folder's branch on screen: after a /cd out of a
+		// repository, the branch of the one left behind is a lie about where the
+		// agent is working. Zero state is what a missing repository reads as, so
+		// the same assignment covers both.
+		m.gitState = msg.state
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
+		// The timer is cleared before anything is printed from it, so the live
+		// counter stops where the turn stopped instead of continuing to run
+		// against the wall clock and reporting a turn that is already over.
+		m.turnStart = time.Time{}
+		// A stopped turn's numbers are kept, not thrown away: a user who
+		// cancelled at 90% wants to know how big the turn had grown, which is
+		// exactly when compaction matters most.
+		if msg.timing.Elapsed > 0 {
+			m.timing = msg.timing
+			m.total.record(msg.timing)
+		}
 		if msg.err != nil {
 			if msg.err == context.Canceled {
 				m.statusText = i18n.T("stopped")
-				m.history = append(m.history, line{kindSys, i18n.T("⏹ turn stopped")})
+				m.history = append(m.history, line{kindSys, i18n.T("turn stopped")})
 			} else {
 				m.statusText = i18n.T("error")
 				m.history = append(m.history, line{kindErr, "error: " + msg.err.Error()})
 			}
 		} else {
 			m.statusText = i18n.T("ready")
+			// The report goes under the answer, not into the status bar: it is
+			// a fact about this turn, and a bar would replace it with the next
+			// turn's. It is skipped for a turn that reported nothing at all, so
+			// an endpoint that sends no usage does not get a row reading zero.
+			if msg.timing.Elapsed > 0 {
+				m.history = append(m.history, line{kindSys, timingLine(msg.timing, m.window)})
+			}
+			// A cut answer says so, and says what to do about it. The claim that
+			// "continue" works is not a guess: the half answer was streamed and
+			// stored as a model event, so it is in the conversation the next turn
+			// is built from, and the model picks up from where it stopped rather
+			// than starting over.
+			if msg.timing.Truncated {
+				note := i18n.T("the answer hit the output limit — say «continue» and it will pick up from there")
+				if msg.timing.Completion > 0 {
+					note = fmt.Sprintf("%s (%s %s)", note,
+						formatCount(msg.timing.Completion), i18n.T("tokens"))
+				}
+				m.history = append(m.history, line{kindSys, note})
+			}
 		}
 		// A session file that could not be written is reported here, at the end
 		// of the turn that hit it, rather than from inside the write.
@@ -1518,6 +2452,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.history = append(m.history, line{kindSys, ""})
 		m.historyDirty = true
+		// The turn is the only moment the tree can have moved: the agent has
+		// finished writing, and nothing else in a session writes files. Asking
+		// again here is what keeps the GIT counts honest without a timer walking
+		// the worktree all session — and it is asked for rather than read inline
+		// because that walk is disk I/O on the frame path.
+		extra = tea.Batch(extra, m.gitStatusCmd())
 	case errMsg:
 		m.busy = false
 		m.statusText = i18n.T("error")
@@ -1643,8 +2583,13 @@ func (m *uiModel) suggestHeight() int {
 const minSuggestRows = 2
 
 // suggestMaxRows caps the list. A user arrowing through commands wants to read
-// the reply they are answering, not scroll a pane that swallowed it.
-const suggestMaxRows = 8
+// the reply they are answering, not scroll a pane that swallowed it — but it has
+// to be enough rows to be a list rather than a peek, because matching the letters
+// in order (see rankCommands) keeps several commands plausible after one
+// keystroke, and a window that showed two of them would be hiding the reason for
+// the change. Everything above this is bounded by the room on the screen, which
+// suggestHeight asks for.
+const suggestMaxRows = 12
 
 // transcriptRows is how many transcript rows the terminal affords. The same
 // arithmetic layout and View both need, kept in one place so the viewport
@@ -1776,6 +2721,10 @@ func (m *uiModel) followVP() {
 type suggestion struct {
 	text string
 	desc string
+	// takesArg is the command's own flag, carried on the row because the Enter
+	// handler needs it and holds only rows. A row that needs an argument is
+	// completed into the prompt rather than run.
+	takesArg bool
 }
 
 // updateSuggest rebuilds the command list shown above the input.
@@ -1790,6 +2739,36 @@ type suggestion struct {
 // cursor blink roughly twice a second, and every one of those messages reaches
 // the rebuild below. Without the memo the highlight was thrown away twice a
 // second, so a single press of Down appeared to snap the cursor back to the top.
+
+// showDebug prints diagnostics for the transcript pipeline: which line kind the
+// reply is stored under, and whether the markdown renderer saw it. A reply that
+// renders as raw markup is stored under some kind other than kindAgent, so every
+// non-empty line is listed rather than guessed at.
+//
+// A method rather than a block in the dispatcher so the command can be listed
+// where the others are. It was working and invisible: "/debug" answered, the
+// README named it, and it appeared in neither the "/" list nor ctrl+p — the list
+// of commands and the set of commands being two different sets is the bug that
+// lets a command hide.
+func (m *uiModel) showDebug() {
+	m.history = append(m.history, line{kindSys, fmt.Sprintf(
+		"width=%d renderCalls=%d lines=%d",
+		m.contentWidth(), renderCalls, len(m.history))})
+	shown := 0
+	for i := len(m.history) - 1; i >= 0 && shown < 6; i-- {
+		l := m.history[i]
+		if strings.TrimSpace(l.text) == "" {
+			continue
+		}
+		row := m.rowStyle(l.kind)
+		m.history = append(m.history, line{kindSys, fmt.Sprintf(
+			"  [%d] %-7s md=%-5v %q",
+			i, kindName(l.kind), row.markdown, truncate(oneLine(l.text), 46))})
+		shown++
+	}
+	m.historyDirty = true
+	m.followVP()
+}
 
 func (m *uiModel) updateSuggest() {
 	m.rebuildSuggest(m.input.Value())
@@ -1853,12 +2832,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 		return
 	}
 	if !strings.Contains(text, " ") {
-		prefix := strings.TrimPrefix(text, "/")
-		for _, c := range m.commands() {
-			if strings.HasPrefix(c.name, prefix) {
-				m.suggest = append(m.suggest, suggestion{"/" + c.name, c.desc})
-			}
-		}
+		m.suggest = rankCommands(m.commands(), strings.ToLower(strings.TrimPrefix(text, "/")))
 		m.clampSuggest()
 		return
 	}
@@ -1866,7 +2840,7 @@ func (m *uiModel) rebuildSuggest(text string) {
 		q := strings.TrimSpace(id)
 		for _, id := range m.picker.Models {
 			if q == "" || strings.Contains(id, q) {
-				m.suggest = append(m.suggest, suggestion{"/model " + id, i18n.T("switch to this model")})
+				m.suggest = append(m.suggest, suggestion{text: "/model " + id, desc: i18n.T("switch to this model")})
 			}
 			if len(m.suggest) >= 8 {
 				break
@@ -1874,6 +2848,101 @@ func (m *uiModel) rebuildSuggest(text string) {
 		}
 	}
 	m.clampSuggest()
+}
+
+// rankCommands is what the "/" list is built from: every command that can still
+// match what has been typed, best match first.
+//
+// Prefix matching alone was the problem. One keystroke usually left exactly one
+// row — "/p" is "/proxy" and nothing else, "/n" is "/new" — so the list closed
+// the moment it opened, and a user who meant "/resume" had to backspace out to
+// find it. Matching the letters in order, rather than only at the front, keeps
+// several candidates on screen for as long as several are plausible, and the
+// ranking is what stops that from being noise: the command most likely meant is
+// the one under the highlight, which is the row a single Enter takes.
+//
+// An empty needle keeps every command in its declared order, so a bare "/" is
+// still the whole list rather than a rank order nobody chose.
+// A length tie-break inside a rank, so the shorter of two equally good matches
+// wins: "/md" is /mode rather than /models, "/c" is /cd rather than /changes, and
+// a command spelled shorter is the one a user typing two letters was reaching for.
+// The sort is stable, so the declared order still settles what nothing else can.
+func rankCommands(cmds []command, needle string) []suggestion {
+	if needle == "" {
+		// A bare "/" is the whole list in the order it was declared — the order
+		// somebody chose when they wrote the commands down. Ranking cannot improve
+		// on that, and the length tie-break below would otherwise sort it by how
+		// long the command names happen to be.
+		s := make([]suggestion, 0, len(cmds))
+		for _, c := range cmds {
+			s = append(s, suggestion{text: "/" + c.name, desc: c.desc})
+		}
+		return s
+	}
+	type ranked struct {
+		s    suggestion
+		rank int
+	}
+	var out []ranked
+	for _, c := range cmds {
+		if rank, ok := commandRank(strings.ToLower(c.name), needle); ok {
+			out = append(out, ranked{
+				suggestion{"/" + c.name, c.desc, c.takesArg}, rank,
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].rank != out[j].rank {
+			return out[i].rank < out[j].rank
+		}
+		return len(out[i].s.text) < len(out[j].s.text)
+	})
+	s := make([]suggestion, 0, len(out))
+	for _, r := range out {
+		s = append(s, r.s)
+	}
+	return s
+}
+
+// commandRank grades one command name against the needle: lower is a better
+// match, and ok is false when the letters cannot be found at all.
+//
+// Three grades. An exact name is the command and nothing else. A name starting
+// with the needle is what a user who knows the name types. A name that contains
+// the needle's letters in order is the third grade, and it is what makes one
+// letter worth typing at all.
+//
+// The gap penalty inside that third grade is what keeps it from being noise: it
+// is the distance from the last letter already matched to the next one, so "/do"
+// ranks "/todo" above "/editor" and "/ot" ranks "/todo" above "/proxy". The
+// letters a user typed together should land together — a run scattered across a
+// name is a worse answer than a run found side by side, even when both are
+// subsequence matches.
+func commandRank(name, needle string) (rank int, ok bool) {
+	if needle == "" {
+		// Everything matches, and nothing is ranked above anything else.
+		return 0, true
+	}
+	if name == needle {
+		return 0, true
+	}
+	if strings.HasPrefix(name, needle) {
+		return 1, true
+	}
+	pos, gaps := 0, 0
+	for i := 0; i < len(needle); i++ {
+		j := strings.IndexByte(name[pos:], needle[i])
+		if j < 0 {
+			return 0, false
+		}
+		if i > 0 {
+			gaps += j
+		}
+		pos += j + 1
+	}
+	// Past the prefix grade, so a gap can only worsen a match and never
+	// promote one above a name that simply starts with what was typed.
+	return 2 + gaps, true
 }
 
 // clampSuggest pulls the highlighted row back inside the list. Typing narrows the
@@ -1923,6 +2992,13 @@ type transcriptRow struct {
 	// the picture's own and reset it at the end of the row — a preview of a
 	// screenshot comes out tinted and half its colours replaced by the default.
 	prestyled bool
+	// diff marks a change block (kindDiff): its rows are coloured per line by
+	// diffRows before wrapping, so they ride through unstyled, but the block
+	// keeps the transcript's left margin like the tool result it belongs to.
+	diff bool
+	// syn is the highlighter the diff block colours its code rows with. The
+	// row style fills it in; nil means the plain, unhighlighted path.
+	syn *syntax.Highlighter
 	// captionLast marks a block whose final row is a caption rather than part of
 	// the picture, so a block too wide to draw can fall back to that row instead of
 	// disappearing. The logo has no such row and so keeps being dropped whole.
@@ -1936,7 +3012,13 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 	case kindTool:
 		return transcriptRow{style: styleTool, first: "⏺ ", rest: "  "}
 	case kindToolRes:
-		return transcriptRow{style: styleToolRes, first: "  ⎿ ", rest: "    "}
+		return transcriptRow{style: styleToolRes, first: "  ⎟ ", rest: "    "}
+	case kindDiff:
+		// The diff colours its own rows: the styles are applied per row by
+		// diffRows in rowRows, so the block rides through as prestyled — but it
+		// is not verbatim, it keeps the transcript's left margin like the
+		// tool result it belongs to.
+		return transcriptRow{style: lipgloss.NewStyle(), first: "    ", rest: "    ", prestyled: true, diff: true, syn: m.diffHighlighter()}
 	case kindAgent:
 		return transcriptRow{style: styleAgent, markdown: true}
 	case kindSys:
@@ -1958,12 +3040,71 @@ func (m *uiModel) rowStyle(kind lineKind) transcriptRow {
 	return transcriptRow{style: styleAgent}
 }
 
+// codeRef is a place in a file that one transcript row stands for. It is what a
+// click on a change block resolves to, and it exists as a value of its own
+// because the alternative is gone by the time the click arrives: a diff row has
+// been styled, gutter-numbered, maybe wrapped onto a second screen row and
+// maybe ANSI-truncated, and the line it names survives only as digits inside
+// cells the renderer owns. Recovering it from the drawn row would mean
+// re-deriving the gutter's arithmetic and guessing which blank gutter was a
+// wrapped continuation — a different question than the one being asked.
+type codeRef struct {
+	// path is the file as the block's header spelled it: the path the model
+	// passed to the tool, so usually relative to the workspace root.
+	path string
+	// line is 1-based, as the gutter prints it. Zero means the row names no
+	// position at all: a block's header, the tail of a capped block, or any
+	// history line that is not a change.
+	line int
+}
+
+// ok reports whether the ref names a place a jump could actually go.
+func (r codeRef) ok() bool { return r.path != "" && r.line > 0 }
+
+// String is the file:line a status line shows, and the empty string for a ref
+// that names nothing.
+func (r codeRef) String() string {
+	if !r.ok() {
+		return ""
+	}
+	return r.path + ":" + strconv.Itoa(r.line)
+}
+
+// renderedRows is one history entry laid out: the rows as they go into the
+// viewport, and index-aligned with them, the place in a file each row stands
+// for. The two are produced together because they are decided together — a diff
+// row that wrapped onto a second screen row is still the same line of the same
+// file, and only the row that knows so can say it.
+type renderedRows struct {
+	rows []string
+	refs []codeRef
+}
+
+// at is the place row i stands for, or the zero value for a row that names
+// none — which is every row of every history line but a change block's.
+func (rr renderedRows) at(i int) codeRef {
+	if i < 0 || i >= len(rr.refs) {
+		return codeRef{}
+	}
+	return rr.refs[i]
+}
+
+func (rr *renderedRows) add(row string, ref codeRef) {
+	rr.rows = append(rr.rows, row)
+	rr.refs = append(rr.refs, ref)
+}
+
+func (rr *renderedRows) addAll(other renderedRows) {
+	rr.rows = append(rr.rows, other.rows...)
+	rr.refs = append(rr.refs, other.refs...)
+}
+
 // rowRows turns one history entry into the transcript rows it occupies. Prose is
 // wrapped to width under a hanging indent. Pre-formatted art keeps its own line
 // breaks and is dropped whole when it cannot fit: a banner sliced to the panel
 // edge, or broken across rows, reads as corruption rather than as a logo. The
 // header names the app regardless, so losing the art costs nothing.
-func rowRows(text string, width int, row transcriptRow) []string {
+func rowRows(text string, width int, row transcriptRow) renderedRows {
 	// Markdown is only applied where the model produced it. Tool output and the
 	// user's own prompts are literal text — a path or a JSON payload that happens
 	// to contain "**" must survive untouched.
@@ -1972,10 +3113,13 @@ func rowRows(text string, width int, row transcriptRow) []string {
 		for i, r := range rows {
 			rows[i] = row.first + r
 		}
-		return rows
+		return renderedRows{rows: rows}
+	}
+	if row.diff {
+		return diffRows(text, width, row)
 	}
 	if !row.verbatim {
-		return wrapIndent(text, width, row.first, row.rest)
+		return renderedRows{rows: wrapIndent(text, width, row.first, row.rest)}
 	}
 	rows := strings.Split(strings.TrimRight(text, "\n"), "\n")
 	for _, r := range rows {
@@ -1988,13 +3132,191 @@ func rowRows(text string, width int, row transcriptRow) []string {
 			if row.captionLast && len(rows) > 0 {
 				last := rows[len(rows)-1]
 				if ansi.StringWidth(last) <= width {
-					return []string{last}
+					return renderedRows{rows: []string{last}}
 				}
 			}
-			return nil
+			return renderedRows{}
 		}
 	}
-	return rows
+	return renderedRows{rows: rows}
+}
+
+// diffRow is one line of a change block as the renderer sees it: the marker,
+// the line's position in the file (0 when the row carries none — the tail of
+// a capped block), and the code itself. The wire format is "-12: code" /
+// "+12: code"; the colon keeps a code line that begins with digits from
+// being read as a number.
+type diffRow struct {
+	mark string
+	num  int
+	code string
+}
+
+// parseDiffRow reads one DiffBlock line. A row without the number shape
+// (the tail, or a marker-only row) keeps its whole tail as code.
+func parseDiffRow(line string) diffRow {
+	if line == "" {
+		return diffRow{}
+	}
+	mark, rest := "", line
+	if line[0] == '+' || line[0] == '-' {
+		mark, rest = line[:1], line[1:]
+	}
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		i++
+	}
+	if i > 0 && i < len(rest) && rest[i] == ':' {
+		if n, err := strconv.Atoi(rest[:i]); err == nil {
+			return diffRow{mark: mark, num: n, code: strings.TrimPrefix(rest[i+1:], " ")}
+		}
+	}
+	return diffRow{mark: mark, code: rest}
+}
+
+// diffRows renders a change block as a piece of the editor: a dim line
+// number in the gutter, then the code — highlighted with the editor's theme
+// when the language is one it knows, the +/- rows carrying a dim green or
+// red background over the theme's own foreground, the way a git pager does.
+// Numbers come from the block itself: old-file positions for removals,
+// new-file positions for additions. Rows the highlighter does not cover are
+// wrapped like ordinary text; highlighted rows are ANSI-truncated instead,
+// because wrapping measured plain text cannot survive the escapes the theme
+// paints with.
+//
+// Every row it returns also carries the place it names, so a click on one can
+// open the file there. A removal's number is the old file's, which is the one
+// row that no longer exists to land on: the block trims a shared prefix and
+// suffix off both texts and numbers both sides from the same place, so the line
+// a removal used to be on is the line the replacement is on, and a pure
+// deletion lands on the line that took its place.
+func diffRows(text string, width int, row transcriptRow) renderedRows {
+	avail := width - max(ansi.StringWidth(row.first), ansi.StringWidth(row.rest))
+	if avail < 1 {
+		avail = 1
+	}
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	path := ""
+	if len(lines) > 0 && strings.HasPrefix(lines[0], "── ") {
+		path = strings.TrimPrefix(lines[0], "── ")
+		lines = lines[1:]
+	}
+
+	parsed := make([]diffRow, len(lines))
+	numw := 0
+	for i, l := range lines {
+		parsed[i] = parseDiffRow(l)
+		if p := len(strconv.Itoa(parsed[i].num)); parsed[i].num > 0 && p > numw {
+			numw = p
+		}
+	}
+	if numw < 3 {
+		numw = 3
+	}
+
+	var out renderedRows
+	// The header wraps like plain text: it is not code, and the file name is
+	// the one thing in the block that must survive any width. It names the file
+	// rather than a line in it, so it stands for nothing.
+	for j, r := range wrapCells("── "+path, avail) {
+		indent := row.rest
+		if j == 0 {
+			indent = row.first
+		}
+		out.add(styleHint.Render(indent+r), codeRef{})
+	}
+
+	for g := 0; g < len(parsed); {
+		mark := parsed[g].mark
+		j := g
+		for j < len(parsed) && parsed[j].mark == mark {
+			j++
+		}
+		out.addAll(diffGroup(mark, parsed[g:j], path, avail, numw, row))
+		g = j
+	}
+	return out
+}
+
+// diffGroup renders one run of same-marker rows. Consecutive rows are
+// highlighted as one text so a string literal spanning lines keeps its
+// colour across the block.
+func diffGroup(mark string, rows []diffRow, path string, avail, numw int, row transcriptRow) renderedRows {
+	st, bg := styleHint, lipgloss.Color("")
+	switch mark {
+	case "+":
+		st, bg = styleAdd, cDiffAddBg
+	case "-":
+		st, bg = styleDel, cDiffDelBg
+	}
+
+	// The gutter: the line's position, right-aligned, dim — a number the
+	// eye can anchor on without competing with the code beside it.
+	gutter := func(n int, dim bool) string {
+		s := fmt.Sprintf("%*d ", numw, n)
+		if n <= 0 {
+			s = strings.Repeat(" ", numw+1)
+		}
+		if dim {
+			s = styleHint.Render(s)
+		}
+		return s
+	}
+
+	// A row with no number — the tail of a capped block — names no line, and a
+	// wrapped continuation row repeats its own row's number because it is the
+	// same line of the same file, drawn across two rows of the screen.
+	ref := func(n int) codeRef {
+		if n <= 0 {
+			return codeRef{}
+		}
+		return codeRef{path: path, line: n}
+	}
+
+	var out renderedRows
+	if row.syn == nil || syntax.Lang(path) == "" {
+		// No highlighter, or a language chroma does not know: the plain
+		// path — wrapped like ordinary text, code budget shrunk by the
+		// gutter the numbers now take.
+		codeAvail := avail - (numw + 1)
+		if codeAvail < 1 {
+			codeAvail = 1
+		}
+		for _, p := range rows {
+			code := p.code
+			if p.mark != "" {
+				code = p.mark + " " + p.code
+			}
+			for j, r := range wrapCells(code, codeAvail) {
+				indent := row.rest
+				gut := gutter(p.num, true)
+				if j > 0 {
+					indent, gut = row.rest, styleHint.Render(strings.Repeat(" ", numw+1))
+				}
+				if j == 0 {
+					indent = row.first
+				}
+				out.add(st.Render(indent)+gut+st.Render(r), ref(p.num))
+			}
+		}
+		return out
+	}
+
+	code := make([]string, len(rows))
+	for i, p := range rows {
+		code[i] = p.code
+	}
+	styled := row.syn.HighlightCode(path, strings.Join(code, "\n"), func(base lipgloss.Style) lipgloss.Style {
+		return base.Background(bg)
+	})
+	for i, p := range rows {
+		line := ""
+		if i < len(styled) {
+			line = ansi.Truncate(styled[i], avail-(numw+1)-2, "…")
+		}
+		out.add(row.first+gutter(p.num, true)+st.Render(p.mark+" ")+line, ref(p.num))
+	}
+	return out
 }
 
 // chatIndent is the small left margin every transcript row is drawn with: a
@@ -2013,30 +3335,36 @@ func (m *uiModel) renderHistory() string {
 	if len(m.cachedRows) > len(m.history) {
 		m.cachedRows = m.cachedRows[:len(m.history)]
 	}
+	// The click index is rebuilt here and only here, which is why it is built at
+	// all: it is the one place that knows how many rows a history entry turned
+	// into and what each of them stands for. The early return above keeps the
+	// previous index, which is exactly right — the content it was built for is
+	// the content the viewport is still showing.
+	m.rowRefs = m.rowRefs[:0]
 	var b strings.Builder
 	for i := range m.history {
 		l := &m.history[i]
 		row := m.rowStyle(l.kind)
-		var rows []string
+		var rr renderedRows
 		hit := false
 		if i < len(m.cachedRows) {
 			c := &m.cachedRows[i]
 			if c.kind == l.kind && c.text == l.text && c.width == w {
-				rows, hit = c.rows, true
+				rr, hit = c.rows, true
 			}
 		}
 		if !hit {
-			for _, r := range rowRows(l.text, w, row) {
+			rr = rowRows(l.text, w, row)
+			for i, r := range rr.rows {
 				// A markdown row arrives already styled by the renderer, and a
 				// prestyled one already carries its own colours; wrapping either
 				// again would nest the escapes and break the width accounting.
 				if row.markdown || row.prestyled {
-					rows = append(rows, r)
 					continue
 				}
-				rows = append(rows, row.style.Render(r))
+				rr.rows[i] = row.style.Render(r)
 			}
-			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rows}
+			entry := cachedLine{kind: l.kind, text: l.text, width: w, rows: rr}
 			if i < len(m.cachedRows) {
 				m.cachedRows[i] = entry
 			} else if i == len(m.cachedRows) {
@@ -2053,12 +3381,15 @@ func (m *uiModel) renderHistory() string {
 		// terminal's own background down the side of the picture, which reads as a
 		// column of the image that is out of step with the rest.
 		margin := strings.Repeat(" ", chatIndent)
-		for _, r := range rows {
-			if row.prestyled {
+		for j, r := range rr.rows {
+			// Only full-bleed art (the image preview) skips the margin; a diff
+			// block carries its own colours but belongs to the transcript's page.
+			if row.prestyled && row.verbatim {
 				b.WriteString(r + "\n")
-				continue
+			} else {
+				b.WriteString(margin + r + "\n")
 			}
-			b.WriteString(margin + r + "\n")
+			m.rowRefs = append(m.rowRefs, rr.at(j))
 		}
 	}
 	m.cachedHistory = b.String()
@@ -2163,19 +3494,31 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.palette.open = false
 		return m, nil
 	case "up":
-		if m.palette.selected > 0 {
-			m.palette.selected--
+		if m.palette.list.sel > 0 {
+			m.palette.list.sel--
 		}
 		return m, nil
 	case "down":
-		if m.palette.selected < len(filtered)-1 {
-			m.palette.selected++
+		if m.palette.list.sel < len(filtered)-1 {
+			m.palette.list.sel++
 		}
+		return m, nil
+	case "pgup":
+		m.palette.list.sel = max(m.palette.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		m.palette.list.sel = min(m.palette.list.sel+m.floatPage(), len(filtered)-1)
+		return m, nil
+	case "home":
+		m.palette.list.sel = 0
+		return m, nil
+	case "end":
+		m.palette.list.sel = max(len(filtered)-1, 0)
 		return m, nil
 	case "enter":
 		m.palette.open = false
-		if m.palette.selected < len(filtered) {
-			c := filtered[m.palette.selected]
+		if m.palette.list.sel < len(filtered) {
+			c := filtered[m.palette.list.sel]
 			m.history = append(m.history, line{kindSys, "· " + c.name})
 			m.historyDirty = true
 			cmd := c.run(m)
@@ -2186,13 +3529,13 @@ func (m *uiModel) paletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if q := []rune(m.palette.query); len(q) > 0 {
 			m.palette.query = string(q[:len(q)-1])
-			m.palette.selected = 0
+			m.palette.list = listView{}
 		}
 		return m, nil
 	}
 	if len(msg.Text) > 0 {
 		m.palette.query += msg.Text
-		m.palette.selected = 0
+		m.palette.list = listView{}
 	}
 	return m, nil
 }
@@ -2244,7 +3587,7 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 		return fail(err)
 	}
 	if s.Active {
-		m.history = append(m.history, line{kindSys, "proxy: " + s.HTTPS})
+		m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
 	} else {
 		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
 	}
@@ -2272,23 +3615,35 @@ func (m *uiModel) persistProxy(s config.ProxySettings) error {
 		merged = dropEnvKey(merged, k)
 	}
 	if s.Active {
-		vars := map[string]string{}
-		if s.HTTP != "" {
-			vars[config.EnvHTTPProxy] = s.HTTP
-		}
-		if s.HTTPS != "" {
-			vars[config.EnvHTTPSProxy] = s.HTTPS
-		}
-		if s.NoProxy != "" {
-			vars[config.EnvNoProxy] = s.NoProxy
-		}
-		merged, _ = config.MergeDotEnv(merged, vars)
+		merged, _ = config.MergeDotEnv(merged, s.ProxyVars())
 	}
-	var sb strings.Builder
-	for _, l := range merged {
-		sb.WriteString(l + "\n")
+	// Through the shared writer: .env holds the provider key, so a half-written
+	// file after a crash is a session with no configuration and no way back to
+	// the one it had. Same reason the proxy write and the model write cannot be
+	// two different pieces of code.
+	return config.WriteDotEnv(merged)
+}
+
+// persistModelChoice writes the picked model into .env and says so when it did
+// not go through.
+//
+// The three outcomes are three different sentences on purpose. Silence would
+// read as "saved" and be wrong; an error the user cannot act on is noise. A
+// refusal because .env does not describe this endpoint is worth saying out loud,
+// because the alternative — writing the line anyway — is the thing that makes a
+// session fail to start days later with nothing on screen to explain it.
+func (m *uiModel) persistModelChoice(id string) {
+	switch err := config.SaveModel(m.prov, id); {
+	case err == nil:
+		// The live process is told too, so anything that rebuilds a provider from
+		// the environment later in this session agrees with the file.
+		os.Setenv(config.EnvModelKey, id)
+		m.statusText = i18n.T("model saved to .env — the next start uses it")
+	case errors.Is(err, config.ErrProviderNotInEnv):
+		m.statusText = i18n.T("model not saved: .env does not configure this provider — /setup writes one")
+	default:
+		m.statusText = i18n.T("could not save the model to .env: ") + err.Error()
 	}
-	return os.WriteFile(".env", []byte(sb.String()), 0o600)
 }
 
 // dropEnvKey removes every line assigning key, leaving comments and other
@@ -2325,7 +3680,7 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusText = i18n.T("cancelled")
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	}
 
 	switch m.proxy.stage {
@@ -2344,8 +3699,7 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			switch m.proxy.selected {
 			case 0:
-				m.proxy.stage = proxyURL
-				m.proxy.buf = ""
+				m.proxy.openForm()
 			case 1:
 				m.proxy.stage = proxyNo
 				m.proxy.buf = ""
@@ -2361,21 +3715,59 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case proxyURL:
 		switch msg.String() {
-		case "enter":
-			val := strings.TrimSpace(m.proxy.buf)
-			if val == "" {
-				m.statusText = i18n.T("no proxy address entered")
+		case "up":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "down":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "left", "right":
+			// On the type, an arrow picks the scheme; everywhere else it moves
+			// the focus. Tab moves the focus too, so a type that could only be
+			// reached by tabbing away and back would be a value the form hides.
+			if m.proxy.focus == pfScheme {
+				if msg.String() == "right" {
+					m.proxy.stepScheme(1)
+				} else {
+					m.proxy.stepScheme(-1)
+				}
 				return m, nil
 			}
-			if err := config.ValidateProxy(val); err != nil {
+			if msg.String() == "right" {
+				if m.proxy.focus < pfCount-1 {
+					m.proxy.focus++
+				}
+			} else if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "tab":
+			if m.proxy.focus < pfCount-1 {
+				m.proxy.focus++
+			}
+			return m, nil
+		case "shift+tab":
+			if m.proxy.focus > 0 {
+				m.proxy.focus--
+			}
+			return m, nil
+		case "enter":
+			spec := m.proxy.spec()
+			if err := spec.Validate(); err != nil {
 				m.statusText = err.Error()
 				return m, nil
 			}
 			m.proxy.reset()
-			return m, m.applyProxy(val)
+			return m, m.applyProxy(spec.URL())
 		case "backspace":
-			if r := []rune(m.proxy.buf); len(r) > 0 {
-				m.proxy.buf = string(r[:len(r)-1])
+			if f := m.proxy.field(); f != nil {
+				if r := []rune(*f); len(r) > 0 {
+					*f = string(r[:len(r)-1])
+				}
 			}
 			return m, nil
 		}
@@ -2395,15 +3787,130 @@ func (m *uiModel) proxyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if len(msg.Text) > 0 && m.proxy.stage != proxyPick {
+	// Text lands in the form's focused field, except on the type: there the same
+	// keys are what selects a scheme, and typing letters into a four-value list
+	// only produces values SetProxy will reject.
+	if len(msg.Text) > 0 && m.proxy.stage == proxyNo {
 		m.proxy.buf += msg.Text
 	}
+	if len(msg.Text) > 0 && m.proxy.stage == proxyURL {
+		if m.proxy.focus == pfScheme {
+			m.proxy.stepScheme(1)
+			return m, nil
+		}
+		if f := m.proxy.field(); f != nil {
+			*f += msg.Text
+		}
+	}
 	return m, nil
+}
+
+// stepScheme moves the type field through config.Schemes by delta, wrapping. An
+// empty or unrecognised field starts at the first scheme rather than refusing to
+// move: it is a field the user has not filled in, not a value to complain about.
+func (s *proxyState) stepScheme(delta int) {
+	i := s.schemeIndex()
+	if i < 0 {
+		if delta > 0 {
+			i = -1
+		} else {
+			i = len(config.Schemes)
+		}
+	}
+	i = (i + delta + len(config.Schemes)) % len(config.Schemes)
+	// The port follows the type, because the two default together: switching an
+	// 8080 http proxy to socks5 and leaving 8080 behind would dial a port the new
+	// scheme has no reason to be on. "Unchanged" is read as the port still holding
+	// *some* scheme's default rather than as the user having typed it, which needs
+	// no second field remembering what the type used to be — a field that can
+	// disagree with the one on screen. A port that is none of the defaults was
+	// typed, and typing wins.
+	if isDefaultPort(s.fields[pfPort]) {
+		s.fields[pfPort] = config.DefaultPort(config.Schemes[i])
+	}
+	s.fields[pfScheme] = config.Schemes[i]
+}
+
+// isDefaultPort reports whether p is empty or one of the scheme defaults, which
+// is what "the user has not chosen a port" looks like.
+func isDefaultPort(p string) bool {
+	if p == "" {
+		return true
+	}
+	for _, sc := range config.Schemes {
+		if config.DefaultPort(sc) == p {
+			return true
+		}
+	}
+	return false
 }
 
 // proxyActionCount is the number of rows the /proxy menu offers. It lives in
 // one place because the key handler and the renderer must agree on it.
 const proxyActionCount = 4
+
+// proxyFormRows draws the address form: one row per field, label and value side
+// by side, with the focused one marked.
+//
+// The labels are padded to one width so the values line up. A form whose values
+// start at a different column per row reads as a list of unrelated strings, and
+// the eye stops being able to scan a column — which is the whole reason the
+// fields are separate.
+//
+// The password is the one value drawn as dots. It is on screen, in a transcript
+// nobody chose to keep, and in whatever the terminal keeps in scrollback.
+func (m *uiModel) proxyFormRows(inner int) [][]string {
+	labels := []string{
+		i18n.T("type"),
+		i18n.T("host"),
+		i18n.T("port"),
+		i18n.T("login"),
+		i18n.T("password"),
+	}
+	values := make([]string, pfCount)
+	for i := range values {
+		values[i] = m.proxy.fields[i]
+	}
+	if m.proxy.fields[pfPass] != "" {
+		values[pfPass] = strings.Repeat("•", len([]rune(m.proxy.fields[pfPass])))
+	}
+	// A placeholder rather than an empty row, so a field that must be filled is
+	// visibly waiting for something instead of looking already done.
+	placeholders := map[int]string{
+		pfHost: "vpn.example.com",
+		pfPort: "1080",
+		pfUser: "optional",
+		pfPass: "optional",
+	}
+
+	// The gutter is " ▸ " on the focused row and "   " elsewhere, and the marker
+	// is what marks the focus — the same ▸ the menu uses, so one thing in this
+	// dialog means "you are here".
+	labelW := 0
+	for _, l := range labels {
+		labelW = max(labelW, ansi.StringWidth(l))
+	}
+
+	rows := make([][]string, 0, pfCount)
+	for i, l := range labels {
+		gutter := "   "
+		if i == m.proxy.focus {
+			gutter = " ▸ "
+		}
+		v := values[i]
+		if v == "" {
+			v = styleHint.Render(placeholders[i])
+		} else if i == m.proxy.focus {
+			v += "█"
+		}
+		row := gutter + l + strings.Repeat(" ", labelW-ansi.StringWidth(l)) + "  " + v
+		if i == m.proxy.focus {
+			row = styleTool.Render(gutter) + row[len(gutter):]
+		}
+		rows = append(rows, []string{truncate(row, inner)})
+	}
+	return rows
+}
 
 func (m *uiModel) proxyBox() string {
 	inner := m.floatingWidth() - panelBorder
@@ -2412,21 +3919,17 @@ func (m *uiModel) proxyBox() string {
 	// not have to remember whether a proxy is already on, or which one.
 	now := i18n.T("direct connection")
 	if s := config.CurrentProxy(); s.Active {
-		now = s.HTTPS
-		if now == "" {
-			now = s.HTTP
-		}
+		now = config.RedactProxy(s.Effective())
 	}
 	title := i18n.T("? proxy — now: ") + truncate(now, max(inner-ansi.StringWidth(i18n.T("? proxy — now: ")), 1))
 
 	switch m.proxy.stage {
 	case proxyURL:
-		rows := [][]string{
-			{styleHint.Render(i18n.T("proxy address, e.g. 127.0.0.1:8080 or socks5://host:1080"))},
-			{styleHint.Render(i18n.T("enter — apply, esc — cancel"))},
-			{m.proxy.buf + "█"},
-		}
-		return m.floatingPanel(title, "", rows, 0)
+		// The focus is passed as the selection so the panel's own overflow rule
+		// keeps the focused field when the terminal is too short for all five —
+		// the field being typed into is the one row that cannot be the one to go.
+		return m.floatingPanel(title+"  ("+i18n.T("tab — next field, ←→ — type, enter — apply, esc — cancel")+")",
+			"", m.proxyFormRows(inner), &listView{sel: m.proxy.focus})
 
 	case proxyNo:
 		rows := [][]string{
@@ -2434,7 +3937,7 @@ func (m *uiModel) proxyBox() string {
 			{styleHint.Render(i18n.T("an empty field clears the list · enter — apply · esc — cancel"))},
 			{m.proxy.buf + "█"},
 		}
-		return m.floatingPanel(title, "", rows, 0)
+		return m.floatingPanel(title, "", rows, &listView{})
 	}
 
 	entries := make([][]string, 0, proxyActionCount)
@@ -2446,7 +3949,7 @@ func (m *uiModel) proxyBox() string {
 	} {
 		marker, style := "   ", lipgloss.NewStyle()
 		if i == m.proxy.selected {
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		}
 		rows := wrapIndent(label, inner, marker, "     ")
 		if i != m.proxy.selected {
@@ -2456,7 +3959,7 @@ func (m *uiModel) proxyBox() string {
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, m.proxy.selected)
+	return m.floatingPanel(title+"  (enter — select, esc — cancel)", "", entries, &listView{sel: m.proxy.selected})
 }
 
 func (m *uiModel) showProxy() tea.Cmd {
@@ -2464,6 +3967,10 @@ func (m *uiModel) showProxy() tea.Cmd {
 	add := func(s string) {
 		m.history = append(m.history, line{kindSys, s})
 	}
+	// Every address goes out redacted. A proxy address usually carries the
+	// login, and this line lands in the transcript, which is written to disk and
+	// shown to whoever opens the session.
+	show := config.RedactProxy
 	if !s.Active {
 		add(i18n.T("proxy: none (direct connection)"))
 	} else {
@@ -2474,7 +3981,7 @@ func (m *uiModel) showProxy() tea.Cmd {
 			{"https", s.HTTPS}, {"http", s.HTTP},
 		} {
 			if p.val != "" {
-				add("proxy " + p.label + ": " + p.val)
+				add("proxy " + p.label + ": " + show(p.val))
 			}
 		}
 		if s.NoProxy != "" {
@@ -2537,8 +4044,10 @@ func (m *uiModel) pasteTarget() *string {
 		return nil
 	case m.setup.open && m.setup.stage != setupPick:
 		return &m.setup.buf
-	case m.proxy.open && m.proxy.stage != proxyPick:
+	case m.proxy.open && m.proxy.stage == proxyNo:
 		return &m.proxy.buf
+	case m.proxy.open && m.proxy.stage == proxyURL:
+		return m.proxy.field()
 	case m.picker.open:
 		return &m.picker.query
 	case m.palette.open:
@@ -2561,13 +4070,14 @@ func (m *uiModel) pasteInto(text string) {
 		return
 	}
 	*dst += oneLine(text)
-	// Typing resets the cursor, so a paste has to as well or the highlight
-	// stays on the first row of a filtered list.
+	// Typing resets the cursor and the scroll offset, so a paste has to as well
+	// or the highlight stays on the first row of a filtered list and the window
+	// stays scrolled to where the old list ended.
 	if m.picker.open {
-		m.picker.selected = 0
+		m.picker.list = listView{}
 	}
 	if m.palette.open {
-		m.palette.selected = 0
+		m.palette.list = listView{}
 	}
 }
 
@@ -2594,24 +4104,24 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusText = i18n.T("setup cancelled")
 		return m, nil
 	case "ctrl+c":
-		return m, tea.Quit
+		return m, m.quitCmd()
 	}
 
 	switch m.setup.stage {
 	case setupPick:
 		switch msg.String() {
 		case "up":
-			if m.setup.selected > 0 {
-				m.setup.selected--
+			if m.setup.list.sel > 0 {
+				m.setup.list.sel--
 			}
 			return m, nil
 		case "down":
-			if m.setup.selected < len(opts)-1 {
-				m.setup.selected++
+			if m.setup.list.sel < len(opts)-1 {
+				m.setup.list.sel++
 			}
 			return m, nil
 		case "enter":
-			m.setup.opt = opts[m.setup.selected]
+			m.setup.opt = opts[m.setup.list.sel]
 			switch {
 			case m.setup.opt.GGUF:
 				m.setup.stage = setupGGUF
@@ -2736,7 +4246,9 @@ func (m *uiModel) loadGGUFDir(dir string) {
 	}
 	m.setup.gguf.dir = dir
 	m.setup.gguf.entries = entries
-	m.setup.gguf.selected = 0
+	// Both halves of the position, not just the cursor: a window scrolled into a
+	// directory that no longer exists draws rows the user cannot account for.
+	m.setup.gguf.list = listView{}
 }
 
 // readGGUFDir lists what the browser shows: the parent first, then
@@ -2783,20 +4295,32 @@ func (m *uiModel) ggufPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		p.open = false
 		return m, nil
 	case "up":
-		if p.selected > 0 {
-			p.selected--
+		if p.list.sel > 0 {
+			p.list.sel--
 		}
 		return m, nil
 	case "down":
-		if p.selected < len(p.entries)-1 {
-			p.selected++
+		if p.list.sel < len(p.entries)-1 {
+			p.list.sel++
 		}
 		return m, nil
+	case "pgup":
+		p.list.sel = max(p.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		p.list.sel = min(p.list.sel+m.floatPage(), len(p.entries)-1)
+		return m, nil
+	case "home":
+		p.list.sel = 0
+		return m, nil
+	case "end":
+		p.list.sel = max(len(p.entries)-1, 0)
+		return m, nil
 	case "enter":
-		if p.selected >= len(p.entries) {
+		if p.list.sel >= len(p.entries) {
 			return m, nil
 		}
-		e := p.entries[p.selected]
+		e := p.entries[p.list.sel]
 		if e.dir {
 			m.loadGGUFDir(e.path)
 			return m, nil
@@ -2925,9 +4449,17 @@ func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
 	return m.toolCheckCmd()
 }
 
-// startGGUFSetup saves the GGUF configuration and kicks off llama-server in
-// the background. The provider is not known until the model has loaded, so
-// nothing is committed to m.prov here — ggufReadyMsg finishes the job.
+// startGGUFSetup saves the GGUF configuration and starts llama-server in the
+// background.
+//
+// It goes through the same load state as a start-up load rather than a private
+// one, because the two are the same situation: a model that will exist in a
+// minute and is not answering now. Two paths meant one of them was missing
+// whatever the other had — the badge, the progress note, esc — and the one that
+// misses them is the one nobody tests.
+//
+// The provider is not known until the model has loaded, so nothing is committed
+// to m.prov here — ggufReadyMsg finishes the job.
 func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
 	status, err := m.persistSetup(vars)
 	if err != nil {
@@ -2939,22 +4471,44 @@ func (m *uiModel) startGGUFSetup(vars map[string]string) tea.Cmd {
 		return nil
 	}
 	m.setup.reset()
-	m.statusText = i18n.T("starting the GGUF model — llama-server is loading it…")
-	m.history = append(m.history,
-		line{kindSys, i18n.T("starting llama-server on ") + vars["DMCODE_GGUF"]},
-		line{kindSys, i18n.T("this can take a while — the model loads before the first reply")})
-	m.historyDirty = true
-	m.followVP()
-	return func() tea.Msg {
-		p, lerr := launchGGUF()
-		return ggufReadyMsg{prov: p, err: lerr}
+
+	// The fast failures — a missing .gguf, a llama-server that is not on disk —
+	// are reported here, before a second of waiting, which is the same order
+	// start-up uses: the things that can be known instantly are known instantly.
+	l, lerr := startGGUF()
+	if lerr != nil {
+		m.statusText = i18n.T("failed")
+		m.history = append(m.history,
+			line{kindErr, i18n.T("llama-server did not start: ") + lerr.Error()},
+			line{kindSys, i18n.T(".env keeps DMCODE_GGUF — fix DMCODE_LLAMA_SERVER or the path, then restart dmcode.")})
+		m.historyDirty = true
+		m.followVP()
+		return nil
 	}
+
+	m.beginGGUFLoad(l, []line{
+		{kindSys, i18n.T("starting llama-server on ") + vars["DMCODE_GGUF"]},
+		{kindSys, i18n.T("this can take a while — the model loads before the first reply")},
+	})
+	return m.ggufLoadCmd()
 }
 
-// handleGGUFReady completes the GGUF setup: on success the provider goes live
+// handleGGUFReady completes a GGUF load: on success the provider goes live
 // without a restart; on failure the saved configuration stays in .env so the
 // user can fix the path or the binary and restart.
+//
+// A cancellation is reported in one line and nothing else. The load did not fail,
+// the user asked for it to stop, and a failure report naming a timeout they
+// themselves caused is the tool arguing with them.
 func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
+	m.ggufLoad = nil
+	if errors.Is(msg.err, discover.ErrCancelled) {
+		m.statusText = i18n.T("model load cancelled")
+		m.history = append(m.history, line{kindSys, i18n.T("stopped loading the local model")})
+		m.historyDirty = true
+		m.followVP()
+		return nil
+	}
 	if msg.err != nil {
 		m.history = append(m.history,
 			line{kindErr, i18n.T("llama-server did not start: ") + msg.err.Error()},
@@ -2965,6 +4519,12 @@ func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
 		return nil
 	}
 	m.prov = msg.prov
+	// The pool follows, not just the current provider. A runner rebuilt from a
+	// stale pool — which is what Tab, shift+tab and /cd do — would silently put
+	// the session back on the endpoint the user switched away from, so the swap
+	// would hold for one turn and then be undone with nothing on screen to say so.
+	m.pool = replaceProvider(m.pool, msg.prov)
+	m.applyWindow(msg.prov)
 	m.statusText = i18n.T("provider: ") + msg.prov.Label
 	m.history = append(m.history,
 		line{kindSys, i18n.T("GGUF model is up: ") + msg.prov.Model + " — " + msg.prov.BaseURL})
@@ -3026,20 +4586,45 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc", "ctrl+p":
 		m.picker.open = false
 		return m, nil
+	case "ctrl+c":
+		// The one way out that is not the overlay. Without it ctrl+c is a letter
+		// this box swallows, so a user reaching for it gets a filter full of
+		// control characters instead of an exit.
+		return m, m.quitCmd()
 	case "up":
-		if m.picker.selected > 0 {
-			m.picker.selected--
+		if m.picker.list.sel > 0 {
+			m.picker.list.sel--
 		}
 		return m, nil
 	case "down":
-		if m.picker.selected < len(filtered)-1 {
-			m.picker.selected++
+		if m.picker.list.sel < len(filtered)-1 {
+			m.picker.list.sel++
 		}
+		return m, nil
+	case "pgup":
+		m.picker.list.sel = max(m.picker.list.sel-m.floatPage(), 0)
+		return m, nil
+	case "pgdown":
+		m.picker.list.sel = min(m.picker.list.sel+m.floatPage(), len(filtered)-1)
+		return m, nil
+	case "home":
+		m.picker.list.sel = 0
+		return m, nil
+	case "end":
+		m.picker.list.sel = max(len(filtered)-1, 0)
+		return m, nil
+	case "ctrl+f":
+		// The toggle a user reaches for instead of reading model ids: whether
+		// this endpoint serves anything free is a fact about the endpoint, and
+		// filtering it out by hand means knowing the naming convention each
+		// gateway happens to use this month.
+		m.picker.onlyFree = !m.picker.onlyFree
+		m.picker.list = listView{}
 		return m, nil
 	case "enter":
 		m.picker.open = false
-		if m.picker.selected < len(filtered) {
-			id := filtered[m.picker.selected]
+		if m.picker.list.sel < len(filtered) {
+			id := filtered[m.picker.list.sel]
 			m.history = append(m.history, line{kindSys, i18n.T("· model → ") + id})
 			m.historyDirty = true
 			cmd := m.switchModelCmd(id)
@@ -3050,22 +4635,41 @@ func (m *uiModel) pickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "backspace":
 		if q := []rune(m.picker.query); len(q) > 0 {
 			m.picker.query = string(q[:len(q)-1])
-			m.picker.selected = 0
+			m.picker.list = listView{}
 		}
 		return m, nil
 	}
 	if len(msg.Text) > 0 {
 		m.picker.query += msg.Text
-		m.picker.selected = 0
+		m.picker.list = listView{}
 	}
 	return m, nil
 }
 
+// filteredModels is the list the picker shows: the endpoint's own order, cut
+// down by the typed filter and by the free-only toggle.
+//
+// Every word of the filter has to appear, not the whole string: a model id is
+// "meta-llama/Llama-3.3-70B-Instruct", and somebody who types "llama 70b" is
+// looking for that one rather than for a model with a space in its name. With
+// nothing typed the endpoint's order stands, because a list nobody has filtered
+// is a list somebody chose the order of.
 func (m *uiModel) filteredModels() []string {
-	q := strings.ToLower(m.picker.query)
-	var out []string
+	words := strings.Fields(strings.ToLower(m.picker.query))
+	out := make([]string, 0, len(m.picker.Models))
 	for _, id := range m.picker.Models {
-		if q == "" || strings.Contains(strings.ToLower(id), q) {
+		if m.picker.onlyFree && !config.FreeModel(m.prov, id) {
+			continue
+		}
+		low := strings.ToLower(id)
+		hit := true
+		for _, w := range words {
+			if !strings.Contains(low, w) {
+				hit = false
+				break
+			}
+		}
+		if hit {
 			out = append(out, id)
 		}
 	}
@@ -3086,6 +4690,14 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 // nowhere to go.
 func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 	p := m.prov
+	// The endpoint-reported window belongs to the model it was measured for. A
+	// different id may run at a different cap, so the number is not usable for
+	// the picked model until the endpoint says something about THIS one — which
+	// the goroutine below asks for and this synchronous half may not (it would
+	// freeze the loop on an HTTP call).
+	if p.Model != id {
+		p.Context = 0
+	}
 	p.Model = id
 	// Retain this session's ordering: active host first, the one that just
 	// failed last. The pool member being edited is the one currently answering.
@@ -3103,22 +4715,44 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		pool = append([]config.Provider{p}, pool...)
 	}
 	svc, ts := m.svc, m.activeTools()
+	// The window is read before the goroutine starts: it is a pure function of
+	// the provider, and doing it inside would mean reading m.prov on another
+	// thread while the loop is free to change it. Compaction is built from the
+	// exact figure, which is zero for an unknown window and therefore disables
+	// it rather than guessing a threshold.
+	exactWindow := config.WindowFor(p)
 	return func() tea.Msg {
 		ctx := context.Background()
 		a, err := dmagent.BuildPooledAgent(ctx, pool, ts, m.switchNotifier(), m.retryNotifier(), m.mode.agentMode(), m.mcpToolsets...)
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
+		// The model just picked may be served with a different cap than the one
+		// detection measured. Ask the endpoint — the one that enforces the limit
+		// is the one that knows it — and rebuild both the threshold and the
+		// message around the fresher figure. Best-effort: a host that will not
+		// say keeps the window already settled above.
+		if ctx := config.ModelContext(p.BaseURL, p.APIKey, id); ctx > 0 {
+			p.Context = ctx
+			exactWindow = ctx
+		}
+		// Built through the same helper as the first runner, so a /model switch
+		// cannot land a session whose compaction settings differ from the ones
+		// it started with: a runner rebuilt without them would silently stop
+		// compacting at exactly the moment the user switched away from a small
+		// model, where it mattered most.
+		comp := (&uiModel{exactWindow: exactWindow}).compactionConfig()
 		r, err := runner.New(runner.Config{
 			AppName:           "dmcode",
 			Agent:             a,
 			SessionService:    svc,
 			AutoCreateSession: true,
+			Compaction:        comp,
 		})
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
-		return modelSwitchedMsg{name: id, runner: r, pool: pool}
+		return modelSwitchedMsg{name: id, runner: r, pool: pool, prov: p}
 	}
 }
 
@@ -3174,21 +4808,46 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	m.cancelTurn = cancel
 	m.turnCount++
+	// A new journal group for this turn's file changes: the tools record every
+	// write as it happens, and a rewind takes the whole group back. The mark is
+	// laid on the loop, not in the goroutine below, so a second prompt cannot
+	// race the first one into the same group.
+	dmtools.BeginTurn()
+	// Stamped here, on the loop, rather than inside the command: the send
+	// happens the moment the key is handled, and a counter started by the
+	// goroutine would leave a gap between the prompt appearing on screen and
+	// the clock starting.
+	m.turnStart = time.Now()
+	m.shownSecond = 0
 	m.statusText = i18n.T("generating a reply…")
 	return func() tea.Msg {
 		userMsg := userContent(text, imgs)
-		// The accumulator is per LLM round, and a round ends at every
-		// finalised response — see turnText.
+		// tt accumulates one round's text; tm does the same job for the
+		// numbers, and is reported back in the turnDoneMsg rather than sent as
+		// a message of its own — the UI needs it exactly once, when the turn
+		// ends, and a stream of usage messages would only produce a row of
+		// numbers the user watches change.
 		var tt turnText
+		var tm turnTiming
+		first := true
 		for ev, err := range r.Run(turnCtx, userID, sessionID, userMsg, adkagent.RunConfig{
 			StreamingMode: adkagent.StreamingModeSSE,
 		}) {
 			if err != nil {
-				return turnDoneMsg{err}
+				tm.Elapsed = time.Since(m.turnStart)
+				return turnDoneMsg{err: err, timing: tm}
 			}
 			if ev.LLMResponse.Content == nil {
 				continue
 			}
+			// Every model response is one round trip, whether or not it
+			// carries text — a turn that is nothing but tool calls still cost
+			// the request, and counting only the replies would report a
+			// tool loop as a single fast call.
+			tm.Calls++
+			// The usage block and the output limit are both read here, by the
+			// turn's own tally: two fields read in two places drift apart.
+			tm.observe(ev.LLMResponse)
 			// The text of one event is dispatched as a unit, before the tool
 			// parts it shares the event with: the accumulator has to be reset
 			// once per event, and a finalised response carrying both text and
@@ -3205,20 +4864,30 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 					parts = append(parts, toolPart{resp: part.FunctionResponse})
 				}
 			}
+			// The first token is the first text that reaches the user, not the
+			// first event: a turn whose opening move is a tool call has already
+			// been answered by the time its prose arrives, and timing that
+			// prose from the send would fold the tool's own duration into the
+			// number meant to measure the endpoint.
+			if said.Len() > 0 && first {
+				first = false
+				tm.FirstToken = time.Since(m.turnStart)
+			}
 			if s := tt.add(said.String(), ev.LLMResponse.Partial); s.text != "" {
 				p.Send(deltaMsg(s))
 			}
 			for _, tp := range parts {
 				switch {
 				case tp.call != nil:
-					args, _ := json.Marshal(tp.call.Args)
-					p.Send(toolCallMsg{name: tp.call.Name, args: truncate(string(args), 160)})
+					p.Send(toolCallMsg{name: tp.call.Name, args: toolArgs(tp.call.Args)})
 				case tp.resp != nil:
-					p.Send(toolResMsg{name: tp.resp.Name, output: renderToolResponse(tp.resp)})
+					summary, diff := renderToolResponse(tp.resp)
+					p.Send(toolResMsg{name: tp.resp.Name, output: summary, diff: diff})
 				}
 			}
 		}
-		return turnDoneMsg{nil}
+		tm.Elapsed = time.Since(m.turnStart)
+		return turnDoneMsg{timing: tm}
 	}
 }
 
@@ -3406,12 +5075,41 @@ func highlightCells(row string, from, to int) string {
 func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 
 // renderToolResponse renders a tool result for the transcript.
-func renderToolResponse(fr *genai.FunctionResponse) string {
-	b, err := json.Marshal(fr.Response)
-	if err != nil {
-		return fmt.Sprint(fr.Response)
+// renderToolResponse renders a tool result for the transcript. A write that
+// came with a diff (write_file, edit_file) has that diff pulled out of the
+// summary JSON: the transcript draws it coloured under the result, and the
+// JSON line stays a one-liner instead of an escaped block.
+// toolLine is the transcript's line for a tool the model asked for: the name and
+// its arguments.
+//
+// toolArgs is its other half, so a restored session prints the same line a live
+// turn did. Two callers that each built the line themselves would be a second
+// answer to "what does a tool call look like" — free to drift, and with the
+// transcript of a resumed session quietly showing a different shape from the one
+// the user remembers.
+func toolLine(name, args string) string { return name + "(" + args + ")" }
+
+// toolArgs is a call's arguments as the transcript shows them: the marshalled
+// map, shortened so a long path cannot take the row.
+func toolArgs(args map[string]any) string {
+	b, _ := json.Marshal(args)
+	return truncate(string(b), 160)
+}
+
+func renderToolResponse(fr *genai.FunctionResponse) (summary, diff string) {
+	resp := fr.Response
+	if m := resp; m != nil {
+		if d, ok := m["diff"].(string); ok && d != "" {
+			diff = d
+			resp = maps.Clone(m)
+			delete(resp, "diff")
+		}
 	}
-	return truncate(string(b), 600)
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return fmt.Sprint(resp), diff
+	}
+	return truncate(string(b), 600), diff
 }
 
 // truncate cuts s to at most n terminal cells. Counting cells instead of bytes
@@ -3436,49 +5134,114 @@ func truncate(s string, n int) string {
 // the left margin is applied after everything else, adding a column but no
 // row. So the body is wrapped and measured on its own, trimmed to the budget,
 // and only then framed.
+// proxyTag is the sidebar's short name for a proxy in effect: the type, the host
+// and the port — "socks5 vpn.example.com:21001".
+//
+// Two things are dropped from the address it is built from. The login goes
+// entirely rather than being masked, because the panel is 31 columns and
+// "socks5://dedo:••••@vpn.example.com:21001" does not fit: the host falls off the
+// end and the row ends up naming a scheme and a login with no host between them.
+// The row's job is to say which proxy this is, and the full address is one /proxy
+// away — that one masks.
+//
+// "://" goes too, for the same reason: it costs three cells and separates two
+// things the narrow row already puts side by side. The type stays as a word in
+// front, because telling an http proxy from a socks5 one at a glance is what the
+// row is for — that difference decides whether a connection problem is a DNS
+// question or a port one.
+func proxyTag(addr string) string {
+	s := addr
+	if i := strings.Index(s, "://"); i >= 0 {
+		if at := strings.LastIndex(s, "@"); at > i {
+			// The login, if any, is dropped rather than masked.
+			s = s[:i] + " " + s[at+1:]
+		} else {
+			s = s[:i] + " " + s[i+3:]
+		}
+	}
+	return s
+}
+
 func (m *uiModel) sidebarView(height int) string {
 	const (
 		sbPad   = 1 // horizontal padding
 		sbEdge  = 1 // one vertical border per side
 		sbInner = sidebarBoxWidth - 2*sbPad - 2*sbEdge
-		// maxToolRows caps the tool list's share of the panel. MCP can double
-		// the count, and a list that takes the panel over leaves the plan and
-		// the hotkeys below it trimmed away — the cap is what keeps the order
-		// of sections meaning anything on a short terminal.
-		maxToolRows = 12
 	)
 
-	// flow writes a wrapped multi-row entry: the first row starts with its
-	// marker, and every continuation row lines up under the first name rather
-	// than under the marker's left edge — a list that resumes one column to
-	// the left of where it started reads as broken, which is what the single
-	// space used to do.
-	flow := func(style lipgloss.Style, marker, text string) []string {
-		indent := strings.Repeat(" ", ansi.StringWidth(marker))
-		var out []string
-		for _, r := range wrapIndent(text, sbInner, marker, indent) {
-			out = append(out, style.Render(r))
-		}
-		return out
-	}
-
-	// build renders the whole body. hotkeys is the one collapsible part: the
-	// keys are listed by /help, so they are the first thing to go when the
-	// terminal is too short for everything.
-	build := func(hotkeys bool) string {
+	// build renders the whole body, and with it what each row stands for —
+	// the sidebar's answer to "which file is the row under the pointer", the
+	// same question rowRefs answers for the transcript. The index is filled by
+	// the writers below rather than derived from the drawn rows, because by the
+	// time a click arrives a row is a styled, possibly-wrapped string and the
+	// path it named survives only as characters in it.
+	//
+	// It is returned beside the body rather than kept in a field, because a field
+	// would survive the next build and describe a body that is no longer on
+	// screen — the same file at the wrong row, which is the failure an index is
+	// supposed to prevent.
+	build := func() (string, []codeRef) {
 		var b strings.Builder
+		var refs []codeRef
+		// marked is the length of refs as of the last separator. A separator is
+		// only worth a row if the section above it printed something, and that is
+		// what this answers.
+		marked := 0
+		// Every row records a ref, including the ones that name nothing: the
+		// index is positional, so a skipped row would shift every ref below it
+		// by one and a click would open the wrong file. A zero ref is what
+		// says "this row is not a jump target" — the same rule the transcript's
+		// own index follows.
 		row := func(style lipgloss.Style, text string) {
 			b.WriteString(style.Render(text) + "\n")
+			refs = append(refs, codeRef{})
 		}
-		// value writes an indented entry, wrapping it under its own marker so a
-		// long model or tool name stays readable instead of being cut mid-word. The
-		// text is cut to the room the marker leaves, so the ellipsis lands on the
-		// last row instead of being stranded on a continuation of its own.
-		value := func(style lipgloss.Style, marker, text string) {
+		// blank is a section separator, and it is a row like any other: it takes
+		// up a line on the panel, so the index has to have an entry for it or
+		// every ref below it would sit one row too high and a click would open
+		// the file above the one the user pointed at. This was the one row writer
+		// that did not go through row(), and it is exactly the kind of thing
+		// that reads correctly and is wrong — hence blank() rather than another
+		// bare WriteString.
+		//
+		// It is also the one writer that may write nothing at all. A separator
+		// between a section that drew rows and one that drew none is a blank line
+		// for nothing, and a panel with five of those is a panel whose sections
+		// are floating apart rather than a panel that is readable. The hotkeys
+		// used to hide this — they filled the bottom of the panel, so nobody was
+		// looking at the gaps above them — which is the usual way a layout
+		// survives long past the thing that was covering for it.
+		blank := func() {
+			if len(refs) == marked {
+				return
+			}
+			b.WriteString("\n")
+			refs = append(refs, codeRef{})
+			marked = len(refs)
+		}
+		// valueRef writes an indented entry and records what its rows stand for,
+		// appended to sideRefs in step with them. Wrapping is under the entry's own
+		// marker so a long name stays readable instead of being cut mid-word, and
+		// the text is cut to the room the marker leaves so the ellipsis lands on
+		// the last row instead of being stranded on a continuation of its own.
+		//
+		// The ref is written for every row the entry produces, including a wrapped
+		// continuation: they are the same file, and the index is positional, so a
+		// row left out would shift everything below it by one.
+		valueRef := func(style lipgloss.Style, marker, text string, ref codeRef) {
 			indent := strings.Repeat(" ", ansi.StringWidth(marker))
 			for _, r := range wrapIndent(truncate(text, sbInner-ansi.StringWidth(marker)), sbInner, marker, indent) {
 				b.WriteString(style.Render(r) + "\n")
+				refs = append(refs, ref)
 			}
+		}
+		// value is valueRef for the rows that name no file — a model, a branch, a
+		// plan step. It is kept as its own function so those call sites cannot
+		// pass a ref by accident, and so the distinction between "a row that
+		// stands for nothing" and "a row that was forgotten" stays visible in the
+		// call.
+		value := func(style lipgloss.Style, marker, text string) {
+			valueRef(style, marker, text, codeRef{})
 		}
 
 		// The art leads, at half the size it wears at startup: the same
@@ -3499,90 +5262,177 @@ func (m *uiModel) sidebarView(height int) string {
 		}
 		v = truncate(v, sbInner)
 		row(styleVersion, strings.Repeat(" ", sbInner-ansi.StringWidth(v))+v)
-		b.WriteString("\n")
+		blank()
 
 		row(styleSidebarLabel, i18n.T("MODEL"))
 		value(styleSidebarValue, " ", m.prov.Model)
 		if m.prov.Label != "" {
 			row(styleHint, truncate("via "+m.prov.Label, sbInner))
 		}
-		b.WriteString("\n")
+
+		// The proxy is its own section, like MODEL and FOLDER, rather than another
+		// line under MODEL. The word has to be on screen: "socks5
+		// vpn.example.com:21001" on its own is a string, and the reader has no way
+		// to know it is a proxy rather than a provider or a leftover fragment —
+		// which is the whole reason to show it at all. It could not simply be
+		// prefixed to the address either: the panel is 31 columns, so "proxy " in
+		// front of it pushes the port off the end, and the row loses the half a
+		// reader came for.
+		//
+		// Read once: two calls could straddle a /proxy change and print an address
+		// from one setting next to a bypass list from the next.
+		//
+		// The section exists only when a proxy is set. "PROXY: none" on every
+		// direct session would spend a heading and a row proving that nothing is
+		// wrong with the connection.
+		if s := config.CurrentProxy(); s.Active {
+			// The separator goes before the section rather than after MODEL, so
+			// that a session with no proxy gets one blank line between its
+			// sections and a session with one gets them both. Writing it
+			// unconditionally on either side leaves a doubled blank in the case
+			// that is on screen far more often.
+			blank()
+			tag := proxyTag(s.Effective())
+			// The type rides in the heading, which has the room for it, leaving the
+			// value row the full width for a host and a port. It is not decoration:
+			// telling an http proxy from a socks5 one at a glance is what decides
+			// whether a connection problem is a DNS question or a port one — and in
+			// the value row that word is the first thing a left-trim would eat.
+			kind := ""
+			if i := strings.IndexByte(tag, ' '); i > 0 {
+				kind, tag = tag[:i], tag[i+1:]
+			}
+			row(styleSidebarLabel, truncate(i18n.T("PROXY")+" "+kind, sbInner))
+			// Trimmed from the left, like a path and for the same reason: the tail
+			// is the part that identifies a proxy, and cutting the right would leave
+			// "vpn.example.com:…" — naming the host and hiding the port.
+			row(styleHint, trimLeft(" "+tag, sbInner))
+			// The bypass list only when it has entries: it says nothing about the
+			// proxy above it, and an empty one would print a label over an absence.
+			//
+			// Trimmed from the right, unlike the address above it. A list is read by
+			// its beginning — which hosts are exempt — and the entries that fall off
+			// the end are the ones a user can most afford not to see. Truncating
+			// from the left would leave "…pass: localhost,10.0.0.0/8", having spent
+			// the cells on hiding the word "bypass".
+			if s.NoProxy != "" {
+				row(styleHint, truncate(" "+i18n.T("bypass: ")+s.NoProxy, sbInner))
+			}
+		}
+		// And one after it, unconditionally, so turning a proxy on adds its section
+		// without shifting every section below it down a row — the panel would then
+		// reflow under a user who is reading it.
+		blank()
 
 		row(styleSidebarLabel, i18n.T("SESSION"))
 		row(styleHint, " "+truncate(m.sessionID, sbInner-1))
 		row(styleHint, fmt.Sprintf(i18n.T(" turns: %d"), m.turnCount))
 		row(styleHint, fmt.Sprintf(i18n.T(" tools: %d"), m.toolCallCount))
-		// What the agent actually changed. The counts come from the tools, which are
-		// the only place that knows a file's before and after, so this is the real
-		// diff of the session rather than a sum of the write calls that produced it.
-		// It stays hidden until something has changed: a column of zeroes on a fresh
-		// session is noise, and its absence is the information.
-		if cs := dmtools.Changes(); cs.Files > 0 {
-			row(styleHint, truncate(fmt.Sprintf(i18n.T(" files: %d"), cs.Files), sbInner-1))
-			row(styleHint, " "+styleAdd.Render(fmt.Sprintf("+%d ", cs.Added))+styleDel.Render(fmt.Sprintf("-%d", cs.Removed)))
+		// What the whole session has cost, next to the counts it produced. It is
+		// the one row that answers "is this session still worth continuing",
+		// and it is here rather than in the transcript because it changes on
+		// every turn and a line per turn in the chat would be noise.
+		if m.total.Elapsed > 0 {
+			row(styleHint, fmt.Sprintf(i18n.T(" time: %s (%s %s)"),
+				formatWait(m.total.Elapsed), i18n.T("average"), formatWait(m.total.Average(m.total.Turns))))
 		}
-		b.WriteString("\n")
+		blank()
+
+		// The context meter sits with the session counters, because it answers
+		// the same question from the other side: not "how much has happened"
+		// but "how much of the window that is". It appears only once the
+		// endpoint has reported a prompt size — before that there is nothing
+		// to draw, and a bar at zero on a session that has not run yet reads
+		// as a measurement rather than as an absence.
+		if lines := m.contextLines(); len(lines) > 0 {
+			row(styleSidebarLabel, i18n.T("CONTEXT"))
+			for _, l := range lines {
+				row(styleHint, l)
+			}
+			// Compaction is invisible while it works: the model answers exactly
+			// as before, only the history behind it is shorter. Saying so once
+			// is what turns "the agent forgot that" into a thing the user was
+			// told about.
+			if m.compacted {
+				row(styleHint, " "+truncate(i18n.T("compressed — older turns summarized"), sbInner-1))
+			}
+		}
+		blank()
 
 		row(styleSidebarLabel, i18n.T("FOLDER"))
 		// The full path, trimmed from the left: a Windows path is far wider than the
 		// panel, and the tail is the part that identifies the project.
 		value(styleSidebarValue, " ", shortenPath(m.workDir, sbInner-1))
-		b.WriteString("\n")
+		blank()
+
+		// GIT goes with the folder rather than with the session counters: both name
+		// the place the agent is working, and a repository is a property of a
+		// directory, not of how long the conversation has been running.
+		m.gitSidebar(sbInner, row, value)
+		blank()
 
 		if m.lastTool != "" {
 			row(styleSidebarLabel, i18n.T("LAST TOOL"))
 			value(styleTool, " ⏺ ", m.lastTool)
-			b.WriteString("\n")
+			blank()
 		}
 
-		row(styleSidebarLabel, i18n.T("TOOLS"))
-		rows := flow(styleHint, " ", strings.Join(m.activeToolNames(), ", "))
-		if len(rows) > maxToolRows {
-			rows = append(rows[:maxToolRows], " …")
-		}
-		for _, r := range rows {
-			b.WriteString(r + "\n")
-		}
-		b.WriteString("\n")
+		// What the agent actually changed, one file per row. It used to be a count
+		// under SESSION and a list of the agent's instrument names under TOOLS; the
+		// list is what a user reads to find out what happened, and the count could
+		// only tell them that something did.
+		m.changesSidebar(sbInner, row, valueRef)
+		blank()
 
-		// The plan sits between the tools and the hotkeys: it is state the turn is
-		// producing, where the tool list is fixed and the hotkeys never change.
+		m.mcpSidebar(sbInner, row)
+		blank()
+
+		// The plan is the last section, and the one thing here that is state the
+		// turn is producing rather than a record of what already is — which is why
+		// it is what a short terminal is most likely to lose, and why nothing below
+		// it has been waiting to be dropped first.
 		m.planSidebar(row, value)
-		b.WriteString("\n")
-
-		if hotkeys {
-			row(styleSidebarLabel, i18n.T("HOTKEYS"))
-			row(styleHint, i18n.T(" ctrl+p  commands"))
-			row(styleHint, i18n.T(" ctrl+b  hide panel"))
-			row(styleHint, i18n.T(" ctrl+y  copy reply"))
-			row(styleHint, i18n.T(" ctrl+z  undo last message"))
-			row(styleHint, i18n.T(" tab     plan/act"))
-			row(styleHint, i18n.T("shift+tab yolo"))
-			row(styleHint, i18n.T(" esc     stop turn"))
-			row(styleHint, i18n.T(" pgup/dn scroll"))
-		}
 
 		// Measuring at sbInner wraps and pads every row to exactly the width the
 		// framed box will have available, so the split below counts real rows.
-		return lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+		//
+		// The index is cut to the rendered body's own length. TrimRight above
+		// drops the trailing newlines, and those trailing blanks are rows the
+		// writers counted, so an index longer than the body would have the panel
+		// answering about rows that are not on screen.
+		rendered := lipgloss.NewStyle().Width(sbInner).Render(strings.TrimRight(b.String(), "\n"))
+		return rendered, refs[:min(len(refs), strings.Count(rendered, "\n")+1)]
 	}
 
 	if height <= 0 {
-		return styleSidebar.Width(sidebarBoxWidth).Render(build(true))
+		body, refs := build()
+		m.sideRefs = refs
+		return styleSidebar.Width(sidebarBoxWidth).Render(body)
 	}
 
+	// There is nothing to drop and then trim any more. The hotkeys were the one
+	// collapsible part — the keys are listed by /help, so a copy of them on the
+	// panel was the least useful of its rows — and with them gone the panel either
+	// fits or is cut, in which case the cut is marked and nothing pretends
+	// otherwise.
 	budget := max(height-2*sbEdge, 1)
-	lines := strings.Split(build(true), "\n")
+	body, refs := build()
+	lines := strings.Split(body, "\n")
+	trimmed := false
 	if len(lines) > budget {
-		// The full body does not fit. The hotkeys go first — they are the most
-		// replaceable rows on the panel — and only what still overflows after
-		// that is trimmed.
-		lines = strings.Split(build(false), "\n")
-		if len(lines) > budget {
-			lines = lines[:budget]
-			// Mark the cut so a trimmed panel is not read as a complete one.
-			lines[budget-1] = styleHint.Render("…")
-		}
+		lines = lines[:budget]
+		trimmed = true
+		// Mark the cut so a trimmed panel is not read as a complete one.
+		lines[budget-1] = styleHint.Render("…")
+	}
+	// The index describes the rows that are on screen, not the rows that were
+	// built. A body cut to the budget lost its tail, so the index is cut to match
+	// — and the row the ellipsis replaced is a marker rather than a file, so that
+	// entry is cleared too. Without this a click on the ellipsis opens whichever
+	// file the row before it named.
+	m.sideRefs = refs[:min(len(refs), len(lines))]
+	if trimmed && len(m.sideRefs) > 0 {
+		m.sideRefs[len(m.sideRefs)-1] = codeRef{}
 	}
 
 	return styleSidebar.Width(sidebarBoxWidth).Height(height).Render(strings.Join(lines, "\n"))
@@ -3593,10 +5443,24 @@ func (m *uiModel) sidebarView(height int) string {
 // travels with it — the bar no longer carries the note while a turn runs, so
 // the motion cue goes where the text went.
 func (m *uiModel) progressNote() string {
-	if m.statusText != "" {
-		return m.spin.View() + " " + m.statusText
+	// A model loading is not a turn and has no status text of its own, but it is
+	// the one thing happening, and the same note and spinner carry it — a second
+	// progress row would be two spinners answering one question.
+	if load := m.ggufLoadNote(); load != "" {
+		return m.spin.View() + " " + load
 	}
-	return m.spin.View() + " " + i18n.T("running…")
+	note := m.statusText
+	if note == "" {
+		note = i18n.T("running…")
+	}
+	// The elapsed clock rides on the note the turn is already showing, rather
+	// than on a row of its own: a second line for a counter would push the
+	// conversation down the panel every second, and the note is the one thing
+	// the user is already looking at while waiting.
+	if el := m.elapsedNote(); el != "" {
+		note += "  " + el
+	}
+	return m.spin.View() + " " + note
 }
 
 // statusBarView renders the single-row footer.
@@ -3617,16 +5481,21 @@ func (m *uiModel) progressNote() string {
 // stateBadge is the one piece of status the bar always carries: what the agent
 // is doing right now. It is a function so the width arithmetic in the bar and in
 // its tests both measure the rendered string rather than a copy of it — an emoji
-// in "⏳ WORKING" is two cells wide, and guessing one cell short is how a row ends
+// in "WORKING" is seven cells wide, and guessing one cell short is how a row ends
 // up a column wider than the terminal and wraps.
 func (m *uiModel) stateBadge() string {
 	switch {
 	case m.busy:
-		return styleBadgeBusy.Render(i18n.T("⏳ WORKING"))
+		return styleBadgeBusy.Render(i18n.T("WORKING"))
+	case m.ggufLoad != nil:
+		// Loading is not WORKING: WORKING means the agent has your message, and
+		// a user who reads it that way waits for a reply that was never sent. This
+		// one says the session is fine and the model is not here yet.
+		return styleBadgeBusy.Render(i18n.T("LOADING"))
 	case m.statusText == i18n.T("turn stopped"), m.statusText == i18n.T("stopped"):
-		return styleBadgeStop.Render(i18n.T("⏹ STOPPED"))
+		return styleBadgeStop.Render(i18n.T("STOPPED"))
 	default:
-		return styleBadgeReady.Render(i18n.T("● READY"))
+		return styleBadgeReady.Render(i18n.T("READY"))
 	}
 }
 
@@ -3847,56 +5716,153 @@ func (m *uiModel) floatingWidth() int {
 	return max(min(m.width, 68), 24)
 }
 
-// floatingPanel frames a palette-style box: a two-row header, a list body and
-// the border. The body is trimmed by rendered row rather than by entry, because
-// one long model id can take two rows and a count taken before wrapping is not
-// the count that reaches the screen. Trimming stops at the selected entry: a
-// panel scrolled away from its cursor is worse than one listing fewer models.
-func (m *uiModel) floatingPanel(title, query string, entries [][]string, sel int) string {
-	inner := m.floatingWidth() - panelBorder
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+// floatPage is how far a page key moves inside a floating list: one screenful
+// of entries. It is derived from the terminal because a fixed page is a step
+// that jumps past the end of a short box and crawls through a tall one, and it
+// is capped so one press cannot skip past a model the user was reaching for.
+func (m *uiModel) floatPage() int {
+	return max(min(m.height-panelBorder-6, 12), 1)
+}
 
+// listView is where a list is: the highlighted entry and the first entry on
+// screen. top is state rather than something each frame re-derives, because a
+// box exists only between two redraws — a window computed from the selection
+// alone puts the cursor at the top of the body for every list longer than the
+// terminal, and a wheel or a page key then has nothing to accumulate into.
+type listView struct {
+	sel int
+	top int
+}
+
+// Every list drawn through here marks the row under the cursor with ▸ and the
+// item currently in use with *, the same two glyphs in every overlay: one
+// selection reading as two depending on which box is open is something a user
+// has to learn twice.
+//
+// floatingPanel frames a palette-style box with the header every overlay
+// shares: the title, the filter line and a blank spacer.
+func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *listView) string {
+	inner := m.floatingWidth() - panelBorder
 	head := []string{
 		styleHeader.Render(" "+title+" ") + styleHint.Render(i18n.T("esc — close")),
 		styleHint.Render(truncate(" › "+query, inner)),
 		"",
 	}
+	return m.floatingList(head, entries, lv)
+}
 
-	// One row is held back for the "still hidden" marker, so revealing it can
-	// never push the bottom border off the screen.
-	room := max(m.height-panelBorder-len(head)-1, 1)
-	total := len(entries)
-	for len(entries) > 0 && len(entries)-1 != sel && rowCount(entries) > room {
-		entries = entries[:len(entries)-1]
+// floatingList is floatingPanel with a header the caller wrote. A list with more
+// to say than a title and a filter line — which keys move it, how many of the
+// endpoint's models survived the filter — says it in rows above the body rather
+// than by growing the title into a paragraph that wraps off the narrow box.
+//
+// The body is windowed by rendered row rather than by entry, because one long
+// model id can take two rows and a count taken before wrapping is not the count
+// that reaches the screen.
+func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) string {
+	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+
+	// The head is measured rather than counted. The title shares its row with
+	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
+	// counted as three then leaves the panel one row taller than the screen it
+	// has to fit inside, and the bottom border falls off the bottom.
+	headRows := lipgloss.Height(stylePanel.Width(m.floatingWidth()).Render(strings.Join(head, "\n"))) - panelBorder
+
+	// Two rows are held back, one for each way a list can still be scrolled, so
+	// revealing a marker can never push the bottom border off the screen. A row
+	// the finished window does not need is given back below, because a list of
+	// six rows should not lose one of them to a marker it never draws.
+	avail := max(m.height-panelBorder-headRows, 1)
+	room := max(avail-2, 1)
+	start, end := panelWindow(entries, lv.sel, lv.top, room)
+	if (start == 0 || end >= len(entries)) && room < avail {
+		room = avail - 1
+		start, end = panelWindow(entries, lv.sel, lv.top, room)
 	}
+	lv.top = start
 
-	rows := make([]string, 0, len(head)+room+1)
+	rows := make([]string, 0, len(head)+room+2)
 	rows = append(rows, head...)
-	for i, group := range entries {
-		for _, r := range group {
-			if i == sel {
+	if start > 0 {
+		rows = append(rows, styleHint.Render(i18n.T("   ↑ more ")+fmt.Sprint(start)))
+	}
+	left := room
+	for i := start; i < end && left > 0; i++ {
+		for _, r := range entries[i] {
+			if left == 0 {
+				break
+			}
+			if i == lv.sel {
 				r = styleSel.Render(r)
 			}
 			rows = append(rows, r)
+			left--
 		}
 	}
 	if len(entries) == 0 {
 		rows = append(rows, styleHint.Render(i18n.T("   nothing found")))
 	}
-	if hidden := total - len(entries); hidden > 0 {
-		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(hidden)))
+	if end < len(entries) {
+		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(len(entries)-end)))
 	}
 
 	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
 }
 
-// rowCount counts the rendered rows a list of entry groups occupies.
-func rowCount(entries [][]string) int {
-	n := 0
-	for _, e := range entries {
-		n += len(e)
+// panelWindow picks the entries a body of `room` rows can show.
+//
+// Two rules, and the second is the one that was broken. The highlighted entry is
+// always among them; and the list never grows to reach it. Trimming from the
+// tail and stopping once the cursor was included did satisfy the first rule —
+// by making the panel as tall as the distance to the cursor, at which point
+// lipgloss.Place centres the overflow and the row under the cursor and the
+// title of the box both end up off the screen. A list that showed nothing
+// however far the user scrolled is what that looks like from the keyboard.
+//
+// An entry taller than the whole room is still shown, from its first row: it is
+// the one carrying the cursor, and a row the user cannot scroll to is a dead
+// end. The caller clips what does not fit.
+func panelWindow(entries [][]string, sel, top, room int) (start, end int) {
+	if len(entries) == 0 {
+		return 0, 0
 	}
-	return n
+	if room < 1 {
+		room = 1
+	}
+	sel = min(max(sel, 0), len(entries)-1)
+	start = min(max(top, 0), sel)
+
+	// fill is the window that begins at `from`: as many whole entries as the
+	// room holds, or that one entry alone when even it is taller than the room.
+	fill := func(from int) (end, rows int) {
+		end, rows = from, 0
+		for end < len(entries) && rows+len(entries[end]) <= room {
+			rows += len(entries[end])
+			end++
+		}
+		if end == from {
+			end, rows = from+1, len(entries[from])
+		}
+		return end, rows
+	}
+	end, rows := fill(start)
+
+	// The cursor is below the window, so slide down one entry at a time until
+	// it is on screen: the smallest move that reveals it, which is what a
+	// single Down should read as. Jumping straight to the cursor instead would
+	// make every keypress past the fold move the whole body.
+	for sel >= end && start < sel {
+		start++
+		rows -= len(entries[start-1])
+		for end < len(entries) && rows+len(entries[end]) <= room {
+			rows += len(entries[end])
+			end++
+		}
+		if end == start {
+			end, rows = start+1, len(entries[start])
+		}
+	}
+	return start, end
 }
 
 func (m *uiModel) paletteBox() string {
@@ -3904,36 +5870,86 @@ func (m *uiModel) paletteBox() string {
 	var entries [][]string
 	for i, c := range m.filteredCommands() {
 		marker := "   "
-		if i == m.palette.selected {
+		if i == m.palette.list.sel {
 			marker = " ▸ "
 		}
 		entries = append(entries, wrapIndent(c.name+" — "+c.desc, inner, marker, "     "))
 	}
-	return m.floatingPanel(i18n.T("⌘ commands"), m.palette.query, entries, m.palette.selected)
+	return m.floatingPanel(i18n.T("commands"), m.palette.query, entries, &m.palette.list)
 }
 
+// modelPickerBox renders /models: the endpoint's catalogue, narrowed.
+//
+// The header is built here rather than handed to floatingPanel because this list
+// has three things to say that the shared one-row title cannot: which keys move
+// it, how much of the catalogue the filter kept, and whether the free filter is
+// on. On a list of three hundred models the count is not a nicety — it is the
+// difference between "the list is short" and "you are looking at the first
+// screen of something enormous".
 func (m *uiModel) modelPickerBox() string {
 	inner := m.floatingWidth() - panelBorder
+	shown := m.filteredModels()
+
+	// The hint is not truncated. The head is measured row by row, so letting it
+	// wrap costs one row on a narrow box and keeps every key on it; cutting it to
+	// fit hid the tail, which is where the newest and least-guessable key —
+	// ctrl+f — lives, on exactly the boxes the user needs it most.
+	hint := i18n.T("esc — close · ctrl+f — free only · ↑↓/pgup/pgdn — scroll")
+	free := 0
+	for _, id := range m.picker.Models {
+		if config.FreeModel(m.prov, id) {
+			free++
+		}
+	}
+	// The filter line carries its own invitation. The keys above say how to move
+	// and how to reach the free half; nothing said what typing does, and a list
+	// of three hundred that silently shrinks is indistinguishable from a list of
+	// three hundred — which is why the filter existed and nobody used it.
+	filterLine := " › " + m.picker.query
+	if m.picker.query == "" {
+		filterLine = " › " + i18n.T("type to filter…")
+	}
+	// The count names the models, not the box, so it takes its own word: the
+	// title's key carries the ⌘ with it, and borrowing it here printed the
+	// title's glyph inside the count.
+	counts := fmt.Sprintf("%d/%d %s · %d %s",
+		len(shown), len(m.picker.Models), i18n.T("models"), free, i18n.T("free"))
+	if m.picker.onlyFree {
+		counts += " · " + i18n.T("free only")
+	}
+	head := []string{
+		styleHeader.Render(" "+i18n.T("⌘ models")+" ") + styleHint.Render(hint),
+		styleHint.Render(truncate(filterLine, inner)),
+		styleHint.Render(counts),
+		"",
+	}
+
 	var entries [][]string
-	for i, id := range m.filteredModels() {
+	for i, id := range shown {
 		// The marker is the first-line indent rather than part of the text, so
 		// the rows stay inside the frame instead of being re-wrapped by it.
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
-		case i == m.picker.selected:
-			marker, style = " ▸ ", lipgloss.NewStyle()
+		case i == m.picker.list.sel:
+			marker = " ▸ "
 		case id == m.prov.Model:
 			marker, style = " ● ", styleTool
+		case config.FreeModel(m.prov, id):
+			// Dimmed, with no marker of its own. A row already carries two
+			// glyphs - the cursor and the model in use - and a third one
+			// standing for "this one costs nothing" is a code to learn rather
+			// than a fact. Weight says it without taking a column.
+			style = styleHint
 		}
 		rows := wrapIndent(id, inner, marker, "     ")
-		if i != m.picker.selected {
+		if i != m.picker.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("⌘ models"), m.picker.query, entries, m.picker.selected)
+	return m.floatingList(head, entries, &m.picker.list)
 }
 
 // maskedKey hides a secret while still showing that something was typed. The
@@ -3956,20 +5972,20 @@ func (m *uiModel) ggufPickBox() string {
 	var entries [][]string
 	for i, e := range m.setup.gguf.entries {
 		marker, style := "   ", lipgloss.NewStyle()
-		if i == m.setup.gguf.selected {
+		if i == m.setup.gguf.list.sel {
 			marker = " ▸ "
 		} else if e.dir {
 			style = styleHint
 		}
 		rows := wrapIndent(e.label, inner, marker, "     ")
-		if i != m.setup.gguf.selected {
+		if i != m.setup.gguf.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("? gguf file — enter opens, esc back"), m.setup.gguf.dir, entries, m.setup.gguf.selected)
+	return m.floatingPanel(i18n.T("? gguf file — enter opens, esc back"), m.setup.gguf.dir, entries, &m.setup.gguf.list)
 }
 
 // setupBox renders the /setup wizard: the provider list, then a key prompt, or
@@ -3990,36 +6006,39 @@ func (m *uiModel) setupBox() string {
 		// stores only the masked form.
 		rows := [][]string{{styleHint.Render(i18n.T("key (input hidden, paste or ctrl+v, then enter):"))},
 			{maskedKey(m.setup.buf, inner) + "█"}}
-		return m.floatingPanel(i18n.T("? provider key"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? provider key"), "", rows, &listView{})
 
 	case setupURL:
 		rows := [][]string{{styleHint.Render(i18n.T("base URL, e.g. http://localhost:1234/v1"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? custom endpoint"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? custom endpoint"), "", rows, &listView{})
 
 	case setupModel:
 		rows := [][]string{{styleHint.Render(i18n.T("model id on this endpoint"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? model"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? model"), "", rows, &listView{})
 
 	case setupGGUF:
 		rows := [][]string{{styleHint.Render(i18n.T("path to the .gguf file — ctrl+o or enter on empty browses the disk"))},
 			{m.setup.buf + "█"}}
-		return m.floatingPanel(i18n.T("? gguf file"), "", rows, 0)
+		return m.floatingPanel(i18n.T("? gguf file"), "", rows, &listView{})
 	}
 
 	opts := config.SetupOptions()
 	var entries [][]string
 	for i, o := range opts {
 		marker, style := "   ", lipgloss.NewStyle()
+		// ▸ for the cursor and * for the provider in use, as everywhere else;
+		// see floatingPanel. "?" stayed out of it because it already prefixes
+		// every wizard prompt's title.
 		switch {
-		case i == m.setup.selected:
-			marker, style = " ? ", styleTool
+		case i == m.setup.list.sel:
+			marker, style = " ▸ ", styleTool
 		case setupLabel(o) == m.prov.Label:
 			marker, style = " * ", styleTool
 		}
 		rows := wrapIndent(o.Label, inner, marker, "     ")
-		if i != m.setup.selected {
+		if i != m.setup.list.sel {
 			for j := range rows {
 				rows[j] = style.Render(rows[j])
 			}
@@ -4027,7 +6046,7 @@ func (m *uiModel) setupBox() string {
 		entries = append(entries, rows)
 	}
 	// * marks the provider already in use, ? the highlighted row.
-	return m.floatingPanel(i18n.T("? provider  (* — current, enter — select, esc — cancel)"), "", entries, m.setup.selected)
+	return m.floatingPanel(i18n.T("? provider  (* — current, enter — select, esc — cancel)"), "", entries, &m.setup.list)
 }
 
 // langLabels names each selectable language in that language itself, so the row
@@ -4089,7 +6108,7 @@ func (m *uiModel) langKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// langBox renders the /lang list: * marks the active language, ? the cursor.
+// langBox renders the /lang list: * marks the active language, ▸ the cursor.
 func (m *uiModel) langBox() string {
 	inner := m.floatingWidth() - panelBorder
 	var entries [][]string
@@ -4097,7 +6116,7 @@ func (m *uiModel) langBox() string {
 		marker, style := "   ", lipgloss.NewStyle()
 		switch {
 		case i == m.lang.selected:
-			marker, style = " ? ", styleTool
+			marker, style = " ▸ ", styleTool
 		case l == i18n.Current():
 			marker, style = " * ", styleTool
 		}
@@ -4109,7 +6128,7 @@ func (m *uiModel) langBox() string {
 		}
 		entries = append(entries, rows)
 	}
-	return m.floatingPanel(i18n.T("? language  (* — current, enter — select, esc — cancel)"), "", entries, m.lang.selected)
+	return m.floatingPanel(i18n.T("? language  (* — current, enter — select, esc — cancel)"), "", entries, &listView{sel: m.lang.selected})
 }
 
 func (m *uiModel) filteredCommands() []command {
@@ -4124,10 +6143,56 @@ func (m *uiModel) filteredCommands() []command {
 }
 
 func (m *uiModel) View() tea.View {
+	// The workspace chrome (tree, git panel, terminal) is the screen once the
+	// editor exists; the main area is its tabs or, in chat mode, the chat.
+	// The editor's own altscreen flag and mouse mode ride on the View it
+	// returns.
+	if m.ed != nil {
+		return m.ed.View()
+	}
 	if m.width == 0 {
 		return tea.NewView(i18n.T("dmcode is starting…"))
 	}
-	if m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.proxy.open || m.sessionsList.open || m.ask.open {
+	v := tea.NewView(m.buildFrame())
+	v.AltScreen = true
+	// All-motion reporting is what a selection needs: a drag only produces
+	// MouseMotionMsg when the terminal is told to report motion, so cell motion
+	// — which was enough for the wheel — never reaches the handler that does the
+	// selecting. The wheel still scrolls; /mouse turns all of it off for anyone
+	// who wants the terminal's own drag-select and paste menu back.
+	if m.mouseEnabled {
+		v.MouseMode = tea.MouseModeAllMotion
+	} else {
+		v.MouseMode = tea.MouseModeNone
+	}
+	return v
+}
+
+// modalUp reports whether one of the stacked boxes owns the whole frame: with
+// any of them open the frame is the box and not the chat, so every row the hit
+// test could name is a row that is not on screen.
+func (m *uiModel) modalUp() bool {
+	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
+		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
+		m.help.open
+}
+
+// chatOverlayUp reports whether anything is drawn over the transcript, so that
+// what is under the pointer is not a transcript row.
+//
+// The command list is one of them even though it is painted over the panel
+// rather than replacing it: the transcript rows are still in the frame, so the
+// hit test would answer with one of them, and it would be the row behind the
+// list the user actually pointed at.
+func (m *uiModel) chatOverlayUp() bool {
+	return m.modalUp() || len(m.suggest) > 0
+}
+
+// buildFrame assembles the chat frame at the model's current width and height:
+// the whole window when the editor has never been opened, the workspace main
+// area in chat mode (chatFrame sets the sizes to the region's then).
+func (m *uiModel) buildFrame() string {
+	if m.modalUp() {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
@@ -4140,12 +6205,14 @@ func (m *uiModel) View() tea.View {
 			box = m.proxyBox()
 		case m.sessionsList.open:
 			box = m.sessionsBox()
+		case m.dirPick.open:
+			box = m.dirPickBox()
 		case m.ask.open:
 			box = m.askBox()
+		case m.help.open:
+			box = m.helpBox()
 		}
-		v := tea.NewView(lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box))
-		v.AltScreen = true
-		return v
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 	}
 
 	// Every row of the frame is exactly m.width wide and together they are
@@ -4187,19 +6254,7 @@ func (m *uiModel) View() tea.View {
 	// and all, not the same text before it was laid out.
 	frame = m.paintSelection(frame)
 	m.frame = frame
-	v := tea.NewView(frame)
-	v.AltScreen = true
-	// All-motion reporting is what a selection needs: a drag only produces
-	// MouseMotionMsg when the terminal is told to report motion, so cell motion
-	// — which was enough for the wheel — never reaches the handler that does the
-	// selecting. The wheel still scrolls; /mouse turns all of it off for anyone
-	// who wants the terminal's own drag-select and paste menu back.
-	if m.mouseEnabled {
-		v.MouseMode = tea.MouseModeAllMotion
-	} else {
-		v.MouseMode = tea.MouseModeNone
-	}
-	return v
+	return frame
 }
 
 // paintSelection draws the current selection in reverse video.
@@ -4269,7 +6324,31 @@ func (m *uiModel) askWait(req ask.Request) time.Duration {
 // and cannot get one, so it cannot send anything itself. A plain
 // func(SubEvent) parameter could only be called by main, which would be the
 // wrong direction.
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool) error {
+// Resume says which saved session a start should open. The zero value opens
+// none, which is what every start without the flag wants.
+//
+// ID is the session to open; empty with Asked set means "the newest one", which
+// is what a bare -s asks for. main settles that before it gets here, because the
+// runner is built around a session id and an id chosen afterwards would point the
+// conversation at the wrong one.
+type Resume struct {
+	Asked bool
+	ID    string
+}
+
+// sessionToOpen is the session this start should open, or "" for a new one.
+//
+// A method so that the decision is testable without a TUI: it is the whole of what
+// -s asks for, and the mistake to guard against is the id arriving after the
+// runner has been built around a different one.
+func (r Resume) sessionToOpen() string {
+	if !r.Asked {
+		return ""
+	}
+	return r.ID
+}
+
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -4280,11 +6359,30 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	m.pool = pool
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets
+	m.mcpStates = mcpStates
 	m.askTimeout = config.AskTimeout()
+	// A local model that is still loading is handed over here rather than waited
+	// for in main: the port and the model's name are already known, so the
+	// session can be built and drawn around them, and Init schedules the wait.
+	// Everything the user can do while it loads is unaffected.
+	if loading != nil {
+		m.beginGGUFLoad(loading, []line{
+			{kindSys, i18n.T("loading the local model in the background — ") + loading.Prov.Model},
+			{kindSys, i18n.T("the interface is ready; a message will send as soon as the model answers")},
+		})
+	}
 	// A server the eager listing could not ask is a real problem the user has
 	// to see: its tools will not exist until it comes up.
 	if len(mcpNotes) > 0 {
 		m.statusText = strings.Join(mcpNotes, "; ")
+	}
+	// Set before the runner exists, so the store registers this id rather than
+	// the fresh one InitialModel minted. A resume that names nothing — no store,
+	// or a store with nothing in it — stays a new session rather than failing a
+	// start over a flag the user typed out of habit.
+	resumed := resume.sessionToOpen()
+	if resumed != "" {
+		m.sessionID = resumed
 	}
 
 	prog := tea.NewProgram(m)
@@ -4301,10 +6399,54 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 		return err
 	}
 	m.runner = r
+	if resumed != "" {
+		// The tail goes up before the first frame. Without it the session opens
+		// on an empty transcript beside a model that remembers everything, which
+		// is the one thing that makes a resume look broken.
+		m.resumedSession()
+	}
 
 	_, err = prog.Run()
+	// The transcript was on the alternate screen and is gone now, so this is the
+	// one moment a line about it reaches the scrollback and stays there. Before
+	// this the program says which session it is in — in the header, the sidebar
+	// and every /sessions row — but all of those vanish with the TUI.
+	if hint := resumeHint(m.sessionID); hint != "" {
+		fmt.Println(hint)
+	}
 	return err
 }
+
+// resumeHint is the line dmcode leaves behind when it exits.
+//
+// A session is a thing on disk that nothing in the TUI can show once the window
+// is closed, and its id is opaque. Printing the exact command is what makes the
+// id usable rather than something to look up in a directory listing — and it is
+// the same command every time, so it can be pasted rather than assembled.
+//
+// It is a string and not a print so that what it says is testable without
+// capturing the process's output.
+func resumeHint(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	return fmt.Sprintf(i18n.T("dmcode: session %s saved — resume it with:  dmcode -s %s"), id, id)
+}
+
+// resumedSession prints what the resumed conversation was, and says which one it
+// is. The session itself needs nothing: the id is the store's own key, so the
+// runner reads that conversation's events on the first turn with no extra step.
+func (m *uiModel) resumedSession() {
+	m.statusText = i18n.T("resumed session: ") + m.sessionID
+	m.summariseSession(m.sessionID)
+}
+
+// newRunner assembles the agent and the session runner for a tool set.
+//
+// The session service is created once and reused across mode switches: keeping
+// it is what preserves the conversation, so flipping to plan and back does not
+// cost the user the context they had built up.
 
 // newRunner assembles the agent and the session runner for a tool set.
 //
@@ -4347,7 +6489,74 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 		Agent:             a,
 		SessionService:    m.svc,
 		AutoCreateSession: true,
+		Compaction:        m.compactionConfig(),
 	})
+}
+
+// applyWindow re-reads the context size for a model and records whether it was
+// a real figure or the display fallback.
+//
+// The window now belongs to the provider, not to the bare model name: an
+// endpoint that reports its own cap in /v1/models (an Ollama num_ctx, a vLLM
+// limit) is answered with that number, which is what the meter and the
+// compaction threshold actually ask — "how much will THIS host accept". Only
+// when the endpoint said nothing does the name-to-tokens table speak.
+//
+// Two numbers fall out of it and they are deliberately kept apart. The meter
+// needs a denominator or it prints a count with nothing to compare against,
+// which was the complaint behind "tokens out of what?". Compaction needs a
+// real one, because a threshold invented from a guess decides when to rewrite
+// the user's conversation — so an unknown window gets compaction off and a
+// meter marked with "~".
+func (m *uiModel) applyWindow(p config.Provider) {
+	display, guess := config.WindowForDisplay(p)
+	m.window = display
+	m.windowGuess = guess
+	// The exact figure, which is zero when neither the endpoint nor the table
+	// knows the model.
+	m.exactWindow = config.WindowFor(p)
+}
+
+// compactionConfig decides when the conversation is summarized instead of
+// running the model out of window.
+//
+// Tail retention only, with no sliding window beside it. The window summarises
+// whole invocations on a fixed interval, which bounds nothing on its own — it
+// divides prompt growth by a constant and then keeps growing — and, worse, it
+// eats the events the tail would have summarised, so with a small interval and
+// a large retention size the bounded strategy sits permanently idle while the
+// user watches the prompt climb. Tail retention needs no such arithmetic: past
+// the threshold it keeps the most recent events raw and summarizes everything
+// before them.
+//
+// The threshold is a fraction of the window rather than a fixed number,
+// because dmcode does not ask the endpoint how big its window is and a guess
+// that is right for a 200k model is catastrophic for an 8k one — it would
+// compact nothing and then fail with a length error. A model this build does
+// not recognise gets compaction switched off rather than given a guess: an
+// invented threshold could compact a conversation that was never near full.
+func (m *uiModel) compactionConfig() *compaction.Config {
+	// The exact size, never the display fallback: a threshold decides when the
+	// user's own conversation gets rewritten, and that is not a decision to
+	// make from an assumed number.
+	if m.exactWindow <= 0 {
+		return nil
+	}
+	// 70% rather than 90%: the summary itself has to fit in what is left, and
+	// the turn that triggered compaction still has to fit its own answer.
+	threshold := m.exactWindow * 7 / 10
+	if threshold < 1000 {
+		return nil
+	}
+	return &compaction.Config{
+		TokenThreshold: threshold,
+		// The raw tail. Large enough to hold the turn in progress and the tool
+		// result it is waiting on — the question being answered is summarised
+		// away otherwise, which is the one failure this setting exists to
+		// prevent — and small enough that the summary is the bulk of the
+		// prompt rather than a decoration on top of it.
+		EventRetentionSize: 8,
+	}
 }
 
 // rebuildRunner re-creates the agent for the current mode and directory, keeping

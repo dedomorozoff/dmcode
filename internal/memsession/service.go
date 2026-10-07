@@ -9,6 +9,7 @@ package memsession
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"maps"
@@ -19,6 +20,7 @@ import (
 
 	"google.golang.org/adk/v2/platform"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/genai"
 )
 
 // userAuthor is the author name ADK stamps on an event carrying something the
@@ -446,11 +448,81 @@ func (s *Service) Summaries() []Summary {
 	return out
 }
 
-// Turn is one exchange: what the user said and what came back.
+// EntryKind is what kind of transcript line one stored entry is.
+type EntryKind int
+
+const (
+	// EntryAgent is prose: something the model said.
+	EntryAgent EntryKind = iota
+	// EntryTool is a tool the model asked for.
+	EntryTool
+	// EntryToolResult is what that tool returned.
+	EntryToolResult
+)
+
+// Entry is one thing that happened inside a turn, in the shape the transcript
+// draws it.
+//
+// The tool entries carry the raw genai parts rather than text this package has
+// already formatted. That is deliberate: the UI has one renderer for a tool line
+// and one for a tool result, and a second set of formatters here would be a
+// second answer to "what does a call look like" — free to drift, and with no test
+// anywhere that would notice.
+type Entry struct {
+	Kind EntryKind
+	// Text is the prose, for EntryAgent.
+	Text string
+	// Call is the tool the model asked for, for EntryTool.
+	Call *genai.FunctionCall
+	// Result is what came back, for EntryToolResult. A result carrying a diff is
+	// drawn as two lines, and deciding that belongs to whoever draws it.
+	Result *genai.FunctionResponse
+}
+
+// Turn is one exchange: what the user said and everything that came back.
 type Turn struct {
-	User   string
-	Agent  string
-	Broken bool // the user spoke and nothing answered — an error, or an Esc
+	User    string
+	Entries []Entry
+	Broken  bool // the user spoke and nothing answered — an error, or an Esc
+}
+
+// Prose is the turn's text without the tool traffic, for a caller that wants the
+// answer and not the working.
+func (t Turn) Prose() string {
+	var parts []string
+	for _, e := range t.Entries {
+		if e.Kind == EntryAgent && e.Text != "" {
+			parts = append(parts, e.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// eventEntries is everything one stored event contributes to the transcript.
+//
+// A model event carries the reply's prose *and* the tool calls it asked for, and
+// the result comes back as its own event; both have to be read, or a resumed
+// session shows the answer with no evidence of the work behind it.
+func eventEntries(ev *session.Event) []Entry {
+	if ev == nil || ev.Content == nil {
+		return nil
+	}
+	var out []Entry
+	for _, p := range ev.Content.Parts {
+		if p == nil {
+			continue
+		}
+		switch {
+		case p.FunctionCall != nil:
+			out = append(out, Entry{Kind: EntryTool, Call: p.FunctionCall})
+		case p.FunctionResponse != nil:
+			out = append(out, Entry{Kind: EntryToolResult, Result: p.FunctionResponse})
+		}
+	}
+	if text := eventText(ev); text != "" {
+		out = append(out, Entry{Kind: EntryAgent, Text: text})
+	}
+	return out
 }
 
 // Transcript is a session's recent conversation in a form the UI can print
@@ -469,6 +541,12 @@ type Transcript struct {
 // the user would read "nothing happened here" while the agent reads the full
 // history. A few lines of context are the difference between a switch that
 // looks like a bug and one that looks like a switch.
+//
+// The tool traffic is part of that context, not decoration on it. It used to be
+// dropped here — the store had every call, every result and every diff a write
+// drew, and this function read only the prose — so a resumed session came back
+// as a conversation with none of the code in it, which reads as the session
+// having lost work it plainly did.
 func (s *Service) TranscriptOf(appName, userID, sessionID string, maxTurns int) (Transcript, error) {
 	if maxTurns <= 0 {
 		maxTurns = 10
@@ -482,50 +560,39 @@ func (s *Service) TranscriptOf(appName, userID, sessionID string, maxTurns int) 
 	}
 	tr := Transcript{ID: st.id, Title: st.title, Truncated: st.truncated}
 
-	// Walking backwards, the newest answer is met before the question it
-	// answers, so an answer is held in pending until the prompt below it proves
+	// Walking backwards, the newest answer is met before the prompt it answers,
+	// so what has been met is held in pending until the prompt below it proves
 	// what it belongs to. Reversed at the end to get chronological order back.
 	type pair struct {
-		user  string
-		agent string
+		user    string
+		entries []Entry
 	}
 	var pairs []pair
-	pending := ""
+	var pending []Entry
 	for i := len(st.events) - 1; i >= 0 && len(pairs) < maxTurns; i-- {
-		text := eventText(st.events[i])
-		if text == "" {
+		ev := st.events[i]
+		text := eventText(ev)
+		if ev.Author == userAuthor && text != "" {
+			pairs = append(pairs, pair{user: text, entries: pending})
+			pending = nil
 			continue
 		}
-		if st.events[i].Author == userAuthor {
-			pairs = append(pairs, pair{user: text, agent: pending})
-			pending = ""
-			continue
-		}
-		// Only the first answer met belongs to the prompt about to appear; the
-		// rest belonged to a prompt already collected.
-		if pending == "" {
-			pending = text
-		} else if len(pairs) > 0 {
-			if pairs[len(pairs)-1].agent == "" {
-				pairs[len(pairs)-1].agent = text
-			} else {
-				pairs[len(pairs)-1].agent += "\n" + text
-			}
-		}
+		// Prepended rather than appended: the walk runs backwards, so this is the
+		// only place the turn's own order can be put back.
+		pending = append(eventEntries(ev), pending...)
 	}
 	tr.Turns = make([]Turn, 0, len(pairs))
 	for i := len(pairs) - 1; i >= 0; i-- {
 		tr.Turns = append(tr.Turns, Turn{
-			User:   pairs[i].user,
-			Agent:  pairs[i].agent,
-			Broken: pairs[i].agent == "",
+			User:    pairs[i].user,
+			Entries: pairs[i].entries,
+			Broken:  len(pairs[i].entries) == 0,
 		})
 	}
 	return tr, nil
 }
 
 // Ensure registers a session if it is not known yet, and returns its id.
-//
 // The runner auto-creates through Create, but the UI needs a session to exist
 // before the first message: /new has to produce a row in /sessions even if the
 // user types nothing, and a later run has to find what an earlier one left.
@@ -683,6 +750,59 @@ func (s *Service) view(st *stored, win *window) session.Session {
 type window struct {
 	numRecent int
 	after     time.Time
+}
+
+// ApproxChars is roughly how many characters of conversation this session
+// holds — the size the next request will carry, counted without a tokenizer.
+//
+// It is an estimate and is used only where an endpoint has reported no token
+// count of its own. The ratio it stands in for is the ordinary one for
+// OpenAI-style tokenizers, where a token is about four characters of English
+// or half that of Cyrillic; the caller marks the number as approximate rather
+// than presenting it as the model's own count.
+//
+// Whole events are walked, not just the newest: a session whose size is
+// measured at its tail is measured wrong the moment a tool result lands, and a
+// tool result is usually the largest thing in the turn.
+func (s *Service) ApproxChars(appName, userID, sessionID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load(appName, userID, sessionID)
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for _, ev := range st.events {
+		if ev.Content == nil {
+			continue
+		}
+		for _, p := range ev.Content.Parts {
+			if p == nil {
+				continue
+			}
+			switch {
+			case p.Text != "":
+				total += len(p.Text)
+			case p.FunctionCall != nil:
+				// The args are a map, so len() would count keys, not the size of
+				// the call — a write_file carrying a whole file would count as
+				// two or three. Marshalled, it is what the next request will
+				// actually carry, which is the one number this estimate exists
+				// to produce.
+				total += len(p.FunctionCall.Name)
+				if b, err := json.Marshal(p.FunctionCall.Args); err == nil {
+					total += len(b)
+				}
+			case p.FunctionResponse != nil:
+				// The response is the whole point of the size here: a
+				// read_file can return more than everything said so far.
+				if b, err := json.Marshal(p.FunctionResponse.Response); err == nil {
+					total += len(b)
+				}
+			}
+		}
+	}
+	return total
 }
 
 // filterEvents applies the two optional filters a Get may carry. Neither can be

@@ -8,6 +8,12 @@
 ```
 **A coding agent for your terminal.**
 
+![GitHub Release](https://img.shields.io/github/v/release/dedomorozoff/dmcode)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
+[![License](https://img.shields.io/github/license/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode/blob/main/LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/dedomorozoff/dmcode)](https://github.com/dedomorozoff/dmcode)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/dedomorozoff/dmcode/total)
+
 Ask it something. It reads your files, edits them, runs your tests, searches the
 web and talks to your MCP servers.
 
@@ -26,6 +32,8 @@ curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh
 ```powershell
 irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
 ```
+
+Both scripts check the download against the release's `sha256sums.txt`.
 
 **From source** — needs Go 1.26+:
 
@@ -48,7 +56,7 @@ and fails over to another one if the current provider dies mid-session.
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
 | **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
-| **Groq, OpenRouter, OpenCode Zen, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
+| **Groq, OpenRouter, OpenCode Zen, Cline, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
 and it lands in `.env`. The free tiers that need no card are all in that list —
@@ -85,16 +93,32 @@ The binary is looked up in this order: `DMCODE_LLAMA_SERVER`, then
 `./llama/llama-server(.exe)` — unpack a llama.cpp release into the project's
 `llama/` folder and it is found with no configuration — then `PATH`.
 
-The server is started on a free loopback port, dmCode waits for the model to
-load (up to `DMCODE_GGUF_STARTUP` seconds, 180 by default) and then talks to it
-over the ordinary OpenAI-compatible wire; the server's own output goes to
-`~/.dmcode/llama-server.log`, and the process is taken down when dmCode exits.
+The server is started on a free loopback port and the model loads **in the
+background**: the interface is up and usable while the weights are read, the
+status bar reads `LOADING`, and the progress line counts the seconds and shows
+llama-server's own last line (`load_tensors: 42%`). A message typed meanwhile is
+kept in the input rather than sent to a port nothing is listening on — press
+enter again when the model is up. `esc` gives up on the load and shuts the server
+down.
+
+The load is given `DMCODE_GGUF_STARTUP` seconds, 180 by default; give up sooner
+with `esc`. A missing `.gguf` or a missing `llama-server` is reported at once,
+before the interface is drawn, because those are instant to check. The server's
+output goes to `~/.dmcode/llama-server.log`, and the process is taken down when
+dmCode exits — including when it exits during the load.
 
 ## Tools
 
 The agent works on files and a shell, rather than just talking:
 
-`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command`
+`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `project_map`
+
+`project_map` is the one to reach for first. It answers "what is this project"
+in a single call — the directory tree, the languages it is written in, and the
+build files, entry points and manuals it contains — so the agent orients itself
+before it starts guessing at filenames. Its language share and file counts cover
+the whole tree however shallow the tree it shows, and it says so when a bound
+stopped it early.
 
 It can also reach past the workspace on purpose:
 
@@ -161,6 +185,31 @@ refused and the error names both directories. `run_command`'s `work_dir` is
 checked the same way. The tools that open a file re-check the path after
 following symlinks, so a symlink planted inside the tree cannot reach out of it.
 
+## Coming back to a session
+
+A session is a file in `~/.dmcode/sessions`, and dmcode prints the command to
+reopen it when it exits:
+
+```
+dmcode: session sess-42 saved — resume it with:  dmcode -s sess-42
+```
+
+That line lands after the TUI is gone, so it is the one thing that survives the
+window closing. `-s` on its own resumes the newest session, which is what you want
+most of the time — "where I was" rather than a session you can name:
+
+```bash
+dmcode -s                # the most recent session
+dmcode -s sess-42       # that one
+dmcode -s -C ~/myapp    # resume and work somewhere else
+```
+
+The conversation comes back whole: the tail is printed before the first frame, so
+the session does not open empty beside a model that remembers everything. The tool
+calls, the results and every change block come back with it, drawn by the same code
+that drew them the first time — so a restored session looks like the session you
+left rather than a summary of it.
+
 ## Markdown in replies
 
 Replies are laid out as markdown, not re-wrapped as plain prose:
@@ -192,7 +241,11 @@ Three ways in, and they all end at the same place:
 - `/image <path>` attaches one without sending anything, so you can look at the
   preview and decide. It appears once, as a strip above the input while it waits,
   and moves into the transcript when it is sent — the same rendered art either
-  time, so what you approved and what went are the same picture.
+  time, so what you approved and what went are the same picture. A path with spaces
+  works quoted (`/image "…/my shot.png"`), the same form a dropped path arrives in.
+  Type `/im` and press `enter` and the command is *completed* into the prompt with
+  room for the path, rather than run — a command that needs an argument has nowhere
+  to put one otherwise.
 - **Drag and drop.** A terminal cannot hand over a file — dropping one inserts its
   *path* as text — so a picture path in the prompt is taken out of the prompt and
   attached. The model reads your question without the filename in it. A quoted path
@@ -222,6 +275,10 @@ message rather than sent: it would not fit the session store's per-line limit, a
 the store drops a line it cannot read — a lost turn with nothing on screen to say
 so.
 
+To *look* at a picture without sending it, open it in the editor instead — see
+[The editor](#pictures-in-a-tab). There it is drawn at the pane's width rather
+than at 32 columns, and an animated GIF plays.
+
 Pictures need the **chat wire** (`/chat/completions`). On a provider configured for
 `/v1/responses` dmcode says so at the moment you attach, naming the fix, rather
 than failing later inside the SDK — ADK's own client rejects an inline picture
@@ -249,8 +306,9 @@ readable.
 
 Plan mode is enforced by withholding the write tools, not by asking the model in
 the prompt. `run_command` is withheld too, because a shell can write a file
-through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `grep`, `glob`,
-`web_search`, the plan tools, `ask_user`, `sub_agent` and `switch_mode` — a plan
+through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `project_map`,
+`grep`, `glob`, `web_search`, the plan tools, `ask_user`, `sub_agent` and
+`switch_mode` — a plan
 is a document and a question is a question, so a mode whose whole output is a
 plan should not be unable to publish one. The current mode is shown as a badge
 in the status bar and the sidebar lists only the tools actually reachable.
@@ -288,10 +346,13 @@ the agent is not going to ask before they stop watching.
 
 | | |
 |---|---|
+| `ctrl+e` | the editor — or back to the chat; the `▣` icon at the head of the status bar does the same |
 | `ctrl+p` | command palette |
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
 | `ctrl+z` | undo the last message (rewind) |
+| `alt+g` | open the next change the agent made, in the editor (repeat to walk them) |
+| `ctrl+q` | quit dmcode (in the editor it returns to the chat first) |
 | `tab` | plan / act mode |
 | `shift+tab` | yolo mode on / off (act and plan keep their tools) |
 | `esc` | close the command list, or stop the current turn |
@@ -299,6 +360,83 @@ the agent is not going to ask before they stop watching.
 | `pgup` `pgdn` | scroll |
 | wheel | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
+| click | open the file at the line of the change you clicked |
+
+Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
+PTY, LSP completions, splits and bookmarks, which is too much for a table here.
+
+## Going to a change
+
+When a write lands, the transcript draws what changed: the file's name, the real
+line numbers in the gutter, and the code itself. **Click any line of that block
+and the editor opens the file there**, cursor on the row you pointed at. The same
+goes for a line the write removed — it opens the line that replaced it, which is
+the one a reader is looking for.
+
+`alt+g` (or `/changes`) does the same without aiming: it opens the next change
+below where you are, and pressing it again steps through the rest of the
+session's edits and comes back round to the first.
+
+A click that is not on a change row still does nothing, which is the rule that
+keeps the selection below usable: without it, every click in the transcript would
+be a jump.
+
+## The editor
+
+`ctrl+e` opens a code editor in the same workspace, and pressing it again puts
+the chat back (`ctrl+q` does the same). The project tree waits for `ctrl+b`
+rather than opening itself.
+It is a real editor, not a viewer: syntax highlighting, a project tree, a git
+panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
+bookmarks, multi-cursor editing (`alt+d`, `alt+click`), LSP completion and
+go-to-definition.
+
+The two modes share one screen rather than one window per thing. The transcript
+stays in the main area when the editor is closed, the panel toggles stay live in
+both, and the status bar at the bottom is the same row in each — in chat mode it
+carries the icons and the git branch, and in the editor mode it adds the file's
+own state (`Ln`, `Col`, encoding, language).
+
+With no file open the editor says so rather than showing an empty tab: no tab in
+the bar, no line numbers down the side, and one line naming the keys that fill it
+(`ctrl+o` finds a file, `ctrl+p` has a new-file command). The editor always has a
+buffer behind that, so typing works straight away — the tab appears the moment
+there is something in it, under `[untitled]` until you name it with `ctrl+s`.
+
+The four icons at the left of that row are the workspace: `▣` editor, `▤` project
+tree, `⎇` git, `❯` terminal. Each is clickable, each shows its label on hover,
+and the first one is the mode toggle.
+
+### Pictures in a tab
+
+Open a `.png`, `.jpg`, `.gif`, `.bmp` or `.webp` and the editor draws it rather
+than showing you its bytes. It is rendered at the pane's width, out of the same
+half-block glyphs the chat's picture preview uses, with no line-number gutter —
+there are no lines in it to number. The caption underneath names the file, its
+dimensions, its format, and for an animation which frame you are on:
+
+```
+shot.png  800×600 png
+anim.gif  320×240 gif  2/17
+```
+
+A **GIF animates**, at the speed the file declares. Every frame is composited the
+way the format means — a frame is the rectangle that changed, drawn over the one
+before it — so a partial frame shows the picture with the change in it, not an
+empty cell. It stops by itself when it is not what you are looking at: switch
+tabs, or go back to the chat, and the animation stops rather than drawing frames
+behind the screen.
+
+A picture tab is **read-only**, because there is nothing to edit and `ctrl+s`
+would write an empty document over the file you opened. Typing, `enter`,
+`backspace`, paste and `ctrl+s` say so instead of doing it. What still works is
+what is about the workspace rather than the file: `alt+←`/`alt+→` switch tabs,
+and the wheel, `↑`/`↓` and `pgup`/`pgdn` scroll a picture taller than the pane.
+
+If a file is *named* like a picture but is not one — a `.png` holding text — it
+opens as that text with the reason on the status line, and a picture overwritten
+with text reloads as text rather than going on showing the frame of a file that
+is no longer there. WebP has no decoder in this build and says so by name.
 
 ## Selecting with the mouse
 
@@ -316,7 +454,8 @@ of a row takes what is there.
 
 A plain click copies nothing. Without that rule every click in the transcript
 would overwrite the clipboard with a single character and the feature would be
-worse than useless.
+worse than useless. The one thing a click *does* do is open a change in the
+editor — see [Going to a change](#going-to-a-change).
 
 `/mouse` turns the whole thing off and hands the terminal back, which is what you
 want if you prefer the terminal's own drag-select and paste menu — dmcode cannot
@@ -326,7 +465,26 @@ doing it itself.
 The status bar carries the mode and the state, and nothing else — the model is in
 the header and the sidebar, and the keys are in `/help`.
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+
+## Commands
+
+Type `/` and the list opens with everything in it. Type a letter or two and it
+narrows by matching those letters *in order* anywhere in a command's name, not
+only at the front — so `/p` keeps `/proxy`, `/copy`, `/help` and `/setup` on
+screen instead of collapsing to the one command that starts with `p`, and `/se`
+finds `/sessions` whether or not you finished typing it.
+
+The order is the answer to "which one did I mean": a command that *is* what you
+typed comes first, then those that start with it, then the rest by how close
+together the letters you typed appear in the name. The row under the highlight is
+what a single `enter` takes, so it is the one most likely meant — `/md` gives
+`/mode` rather than `/models`, `/c` gives `/cd` rather than `/changes`.
+
+`/debug` used to work without appearing anywhere: it was handled by the
+dispatcher, named in this file, and in neither the `/` list nor `ctrl+p`. The
+list of commands and the set of commands being two different sets is how a
+command hides.
 
 ## HTTP proxy
 
@@ -448,7 +606,10 @@ Other targets:
 ```bash
 make build              # -> dist/dmcode
 make test               # unit tests
+make test-race          # unit tests with the race detector
 make vet                # go vet
+make lint               # golangci-lint (.golangci.yml decides the set)
+make fmt-check          # fail if a tracked .go file is not gofmt'd
 make clean              # remove dist/
 ```
 
@@ -468,8 +629,10 @@ internal/ask         the ask_user broker and its timer
 internal/clipimg     reads a picture off the system clipboard (Windows)
 internal/config      .env, endpoints, the setup wizard
 internal/discover    finds the providers that actually answer
+internal/editor      the workspace editor: tree, git, terminal, splits, LSP, picture view
 internal/i18n        English source strings and the Russian catalog
-internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire
+internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire,
+                     and decodes an animation frame by frame for the editor
 internal/llm         OpenAI-compatible wire, failover, retries
 internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence
@@ -491,6 +654,20 @@ Everything is optional; the defaults work without any of it.
 | `DMCODE_LANG` | `en` or `ru` for one run |
 | `DMCODE_API` | `chat` to force the `/chat/completions` wire |
 | `DMCODE_REASONING_EFFORT` | caps the reasoning channel |
+| `DMCODE_MAX_OUTPUT` | the answer budget in tokens (`max_tokens`), default 16384 |
+| `DMCODE_CONTEXT` | the model's real window in tokens, when the built-in table gets it wrong |
+| `DMCODE_GGUF` | a `.gguf` file to serve through llama-server, loaded in the background |
+| `DMCODE_LLAMA_SERVER` | the llama-server binary (default: `./llama/llama-server`, then `PATH`) |
+| `DMCODE_LLAMA_ARGS` | extra llama-server flags, split on spaces |
+| `DMCODE_GGUF_STARTUP` | seconds a local model may take to load (default 180; `esc` gives up sooner) |
+
+Both of the last two are about a limit dmcode cannot otherwise see. A request
+with no `max_tokens` leaves the output ceiling to the endpoint, so a model
+writing a long calculation stops mid-sentence and dmcode says so rather than
+leaving you to read the context meter; `DMCODE_MAX_OUTPUT` raises the ceiling
+for a model the default overshoots. `DMCODE_CONTEXT` names a window for a model
+the built-in table does not recognise — which also switches automatic context
+compaction on, because that needs a real figure rather than a guess.
 
 ## Roadmap
 

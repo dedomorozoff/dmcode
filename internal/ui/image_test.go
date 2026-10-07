@@ -1324,6 +1324,23 @@ func fakeClipboard(t *testing.T, img image.Image, imgErr error, text string, tex
 	readClipboardText = func() (string, error) { return text, textErr }
 }
 
+// fakeClipboardWrite swaps only the write seam, recording what was "copied"
+// into the returned string. Same reasoning as fakeClipboard above, for the
+// other direction: ctrl+y and a drag-selection both land in the user's real
+// clipboard, so a test of either must not be the last thing to write to it.
+func fakeClipboardWrite(t *testing.T) *string {
+	t.Helper()
+	old := writeClipboardText
+	t.Cleanup(func() { writeClipboardText = old })
+
+	written := ""
+	writeClipboardText = func(s string) error {
+		written = s
+		return nil
+	}
+	return &written
+}
+
 // plainPicture is a small non-empty image, which is all any of these tests need:
 // the question is what the paste route does with it, not what it looks like.
 func plainPicture() image.Image {

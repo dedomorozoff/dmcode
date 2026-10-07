@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/pathnorm"
 )
 
 // ggufOptionIndex is where the GGUF option sits in the wizard list.
@@ -42,17 +43,38 @@ func setupTempModel(t *testing.T) (*uiModel, string, string) {
 	return m, dir, gguf
 }
 
+// fakeLoad is a model load with a known outcome. The UI depends on the
+// ggufLoad interface rather than on *discover.Launch precisely so this can
+// exist: the alternative is a test that waits out a real model load, which is
+// the one thing no test wants to do.
+type fakeLoad struct {
+	prov   config.Provider
+	err    error
+	tail   string
+	waited bool
+}
+
+func (f *fakeLoad) Wait() error               { f.waited = true; return f.err }
+func (f *fakeLoad) Provider() config.Provider { return f.prov }
+func (f *fakeLoad) Tail() string              { return f.tail }
+
+// stubStart makes startGGUF answer with l, and restores it afterwards.
+func stubStart(t *testing.T, l ggufLoad, err error) {
+	t.Helper()
+	orig := startGGUF
+	startGGUF = func() (ggufLoad, error) { return l, err }
+	t.Cleanup(func() { startGGUF = orig })
+}
+
 // TestSetupGGUFPickerSelectsAFile drives the dialog the way a user does:
 // enter on the empty path prompt opens it, enter descends into a directory,
 // enter on the .gguf file picks it and starts the setup.
 func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	m, dir, ggufPath := setupTempModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF"}, nil
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, &fakeLoad{prov: config.Provider{
+		BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF",
+	}}, nil)
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter()
 	if m.setup.stage != setupGGUF {
@@ -68,8 +90,14 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	}
 
 	d = d.down().enter() // descend into models
-	if m.setup.gguf.dir != filepath.Join(dir, "models") {
-		t.Fatalf("the browser is at %q, want %q", m.setup.gguf.dir, filepath.Join(dir, "models"))
+	// By identity, not by spelling. The browser descends into the directory the
+	// listing gave it, which is the resolved name — /private/var/... where
+	// t.TempDir said /var/... on macOS, the expanded name where the runner's
+	// TMPDIR was a short one. Both spellings open the same directory, so a
+	// string comparison here reports a mismatch on exactly the machines where
+	// this test is most worth running.
+	if !pathnorm.Same(m.setup.gguf.dir, filepath.Join(dir, "models")) {
+		t.Fatalf("the browser is at %q, want the models directory in %q", m.setup.gguf.dir, dir)
 	}
 	view = m.View().Content
 	if !strings.Contains(view, "qwen.gguf") {
@@ -83,12 +111,11 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	if m.setup.open || m.setup.gguf.open {
 		t.Fatalf("a pick did not close the dialog (wizard=%v browser=%v)", m.setup.open, m.setup.gguf.open)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, ".env"))
-	if err != nil {
+	if _, err := os.Stat(filepath.Join(dir, ".env")); err != nil {
 		t.Fatalf(".env was not written: %v", err)
 	}
-	if !strings.Contains(string(data), "DMCODE_GGUF="+ggufPath) {
-		t.Errorf(".env is missing the picked path:\n%s", data)
+	if got := envValue(t, "DMCODE_GGUF"); !pathnorm.Same(got, ggufPath) {
+		t.Errorf(".env holds %q, want the picked file %q", got, ggufPath)
 	}
 
 	if run := d.cmd; run == nil {
@@ -99,6 +126,28 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	if m.prov.Model != "qwen.gguf" {
 		t.Errorf("the picked model did not go live: %+v", m.prov)
 	}
+}
+
+// envValue reads one key out of the .env the wizard just wrote, through the
+// parser the app uses to read it back. Looking for the value as a substring
+// instead asks a different question — whether the exact spelling the test
+// happened to write appears somewhere in the file — and the browser resolves the
+// directory it walks, so on macOS the value lands as /private/var/... where the
+// test said /var/..., and the substring is not found on the machine where the
+// assertion is worth most.
+func envValue(t *testing.T, key string) string {
+	t.Helper()
+	lines, err := config.ReadDotEnv()
+	if err != nil {
+		t.Fatalf("reading .env: %v", err)
+	}
+	for _, line := range lines {
+		if k, v, ok := config.DotEnvPair(line); ok && k == key {
+			return v
+		}
+	}
+	t.Fatalf(".env has no %s", key)
+	return ""
 }
 
 // The browser's esc must back out to the path prompt, not close /setup, and
@@ -134,11 +183,9 @@ func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
 	dir := inTempDir(t)
 	m := newSetupModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF"}, nil
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, &fakeLoad{prov: config.Provider{
+		BaseURL: "http://127.0.0.1:9/v1", Model: "qwen.gguf", API: config.APIChat, Label: "llama.cpp GGUF",
+	}}, nil)
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter()
 	if m.setup.stage != setupGGUF {
@@ -186,15 +233,16 @@ func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
 
 // A failed launch keeps the saved configuration and says so, instead of
 // leaving the user with a provider that does not exist and no explanation.
+//
+// The failure here is the instant kind — a missing binary, a missing file —
+// because those are the ones worth reporting before a second of waiting. The
+// slow kind arrives through ggufReadyMsg instead, and is covered with the rest
+// of the loading behaviour.
 func TestSetupGGUFReportsAFailedLaunch(t *testing.T) {
 	inTempDir(t)
 	m := newSetupModel(t)
 
-	orig := launchGGUF
-	launchGGUF = func() (config.Provider, error) {
-		return config.Provider{}, errors.New("llama-server not found")
-	}
-	t.Cleanup(func() { launchGGUF = orig })
+	stubStart(t, nil, errors.New("llama-server not found"))
 
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(ggufOptionIndex()).enter().type_("models\\qwen.gguf").enter()
 	if run := d.cmd; run != nil {

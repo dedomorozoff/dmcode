@@ -53,35 +53,214 @@ func hasErr(m *uiModel, sub string) bool {
 	return false
 }
 
-// The sidebar's SESSION block reports what the agent actually changed, and stays
-// quiet until something has: a column of zeroes on a fresh session is noise, and
-// their absence is the information.
-func TestSidebarShowsTheChangeTally(t *testing.T) {
+// The sidebar's CHANGES section lists what the agent actually changed, one file
+// per row with that file's own counts, and stays quiet until something has: a
+// heading and rows over an empty list is not a list of no news, it is furniture,
+// and their absence is the information.
+func TestSidebarListsTheChangedFiles(t *testing.T) {
 	cleanTally(t)
 	m := tallyModel(t)
 
-	if s := ansi.Strip(m.sidebarView(20)); strings.Contains(s, "files:") {
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "CHANGES") {
 		t.Errorf("a fresh session already reports changes:\n%s", s)
 	}
 
 	dmtools.RecordChange("new.txt", "", "a\nb\nc\n")
-	dmtools.RecordChange("other.txt", "", "x\n")
+	dmtools.RecordChange("other.txt", "p\nq\n", "p\n")
 
-	s := ansi.Strip(m.sidebarView(20))
-	if !strings.Contains(s, "files: 2") {
-		t.Errorf("the sidebar does not report two changed files:\n%s", s)
+	s := ansi.Strip(m.sidebarView(40))
+	for _, want := range []string{"CHANGES", "new.txt", "other.txt", "+3", "+0", "-1"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the sidebar does not report %q:\n%s", want, s)
+		}
 	}
-	if !strings.Contains(s, "+4") {
-		t.Errorf("the sidebar does not report the added lines:\n%s", s)
+	// The counts belong to the file beside them, not to the session as a whole:
+	// a list where every row carries the session's total would answer "how much"
+	// twice and never "which file".
+	if !strings.Contains(s, "new.txt +3 -0") {
+		t.Errorf("new.txt does not carry its own counts:\n%s", s)
 	}
-	if !strings.Contains(s, "-0") {
-		t.Errorf("the sidebar does not report the removed lines:\n%s", s)
+	if !strings.Contains(s, "other.txt +0 -1") {
+		t.Errorf("other.txt does not carry its own counts:\n%s", s)
+	}
+}
+
+// A changed file that no longer differs — the session edited it and put it back —
+// is not a row. "+0 -0" would be a statement about work that is not in the tree.
+func TestSidebarOmitsAFileWhoseNetChangeIsZero(t *testing.T) {
+	cleanTally(t)
+	m := tallyModel(t)
+
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nB\n")
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nb\n")
+	dmtools.RecordChange("kept.txt", "", "x\n")
+
+	s := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(s, "same.txt") {
+		t.Errorf("a file changed back is still listed:\n%s", s)
+	}
+	if !strings.Contains(s, "kept.txt") {
+		t.Errorf("the file that did change is missing:\n%s", s)
 	}
 }
 
 // A session that writes the same line over and over must not accumulate a number
 // per write: the tally is the difference between how the session found the file
 // and how it left it.
+// sidebarRows returns the panel's rows with the box stripped, so a test can ask
+// whether a row is blank. The border characters are the panel's own content as
+// far as the frame is concerned, and TrimSpace leaves them, so a row that is
+// empty apart from its borders is indistinguishable from a full one.
+func sidebarRows(t *testing.T, m *uiModel) []string {
+	t.Helper()
+	out := []string{}
+	for _, l := range strings.Split(ansi.Strip(m.sidebarView(40)), "\n") {
+		out = append(out, strings.Trim(strings.TrimSpace(l), "│"))
+	}
+	return out
+}
+
+// A proxy in effect is on the panel, because the panel is where the model and the
+// wire are both already reported — and a user whose requests fail behind one has
+// no other way to see that they are going through it at all.
+func TestSidebarSaysWhenTheConnectionGoesThroughAProxy(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "socks5") {
+		t.Errorf("a direct connection is shown as proxied:\n%s", s)
+	}
+
+	// A short host, so the assertion is on the whole row rather than on what
+	// survived the panel's width. The long-host case is its own test below.
+	m.applyProxy("socks5://localhost:21001")
+	s := ansi.Strip(m.sidebarView(40))
+	if !strings.Contains(s, "PROXY") {
+		t.Errorf("the panel shows a proxy without naming it:\n%s", s)
+	}
+	if !strings.Contains(s, "localhost:21001") {
+		t.Errorf("the panel does not report the proxy:\n%s", s)
+	}
+
+	m.applyProxy("off")
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "socks5") {
+		t.Errorf("the proxy outlived the setting that turned it off:\n%s", s)
+	}
+}
+
+// The panel is 31 columns. A masked login does not fit alongside a host, so the
+// tag drops the credentials outright — and what is left must still end in the
+// port, since that is the half a user is there to read.
+func TestSidebarProxyRowHasNoCredentialsAndKeepsThePort(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	m.applyProxy("socks5://dedo:dedodedo@vpn.example.com:21001")
+
+	s := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(s, "dedo") || strings.Contains(s, "dedodedo") {
+		t.Errorf("the panel prints the proxy login:\n%s", s)
+	}
+	// The type is in the heading rather than the value: a left-trim on a long host
+	// eats the first word, and the type is what tells an http proxy from a socks5
+	// one — which decides whether a failure is a DNS question or a port one.
+	if !strings.Contains(s, "PROXY socks5") {
+		t.Errorf("the proxy heading does not name the type:\n%s", s)
+	}
+	if !strings.Contains(s, "vpn.example.com:21001") {
+		t.Errorf("the proxy row lost the host and port:\n%s", s)
+	}
+	// The row has to fit the box it is drawn in, or the panel stops lining up
+	// with the rest of the frame. The width to compare against is measured off
+	// the frame's own border row rather than taken from sidebarBoxWidth: the
+	// rendered box carries a column of margin that the constant does not count,
+	// and a test that disagrees with the constant about the box's width is a test
+	// that fails on the constant rather than on a row being too long.
+	rows := strings.Split(s, "\n")
+	boxW := ansi.StringWidth(rows[0])
+	for _, line := range rows {
+		if w := ansi.StringWidth(line); w != boxW {
+			t.Errorf("a row is %d wide, the box is %d:\n%q", w, boxW, line)
+		}
+	}
+}
+
+// The section is inserted between MODEL and SESSION, so it must be separated the
+// same way the sections around it are — one blank line, and one only. A blank
+// written on the wrong side of a conditional block doubles in the case that is on
+// screen far more often (no proxy), which reads as a gap in the panel rather than
+// as spacing.
+func TestSidebarProxySectionIsSpacedLikeTheOthers(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	rows := sidebarRows(t, m)
+	blankBefore := func(label string) int {
+		for i, l := range rows {
+			if strings.Contains(l, label) {
+				return i
+			}
+		}
+		t.Fatalf("no %s row on the panel", label)
+		return -1
+	}
+	// The invariant is one blank row before a section label — not a fixed distance,
+	// since a section's length is its own business (MODEL has a value and a "via",
+	// PROXY has a host and maybe a bypass list). A blank written on the wrong side
+	// of a conditional block shows up here as a doubled gap in the case that is on
+	// screen far more often, which is the one with no proxy.
+	spaced := func(label string, single bool) {
+		i := blankBefore(label)
+		if i < 2 {
+			return
+		}
+		if strings.TrimSpace(rows[i-1]) != "" {
+			t.Errorf("no blank row before %s:\n%s", label, strings.Join(rows, "\n"))
+		}
+		if single && strings.TrimSpace(rows[i-2]) == "" {
+			t.Errorf("a doubled blank row before %s:\n%s", label, strings.Join(rows, "\n"))
+		}
+	}
+	// FOLDER is checked for the blank but not for the doubling: the CONTEXT block
+	// above it writes its separator even when there is no context meter to draw, so
+	// it has always been reached through two blanks. That is not this section's
+	// spacing to fix, and asserting against it here would be a test failing on a
+	// pre-existing quirk rather than on the proxy row.
+	for _, l := range []string{"MODEL", "SESSION", "FOLDER"} {
+		spaced(l, l != "FOLDER")
+	}
+
+	// With a proxy the same spacing has to hold around the new section, or it is
+	// the only block on the panel that does not look like the others.
+	m.applyProxy("socks5://localhost:21001")
+	m.applyProxy("no localhost")
+	rows = sidebarRows(t, m)
+	for _, l := range []string{"MODEL", "PROXY", "SESSION"} {
+		spaced(l, true)
+	}
+}
+
+// A bypass list changes nothing about the proxy, so it earns its row only when it
+// has something in it — an empty list would be a label over an absence.
+func TestSidebarShowsTheBypassListOnlyWhenItHasEntries(t *testing.T) {
+	inTempDir(t)
+	cleanProxyEnv(t)
+
+	m := tallyModel(t)
+	m.applyProxy("socks5://vpn.example.com:21001")
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "bypass") {
+		t.Errorf("an empty bypass list is printed:\n%s", s)
+	}
+
+	m.applyProxy("no localhost")
+	if s := ansi.Strip(m.sidebarView(40)); !strings.Contains(s, "bypass: localhost") {
+		t.Errorf("a set bypass list is not on the panel:\n%s", s)
+	}
+}
+
 func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 	cleanTally(t)
 	// Each write reports what was on disk before it, exactly as writeFileAtomic
@@ -94,13 +273,19 @@ func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 		prev = c
 	}
 
-	s := ansi.Strip(tallyModel(t).sidebarView(20))
+	s := ansi.Strip(tallyModel(t).sidebarView(40))
 	// The file did not exist when the session found it, so the baseline is empty
 	// and the end state is wholly additive — two lines that were not there
 	// before. What is being checked is that it is two and not six: the two later
 	// writes each replaced a line, and counting them separately would show +6.
-	if !strings.Contains(s, "files: 1") || !strings.Contains(s, "+2") || !strings.Contains(s, "-0") {
+	if !strings.Contains(s, "f.txt +2 -0") {
 		t.Errorf("three writes to one file reported as:\n%s", s)
+	}
+	// One row, not three: a list that grew a row per write would be a history of
+	// the agent's steps rather than of its result, which is the whole property
+	// being tested.
+	if n := strings.Count(s, "f.txt"); n != 1 {
+		t.Errorf("f.txt appears %d times, want one row:\n%s", n, s)
 	}
 }
 

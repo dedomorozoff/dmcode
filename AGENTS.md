@@ -41,6 +41,10 @@
 >   strand the runner — the UI test covers the pending-mode bookkeeping only;
 > - yolo mode has unit tests for the binding, the tool set and the badge, but no
 >   TUI session has been driven through a real yolo turn;
+> - the file half of a rewind (the turn journal in `internal/tools/undo.go`) is
+>   unit-tested against the tools, but no live session has been rewound after a
+>   real tool-writing turn — the UI wiring is covered by a transcript assertion
+>   on the unrestorable branch only;
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
@@ -63,19 +67,30 @@
 - **Key Modules:** the code is already split into `internal/` packages:
   - `main.go`: startup only — flag parsing, `-C` relocation, then chaining the packages below.
   - `internal/config`: provider config and the `.env` file.
-  - `internal/discover`: which providers the session can run on.
+  - `internal/discover`: which providers the session can run on, and the llama-server around a local `.gguf`.
   - `internal/llm`: the OpenAI-compatible wire and the failover pool.
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
-  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
-  - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `List` is the one eager pass: names for the sidebar, notes for the servers that did not come up.
-  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar), `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go` (ctrl+z, session switching), `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the question overlay and the sub-agent notes), `plan_view.go` (the plan block).
+  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `move_file`, `delete_file`, `web_search`, `fetch_url`, `project_map`) **and the workspace boundary** they are confined to. `web_search` and `fetch_url` are the two instruments that reach past the boundary on purpose (DuckDuckGo HTML, no key; and the page a search finds), and both only ever read. `move_file`/`delete_file` exist because the only route before them was `mv`/`rm` through `run_command`, which the shell watcher could mark as "changed somewhere" but not invert — see §1's "The turn journal". `todo_*` is added from `internal/todo`, not here.
+  - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `States` is the one eager pass: what each server offered, or why it could not be asked.
+  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar),
+    `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending
+    agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go`
+    (ctrl+z, session switching), `jump.go` (clicking a change opens the file at that line),
+    `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the
+    question overlay and the sub-agent notes), `plan_view.go` (the plan
+    block), `git_sidebar.go` (the repository snapshot, read off the
+    frame path) and `sidebar_sections.go` (CHANGES, GIT, MCP).
   - `internal/memsession`: the session store — the ADK `session.Service` dmcode runs on, plus the JSONL persistence under `~/.dmcode/sessions`.
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
   - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
   - `internal/imgprev`: turns image bytes into a picture in the terminal and into
     the reduced bytes that go on the wire. Two outputs from one input, in that
-    order, so what is drawn is what is sent. `Load` does all of it.
+    order, so what is drawn is what is sent. `Load` does all of it. `Render` and
+    `Decode` are the editor's half of the same package: the first draws one frame
+    at a width the caller chooses, the second decodes an animation frame by frame —
+    exported rather than copied so a picture looks the same whichever half of
+    dmcode opened it.
   - `internal/clipimg`: reads the clipboard's picture. A package of its own
     because the answer is entirely platform-specific — a Windows screenshot is a
     DIB, a macOS one a file URL, a Linux one an image URI from whichever tool owns
@@ -108,6 +123,167 @@ Columns are cells, not bytes and not runes: the loop decodes each rune and asks
 `ansi.StringWidth` for its width, because a CJK character is two cells wide and
 counting runes cuts the first one in half. `TestSelectionCountsWideRunesAsTwoCells`
 is the one that would catch a regression there.
+
+### From a change in the transcript to the file
+
+A `kindDiff` row can be clicked and the editor opens the file at that line
+(`internal/ui/jump.go`). Five things about it are not obvious, and each is one
+that reads fine until it is wrong:
+
+- **The line number has to survive as a value, not as text.** By the time the
+  click arrives the row is styled, gutter-numbered, maybe wrapped onto a second
+  screen row and maybe ANSI-truncated, so the number is a `codeRef` beside the
+  rendered row (`renderedRows`). Reading it back out of the drawn row would mean
+  re-deriving the gutter's own arithmetic — including which blank gutter was a
+  wrapped continuation — which is the "answers a different question" mistake.
+- **`cachedLine` holds the refs, not just the strings.** The render cache exists
+  so a streamed token re-wraps one line, which means most frames reuse it. A
+  cache that kept the rows and dropped the refs would empty the click index on
+  exactly those frames: the click works once, then stops working on every message
+  that scrolls past. `TestTheChangeIndexSurvivesTheRenderCache` is the guard.
+- **A screen row is not a transcript row.** `transcriptTop()` (the header, when
+  it is up, plus the panel's own top border) and `vp.YOffset()` are that
+  arithmetic. The tests build a real frame, *find* the change row in it and click
+  there, so an off-by-one fails instead of jumping somewhere plausible — the four
+  mutations worth trying are `transcriptTop`, the cached refs, the `hostCall` flag
+  in `Host.Release`, and `jumpFrom`.
+- **A box on screen is a box on screen.** With an overlay up, `buildFrame` draws
+  the box and not the chat, so the hit test's arithmetic is answering about a
+  screen that is not there. `chatOverlayUp` covers the command list too, which
+  is painted *over* the panel rather than replacing it: those transcript rows are
+  still in the frame, and the row under the pointer would be the one behind the
+  list.
+- **`alt+g`, not `ctrl+g`.** The editor answers `ctrl+g` with its git panel
+  before the chat sees the key, so the mnemonic would work in a bare chat and do
+  nothing once the editor existed — §5's `ctrl+v` trap from the other direction.
+- **`Host.Click/Motion/Release/Wheel` set `hostCall`, exactly as `Host.Key`
+  does.** A jump taken from a click that arrived through the editor is *inside*
+  the editor's `Update`, and a direct `m.ed.Chat = false` there is clobbered by
+  the copy that `Update` returns — the jump would be lost every time, silently.
+
+A `-` row carries the old file's number and lands on the replacement: the block
+trims a shared prefix and suffix off both texts and numbers both sides from the
+same place, so the line a removal used to be on is the line its replacement is on.
+
+### The editor's empty buffer
+
+`internal/editor/editor` always has a tab, so there is always a buffer to type
+into and a `cur()` that cannot be nil. `renderPaneRows` indexes
+`tabs[pane.tabIdx]` outright and about a hundred other places call `cur()`, so
+that tab is load-bearing and cannot simply be deleted — which is why the fix is
+presentational rather than structural: `tab.scratch()` derives "this is the
+standing empty buffer, not a file" from the state already there (no path, not
+dirty, nothing typed), and everything that draws it asks that.
+
+Three consequences, each with a test in `scratch_tab_test.go`:
+
+- **Derived, not tracked.** A `bool` set once would have to be unset in every
+  path that clears a buffer; the predicate cannot disagree with the buffer.
+- **It is dropped when a file opens** (`openPath`), not just hidden. Left in the
+  slice it is an invisible tab 1, and every tab the user can see is numbered
+  from 2 — and `Alt+1..9` jumps by real index, so the numbers and the keys
+  would disagree.
+- **Both tab-closing paths ask `lastTabIsEmpty()`** — `closeActiveTab`
+  (`ctrl+w`) and `closeTabAt` (`ctrl+x`, middle-click) each decide "the last tab
+  going means quit" independently. A rule written into one of them is a trap in
+  the other, which is exactly what `TestCloseLastTabReturnsQuit` used to pin.
+
+### The `/` list
+
+Typing `/` builds the list through `rankCommands` and `commandRank`
+(`internal/ui`), and neither is a prefix filter. Three grades, lower first: an
+exact name, a name starting with what was typed, and a name containing those
+letters **in order**. The third is the whole point — with prefix matching alone
+`/p` is `/proxy` and nothing else, so one keystroke left one row and the list
+closed the moment it opened. A length tie-break inside a grade settles what the
+rank cannot (`/md` is `/mode`, not `/models`), and the highlighted row is the one
+a single `enter` takes, so its being the *likely* one is the whole contract.
+
+Three things that are easy to get wrong here:
+
+- **An empty needle keeps the declared order.** Every command ties at rank 0, so
+  the length tie-break would otherwise sort the whole list by how long the
+  command names happen to be. `rankCommands` returns early instead.
+- **The list of commands and the set of commands must be one set.** `/debug` was
+  handled by the dispatcher, named in the README, and in neither the `/` list nor
+  `ctrl+p` — `/de` matched nothing. A command that works but is not offered is
+  invisible, and `TestEveryCommandThatWorksIsOffered` is the guard. `/model <id>`
+  is deliberately *not* listed: bare `/model` does nothing, and offering it would
+  advertise a trap.
+- **`HasPrefix` on a command name is a trap in the dispatcher too.** `/debug`
+  answered to `/debugger` too; every other prefix command uses `CutPrefix`, and so
+  does this one now.
+- **`enter` on a row that needs an argument completes it; it does not run it.**
+  `/im`, `enter`, path is the flow the list invites, and it used to run `/image`
+  with no argument: a usage line, an emptied prompt, and the path sent to the
+  model as a question about a filename. `command.takesArg` is the per-command
+  half, and it is deliberately narrow — `/proxy`, `/cd`, `/new`, `/mode` and
+  `/todo` all have a useful *bare* form, and completing those would take it away.
+
+### The sidebar
+
+`internal/ui/sidebarView` draws a 31-column panel whose inner width is 27, so
+every decision about it is really about how much a row can say. The sections are
+`MODEL`, `SESSION`, `CONTEXT`, `FOLDER`, `GIT`, `LAST TOOL`, `CHANGES`, `MCP`
+and `PLAN`, and each one is **hidden when it has nothing to say** — that rule is
+older than this feature and is the reason the panel is readable. `PROXY` set the
+precedent, `LAST TOOL` followed, and `TestAFreshPanelIsNotAFurniture` holds all
+of them to it.
+
+Two sections are gone. `TOOLS` listed the agent's instrument names and was the
+one part of the panel that answered no question: identical on every frame of
+every session, unchanged while a turn ran, nothing the user could do with it —
+and at twelve rows it was the largest thing on the panel, which is what pushed
+`PLAN` off the bottom of a short terminal. `TestTheSidebarDoesNotListTheTools`
+guards that removal, and it is a test that something is *gone* because the list
+was deliberate once: it showed the plan-mode instrument set honestly, and a mode
+change with no visible consequence is how a panel starts lying again. `HOTKEYS`
+went next, for the same reason one row lower: `/help` lists the same keys in the
+same place a user would look, `ctrl+q` — the only way out of the chat — was on
+the panel and *not* in `/help`, so it moved rather than vanishing.
+
+Five things about what replaced them are not obvious, and each is one that reads
+fine until it is wrong:
+
+- **A row's file is a value beside the row, not text inside it.** `sideRefs` is
+  filled by `valueRef`/`row` while the panel is drawn, index-aligned with the
+  body — the same shape as the transcript's `rowRefs`, and for the same reason:
+  by the time a click arrives the row is a styled, possibly-wrapped string.
+  `sidebarTop` / `sideRefAt` are the sidebar's answer to "which screen row is
+  which file", and they are written out rather than shared with `transcriptTop`
+  because the two are separate facts that happen to agree today.
+- **Every row records a ref, including the ones naming nothing.** A heading, a
+  section separator (`blank()`) and a count all push a zero ref. The index is
+  positional, so a row that skipped its entry would shift every ref below it by
+  one — and the separator rows were the ones doing it, because they were the only
+  writer that bypassed `row()`.
+- **`build` returns the index rather than storing it.** It used to be called
+  twice for one frame (with the hotkeys, then without), so a field would describe
+  the body from the *first* call: the right file at the wrong row. The trimmed
+  body also cuts the index, and clears the entry the ellipsis replaced.
+- **A separator between nothing and nothing is not a row.** `blank()` compares
+  against `marked` and writes nothing when the section above it drew no rows. The
+  hotkeys hid this for as long as they were there — they filled the bottom of the
+  panel, so nobody looked at the gaps above them — and a panel whose four hidden
+  sections leave four blank lines reads as four sections that *failed* to draw.
+  `TestAHiddenSectionLeavesNoGapBehindIt` is the guard.
+- **The repository is read off the frame path, never on it.** `readGitState`
+  walks the worktree, which is disk I/O, and `View` runs on every keystroke — so
+  `gitStatusCmd` answers on a goroutine and sends `gitStatusMsg`. It is asked for
+  at `Init`, at the end of every turn, and on `/cd` and on leaving the editor: the
+  turn is the only moment the agent can have moved the tree, and the editor is the
+  only place the user can have. The counts are therefore as of the last refresh,
+  which is why `walked` exists — an unreadable tree says `status unavailable`
+  rather than printing zeros, which would be a claim about a clean tree nobody
+  checked. A `/cd` **clears** the state: the old folder's branch still drawn is a
+  claim about where the agent is working, and it is not working there.
+- **An MCP server that answered is not one that did not.** `mcp.States` carries
+  `Tools` *and* `Err`, because "reachable and offering nothing" and "unreachable"
+  were one row between them and they are not the same: the first is a
+  misconfigured server, the second needs a process hunted down. One eager pass
+  feeds both the sidebar and `toolNames` — a second listing would be a second
+  answer to "what does this server offer", and a server that came up between the
+  passes would appear in the panel and not in the agent's reach.
 
 ### Mode switches
 
@@ -223,6 +399,55 @@ ADK's `openaimodel` rejects an inline blob outright (`unsupported content part:
 InlineData` — true in both v2.4.0 and v2.5.0). Refusing early turns an SDK
 error into an instruction.
 
+### Pictures in an editor tab
+
+`internal/editor/editor/imageview.go`. A tab can hold a picture instead of text,
+and the decisions in it are the ones to keep:
+
+- **The buffer stays, and stays empty.** It is not deleted and not bypassed:
+  about a hundred places index `tabs[pane.tabIdx]` and call `cur()`, so a picture
+  tab with no buffer is a nil dereference in a key handler rather than a picture.
+  What changes is that nothing may write to it. The old behaviour was worse than
+  ugly: the bytes went in as latin-1 prose, and `ctrl+s` wrote the buffer back
+  over the file — a picture was destroyed by saving it.
+- **Read-only is enforced where the keys are, not by convention.** The guard sits
+  *before* the editing switch, because the keys that must not arrive (typing,
+  `enter`, `backspace`, `ctrl+s`) are that switch's own cases; a check inside it
+  would be one more case to forget. `pasteInput` carries a second guard because a
+  paste is one message with the whole text and walks straight past a key-press
+  check. `TestEveryKeyOnAPictureTabIsHarmless` is the table that keeps a new key
+  out of the wrong switch.
+- **`imgprev.Render` is exported rather than copied.** One picture, one drawing
+  routine: a second renderer would mean the same file looks different depending on
+  which half of dmcode opened it. `TestRenderIsTheSameRenderer` asserts the art is
+  byte-identical to what `Load` produces.
+- **GIF frames are composited, not just decoded.** A frame is the rectangle that
+  changed, drawn over the last one, so rendering frames as decoded shows an empty
+  cell for every partial frame — in a real animation, most of them.
+  `DisposalPrevious` keeps a copy to restore and `DisposalBackground` clears.
+  Without this the feature works on a test GIF of full-size frames and shows
+  nothing on a real one.
+- **The animation is a tick chain, not a goroutine.** One `tea.Tick` per frame,
+  each scheduling the next, so it stops by itself when there is nothing to
+  advance — a closed tab, another file, the chat on screen — with no cancel path
+  to get wrong. `imgPending` is the one guard against two chains: every message
+  asks for a frame, and without it the picture runs at twice its declared speed.
+  The frame advances *after* the delay is checked, so a tick that arrives after
+  the picture went away cannot leave it one frame on.
+- **The extension is the cheap question, the bytes are the real one.** A content
+  sniff instead would decode every file the editor opens, which is the wrong
+  question to ask of a 4 MB log. A `.png` that does not decode opens as text with
+  the reason on the status line — a tab that refuses to open is a far worse
+  answer than a tab showing text with one line of explanation.
+- **The caption goes on the last row, not under the art.** The art's height
+  follows the aspect ratio and the pane's does not, so a caption placed under the
+  art would move up and down as the terminal is resized. It carries the base name
+  rather than the tab's path: on one row at the pane's width an absolute path is
+  truncated to an ellipsis, taking the dimensions and frame counter with it.
+- **No gutter.** `gutterWidthForTab` returns 0, which also stops `paneContentWidth`
+  from narrowing the art for a column of line numbers over a document that has
+  none.
+
 ### Session store
 
 `memsession.Service` replaces `session.InMemoryService` for one reason: that
@@ -232,14 +457,49 @@ ADK session interface (`Service`, `Session`, `Events`, `State`) is exported, so
 the store is implemented outside the ADK package.
 
 - `RewindToLastUserMessage` cuts at the last `Author == "user"` event, removing
-  that message too, and replays state from what survives.
-- Writes are append-only JSONL, one file per session, with a metadata header on
+  that message too, and replays state from what survives.- Writes are append-only JSONL, one file per session, with a metadata header on
   the first line so `/sessions` never has to read a conversation to list it.
   A rewind rewrites the file (temp + rename); an error is recorded, not returned,
   so a full disk cannot fail a turn.
+- **`Turn` carries `Entries`, not an `Agent` string.** `eventText` reads text
+  parts and nothing else, so a transcript built from it dropped every tool call,
+  every result and every change block — a restored session came back as a
+  conversation in which the agent had plainly done no work, while the events sat
+  on disk unread. `Entry` hands back the raw `*genai.FunctionCall` /
+  `*genai.FunctionResponse` rather than text this package formatted, because the
+  UI has one renderer for a tool line and one for a result
+  (`toolLine`/`toolArgs`/`renderToolResponse`), and a second set of formatters
+  would be a second answer to the same question with nothing to catch the drift.
+  `Broken` means *no* entries, not "no prose": a turn whose model answered with a
+  tool call is not a broken one.
 - `Service` is mutex-guarded and every method that may do I/O takes the write
   lock — including `load`, which can lazily read from disk. `recordWriteErr` is
   the one helper that must **not** take the lock itself.
+
+### Coming back to a session
+
+`-s` is the door back into a saved conversation, and it is taken out of
+`os.Args` by hand rather than declared, because Go's `flag` package cannot
+express an optional value: a string flag demands an argument, a bool flag refuses
+one, and the two requests are different — "the newest session" is what a user
+types almost every time, and it is not an id anyone can guess. `takeResumeFlag`
+also leaves a following `-flag` alone, so `dmcode -s -C ~/myapp` resumes *and*
+relocates rather than reading `-C` as a session id.
+
+Two things about where the id is settled, both of which are answers to "which
+bug":
+
+- **main resolves it, before the UI exists.** `NewestSessionID` reads only the
+  header of each session file, and `r.Run` is handed `m.sessionID` at *turn*
+  time — so a session chosen after `newRunner` would have the runner already
+  pointed at the fresh id `InitialModel` minted. An empty answer is not an error:
+  a store with nothing in it means a new session, and failing a start over a flag
+  the user typed out of habit would be worse.
+- **The hint is a string, and it is printed after `prog.Run` returns.** The
+  transcript was on the alternate screen, so every row that named the session —
+  header, sidebar, `/sessions` — is gone by then, and this is the only moment a
+  line about it survives. Making it `resumeHint(id) string` rather than a print
+  is what lets a test say the line names a command the parser accepts.
 
 ### Retries
 
@@ -248,6 +508,40 @@ next. `retryable()` answers "is another host worth trying" and so allows a 401;
 `sameEndpointRetryable()` answers "is asking this host again worth it" and does
 not. Keeping them separate is the point — a rejected key is another endpoint's
 problem, not a reason to repeat the same request twice.
+
+### A local model loads behind the interface
+
+`discover.StartGGUF` starts llama-server and returns; the wait is somebody else's
+job. `main` no longer blocks — `DetectProviders` returns a `Session` carrying the
+pool **and** the in-flight `Launch`, because a pool alone would claim the model is
+available when nothing is listening on its port yet.
+
+Four things about it are not obvious, and each is one that reads fine until it is
+wrong:
+
+- **The split is spawn / wait, not slow / fast.** Everything checkable in a
+  millisecond — the file exists, the binary exists — is checked *before* the
+  interface is drawn, because a mistyped path should be reported in milliseconds
+  rather than after the load timeout. Only loading the weights is deferred.
+- **`ggufState` is set at spawn, not after the wait.** That is the whole difference
+  between a load that can be abandoned and one that cannot: `StopGGUF` reaching the
+  child mid-load is what stops quitting from leaving an orphan holding a large
+  model in memory. The state is also what makes a second `/setup` pick *share* the
+  in-flight load instead of serialising on a mutex for its whole duration, on the
+  event loop.
+- **The UI holds an interface, not `*discover.Launch`** (`ggufLoad`). Every
+  behaviour worth testing here — refusing a message, cancelling, swapping the
+  provider in — needs a load that is not a real model, and the only way to have a
+  load without one is the seam. `internal/discover` tests spawn the test binary
+  itself as a fake llama-server, because "the caller is not blocked" and "the child
+  is killed" are only provable against a real process.
+- **A cancelled load is not a failed load** (`discover.ErrCancelled`). The user
+  ended it; a report naming a timeout they caused is the tool arguing with them.
+
+`handleGGUFReady` sets `m.pool` as well as `m.prov`. A runner rebuilt from a stale
+pool — `Tab`, `shift+tab`, `/cd` all do — would otherwise put the session back on
+the endpoint the user just switched away from, so the swap would hold for one turn
+and be quietly undone.
 
 ### Workspace boundary
 
@@ -268,6 +562,38 @@ with an error naming both directories. Two consequences to keep in mind:
   allowOutside)` is the seam: the symlink re-check is still done, but a path
   outside the root is only refused when the caller says so. An image leaves the
   machine either way, which is the thing the boundary is actually for.
+
+### The turn journal
+
+`ctrl+z` rewinds a turn twice: the conversation in the store and the files on
+disk. The second half lives in `internal/tools/undo.go` — a stack of turn
+groups the UI opens with `dmtools.BeginTurn()` at the same moment it sends a
+prompt, and pops with `dmtools.UndoTurn()` inside `rewind()`. Every write the
+tools make passes through `writeFileAtomic`, which records what it replaced
+and whether the file existed at all; `move_file` and `delete_file` record
+enough to invert themselves (a rename back, a restore); the shell watcher
+records its finds as **unrestorable** — a `sed -i` result is reported on the
+rewind line and left alone, because no content was ever captured for it. Three
+rules hold it together, each with a test in `internal/tools/undo_test.go`:
+
+- **Undo applies in reverse order, without dedupe.** Two writes to one file
+  undo to where the first one found it; a file written, moved and edited lands
+  exactly where the turn began. Restoring forward — or restoring "each path
+  once" — leaves every compound case on its last-but-one state.
+- **A restore does not become an edit.** Undo writes go through
+  `writeFileBytes`, the bare writer, not `writeFileAtomic` — otherwise a rewind
+  would count itself in the tally and journal itself for another rewind. The
+  tally *is* updated alongside (`recordChange` recomputes against the session
+  baseline), so the CHANGES panel stops showing an edit the rewind just removed.
+- **A shell-touched path is never half-restored.** If any entry in the turn
+  names a path the shell changed, its content restores are skipped and the path
+  is reported as not restored — restoring the post-write content over an unknown
+  pre-turn state would be the same guess the panel's `touched` flag refuses to
+  print as a number.
+
+`ResetChanges` clears the journal along with the tally, so `/new` cannot let a
+rewind reach back into a previous session's files. The journal is memory-only:
+a resumed session has no undo history, exactly as it has no in-memory tally.
 
 ---
 
@@ -405,10 +731,10 @@ Already fixed, and worth not regressing:
   bar only when the sidebar is absent (narrow terminal or ctrl+b), and its rows
   go back to the transcript.
 - **The sidebar lost its bottom sections** — one row per tool spilled past the
-  panel width or ate the whole height, trimming the plan and the hotkeys. The
-  tool list is now one wrapped entry (capped at 12 rows with a "…" marker), and a
-  too-short panel drops the hotkeys — the most replaceable rows — before it trims
-  anything else.
+  panel width or ate the whole height, trimming the plan. The tool list became one
+  wrapped entry, and the hotkeys then left the panel entirely; the sections now on
+  it are in §1's sidebar. What replaced the two is the point: a list of names that
+  never changes was never what a panel is for.
 - **Markdown "working every other time"** — the per-turn text accumulator was never
   reset at the end of an LLM round, so a turn that used a tool had its second
   round's closing response appended on top of the deltas already shown. The
@@ -426,16 +752,20 @@ Already fixed, and worth not regressing:
   (`finish_reason=length` mid-JSON) ended the turn with `unexpected end of JSON
   input`, which reads as a bug in dmcode. `internal/llm/truncate.go` types that
   failure apart from a merely malformed one (`truncatedCallError`) and re-asks the
-  same endpoint once: the same conversation, a note saying the call was too big,
-  and — only where the endpoint reported its usage — a budget of twice what the
-  call had already used. Two rules keep it honest, and both are the ones the
-  failover pool already follows: nothing is re-asked once anything has been
-  yielded (the transcript cannot take back the first answer), and a request that
-  carries a budget of its own is left alone, which keeps the 64-token tool probe
-  in `verify.go` a single request. A second truncation is reported as the first
-  one, never as whatever the failed re-ask said. The cost is a second generation
-  on a local model, and it can still fail — a model that insists on one huge call
-  gets the truncation error, which is the honest answer.
+  same endpoint once: the same conversation, a note saying the call was too big
+  (with a concrete recipe for `write_file`: a short head, then appends anchored
+  on the last line), and — only where the endpoint reported its usage — a budget
+  of twice what the call had already used. Two rules keep it honest: a request
+  that carries a budget of its own is left alone, which keeps the 64-token tool
+  probe in `verify.go` a single request, and the re-ask happens once. Text the
+  first attempt already streamed stays on screen — the transcript cannot take it
+  back — but the re-ask goes ahead anyway: a duplicated sentence is cheaper than
+  a lost turn, and the second attempt is preceded by a blank-line delta so the
+  re-done narration lands on its own row instead of glued to the half-answer.
+  A second truncation is reported as the first one, never as whatever the failed
+  re-ask said. The cost is a second generation on a local model, and it can
+  still fail — a model that insists on one huge call gets the truncation error,
+  which now also tells the user what to ask for next.
 
 ---
 
@@ -482,3 +812,17 @@ tested through synthesised bytes and the format policy through injected
 functions, because **a test that has to reach a global, shared, destructive
 resource to check a branch is a test that will fail for someone else** — and will
 be deleted, or worked around, by whoever it breaks for.
+
+That rule was then broken a second time by the editor tree that landed after it,
+which called `clipboard.WriteAll` straight from ctrl+c, ctrl+x and ctrl+v. Every
+copy and cut test put its own fixture into the user's clipboard — which is why
+`go test ./...` left "hello" and "alpha" there — and ctrl+v *read* the real one,
+so what a paste test received depended on what the user had copied last. The
+seam `internal/ui` already had for reading is now on both sides in both
+packages (`writeClipboardText`, `readClipboardText` in `panel_select.go` and
+`image.go`), and `fakeClipboard` swaps it for the duration of a test.
+`TestClipboardTestsNeverTouchTheRealClipboard` is the guard on that seam: a
+direct call still compiles and still passes every other test, so something has
+to assert that the copy reached the write indirection. The lesson generalises —
+**the fix for a destructive test is an injection point plus a test that fails
+when the injection point is bypassed, not the removal of the test.**

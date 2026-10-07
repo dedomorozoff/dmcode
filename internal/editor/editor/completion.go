@@ -1,0 +1,292 @@
+package editor
+
+import (
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+)
+
+const complMaxCandidates = 2000
+const complVisible = 8
+
+func isWordRune(r rune) bool {
+	if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+		return true
+	}
+	return r == '_'
+}
+
+// complPrefix returns the start column and text of the word being completed at
+// the cursor on the current line.
+func (m *Model) complPrefix() (int, string) {
+	b := m.cur().buf
+	line := b.LineAt(b.CurLine())
+	col := b.Col()
+	start := col
+	for start > 0 && isWordRune(line[start-1]) {
+		start--
+	}
+	return start, string(line[start:col])
+}
+
+// complWordCandidates collects identifiers from the current buffer that start
+// with prefix (excluding an exact match), deduplicated and sorted.
+func (m *Model) complWordCandidates(prefix string) []string {
+	t := m.cur()
+	if t == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	n := t.buf.LineCount()
+	for i := 0; i < n && len(out) < complMaxCandidates; i++ {
+		line := t.buf.LineAt(i)
+		j := 0
+		for j < len(line) {
+			for j < len(line) && !isWordRune(line[j]) {
+				j++
+			}
+			start := j
+			for j < len(line) && isWordRune(line[j]) {
+				j++
+			}
+			if start < j {
+				w := string(line[start:j])
+				if w != prefix && strings.HasPrefix(w, prefix) && !seen[w] {
+					seen[w] = true
+					out = append(out, w)
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// triggerCompletion recomputes candidates for the word at the cursor and opens
+// or closes the popup. force ignores whether candidates were found, so
+// Ctrl+Space can surface suggestions even mid-word. It returns a command that
+// fires an async LSP completion request when a language server is available.
+//
+// The popup also opens when the buffer has no matching words but a language
+// server could answer (e.g. freshly typed "fmt.P" where no buffer word starts
+// with a capital). Without this, type-aware candidates are never requested and
+// the user only ever sees words scraped from the current file.
+func (m *Model) triggerCompletion(force bool) tea.Cmd {
+	start, prefix := m.complPrefix()
+	if prefix == "" && !force {
+		m.closeCompletion()
+		return nil
+	}
+	cands := m.complWordCandidates(prefix)
+	if len(cands) == 0 && !force && !m.lspAvailable() {
+		m.closeCompletion()
+		return nil
+	}
+	m.complOpen = true
+	m.complItems = cands
+	m.complStart = start
+	m.complLine = m.cur().buf.CurLine()
+	m.complSel = 0
+	m.complOffset = 0
+	return m.lspCompletionCmd()
+}
+
+// lspAvailable reports whether the current tab's language has an LSP server
+// installed. It mirrors ensureLSP so triggerCompletion can decide whether a
+// zero-candidate popup is worth holding open for server results.
+func (m *Model) lspAvailable() bool {
+	t := m.cur()
+	if t == nil || t.path == "" {
+		return false
+	}
+	cmd, _, _ := m.lspResolve(strings.ToLower(filepath.Ext(t.path)))
+	if cmd == "" {
+		return false
+	}
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
+
+func (m *Model) closeCompletion() {
+	m.complOpen = false
+	m.complItems = nil
+	m.complSel = 0
+	m.complOffset = 0
+}
+
+// acceptCompletion replaces the completed word with the selected item.
+func (m *Model) acceptCompletion() {
+	if !m.complOpen || len(m.complItems) == 0 {
+		return
+	}
+	b := m.cur().buf
+	if b.CurLine() != m.complLine {
+		m.closeCompletion()
+		return
+	}
+	item := m.complItems[m.complSel]
+	to := b.Col()
+	from := m.complStart
+	if to < from {
+		from = to
+	}
+	b.ReplaceRange(b.CurLine(), from, to-from, []rune(item))
+	m.closeCompletion()
+}
+
+// handleCompletionKey processes navigation keys while the popup is open. It
+// returns true when the key was consumed.
+func (m *Model) handleCompletionKey(key string) bool {
+	n := len(m.complItems)
+	switch key {
+	case "esc":
+		m.closeCompletion()
+		return true
+	case "tab", "enter":
+		m.acceptCompletion()
+		return true
+	case "up", "ctrl+p":
+		if n > 0 {
+			m.complSel = (m.complSel - 1 + n) % n
+			m.clampCompletion()
+		}
+		return true
+	case "down", "ctrl+n":
+		if n > 0 {
+			m.complSel = (m.complSel + 1) % n
+			m.clampCompletion()
+		}
+		return true
+	case "pgup":
+		if n > 0 {
+			m.complSel -= complVisible
+			if m.complSel < 0 {
+				m.complSel = 0
+			}
+			m.clampCompletion()
+		}
+		return true
+	case "pgdown":
+		if n > 0 {
+			m.complSel += complVisible
+			if m.complSel > n-1 {
+				m.complSel = n - 1
+			}
+			m.clampCompletion()
+		}
+		return true
+	case "left", "right", "home", "end":
+		m.closeCompletion()
+		return false
+	}
+	return false
+}
+
+// clampCompletion keeps the selection within the visible popup window.
+func (m *Model) clampCompletion() {
+	if m.complSel < m.complOffset {
+		m.complOffset = m.complSel
+	}
+	if m.complSel >= m.complOffset+complVisible {
+		m.complOffset = m.complSel - complVisible + 1
+	}
+}
+
+// complExtraRows reports how many rows the completion popup occupies.
+func (m Model) complExtraRows() int {
+	if !m.complOpen {
+		return 0
+	}
+	n := len(m.complItems)
+	if n > complVisible {
+		n = complVisible
+	}
+	return n
+}
+
+// complWidth is the natural popup width: the widest candidate, capped so the
+// window stays compact next to the cursor.
+func (m Model) complWidth() int {
+	w := 4
+	for _, it := range m.complItems {
+		if lw := lipgloss.Width(it) + 4; lw > w {
+			w = lw
+		}
+	}
+	if w > 44 {
+		w = 44
+	}
+	return w
+}
+
+// complPanel renders the completion popup as a compact list. The block is
+// left-aligned at the edit cursor and blank-padded to the full terminal width,
+// so the caller can splice it over the rendered rows as a floating window.
+func (m Model) complPanel() []string {
+	items := m.complItems
+	total := len(items)
+	if total > complVisible {
+		items = items[m.complOffset : m.complOffset+complVisible]
+	}
+	w := m.complWidth()
+	rows := make([]string, 0, len(items))
+	for i, it := range items {
+		label := padTo(" "+it+" ", w)
+		if m.complOffset+i == m.complSel {
+			rows = append(rows, statusHiStyle.Render(label))
+		} else {
+			rows = append(rows, statusStyle.Render(label))
+		}
+	}
+
+	// Left-align the popup at the cursor column so it reads as a floating
+	// window under the text instead of a full-width banner.
+	cx, _ := m.cursorScreenPos()
+	if cx+w > m.width {
+		cx = m.width - w
+		if cx < 0 {
+			cx = 0
+		}
+	}
+	indent := strings.Repeat(" ", cx)
+	fill := m.width - (cx + w)
+	if fill < 0 {
+		fill = 0
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, indent+r+strings.Repeat(" ", fill))
+	}
+	return out
+}
+
+// overlayCompletion splices the popup into the assembled screen rows right
+// below the edit line, covering those rows for its height (no reflow), so the
+// rest of the buffer stays put while it is open.
+func (m Model) overlayCompletion(rows []string) []string {
+	if !m.complOpen || len(m.complItems) == 0 {
+		return rows
+	}
+	panel := m.complPanel()
+	if len(panel) == 0 {
+		return rows
+	}
+	_, sy := m.cursorScreenPos()
+	start := sy + 1
+	if start < 0 {
+		start = 0
+	}
+	for i, r := range panel {
+		idx := start + i
+		if idx >= len(rows) {
+			break
+		}
+		rows[idx] = r
+	}
+	return rows
+}

@@ -13,14 +13,19 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
+
+	tea "charm.land/bubbletea/v2"
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/ask"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
+	"github.com/dedomorozoff/dmcode/internal/editor/editor"
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	dmmcp "github.com/dedomorozoff/dmcode/internal/mcp"
+	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
 	"google.golang.org/adk/v2/tool"
@@ -60,17 +65,85 @@ func subNotifier(ev dmagent.SubEvent) {
 }
 
 func main() {
+	// "dmcode editor [dir | files...]" is the same door as -e, spelled the way
+	// dmed spelled it, so old muscle memory and old scripts keep working.
+	if len(os.Args) > 1 && os.Args[1] == "editor" {
+		if err := runEditor(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	showVersion := flag.Bool("version", false, "print the dmcode version and exit")
 	dir := flag.String("C", "", "work as if dmcode was started in this directory")
 	flag.StringVar(dir, "dir", "", "alias for -C")
+	edit := flag.Bool("e", false, "open the file editor instead of the agent session")
+	// -s takes an *optional* value, which Go's flag package cannot express: a
+	// string flag demands an argument and a bool flag refuses one. So it is taken
+	// out of the arguments here and handed to run, the same door "dmcode editor"
+	// gets.
+	rest, want := takeResumeFlag(os.Args[1:])
+	os.Args = append([]string{os.Args[0]}, rest...)
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("dmcode", version)
 		return
 	}
-	if err := run(*dir); err != nil {
+	if *edit {
+		if err := runEditor(flag.Args()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if err := run(*dir, want); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// resumeFlag is what -s asked for. Asked and ID are separate because the two
+// cases are different requests: "this session" names one, and a bare -s means
+// "wherever I was", which only becomes an id once the store has been read.
+type resumeFlag struct {
+	Asked bool
+	ID    string
+}
+
+// takeResumeFlag removes -s / --session from args and reports what it wanted.
+//
+// Bare, it asks for the newest session; given an id, that one. A following
+// argument that looks like a flag is left alone, so "dmcode -s -C ~/project"
+// resumes the newest session *and* changes directory rather than reading "-C" as
+// a session id.
+func takeResumeFlag(args []string) (rest []string, want resumeFlag) {
+	rest = make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "-s" || a == "--session":
+			want.Asked = true
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				want.ID = args[i+1]
+				i++
+			}
+		case strings.HasPrefix(a, "--session="):
+			want.Asked, want.ID = true, strings.TrimPrefix(a, "--session=")
+		case strings.HasPrefix(a, "-s="):
+			want.Asked, want.ID = true, strings.TrimPrefix(a, "-s=")
+		default:
+			rest = append(rest, a)
+		}
+	}
+	return rest, want
+}
+
+// runEditor starts the merged dmed editor on the given paths. The editor is
+// a full Bubble Tea program of its own, so it never shares a process with the
+// agent TUI: one runs, the other does not exist.
+func runEditor(args []string) error {
+	model := editor.New(args...)
+	model.ApplyTerminalCompat()
+	p := tea.NewProgram(model)
+	_, err := p.Run()
+	return err
 }
 
 // run starts the session, optionally relocated to dir.
@@ -80,11 +153,19 @@ func main() {
 // configure the session against the wrong project. Chdir also keeps the tools —
 // which address files relative to the process directory — in step with what the
 // user asked for, instead of leaving the two disagreeing.
-func run(dir string) error {
+func run(dir string, want resumeFlag) error {
 	if dir != "" {
 		if err := os.Chdir(dir); err != nil {
 			return fmt.Errorf("cannot start in %s: %w", dir, err)
 		}
+	}
+	if want.Asked && want.ID == "" {
+		// Settled here rather than inside the UI, because the runner is built
+		// around a session id and a session opened after that would be pointed at
+		// the wrong one. A store with nothing in it is not a failure to open a
+		// fresh conversation, so an empty answer just means the start is a new
+		// session.
+		want.ID = memsession.NewestSessionID(config.SessionsDir())
 	}
 	// Confines every tool path to the session's directory. A failure here is not
 	// fatal: the agent still works, it simply is not fenced in.
@@ -100,11 +181,14 @@ func run(dir string) error {
 	i18n.Init()
 	ctx := context.Background()
 
-	pool, err := discover.DetectProviders()
+	session, err := discover.DetectProviders()
 	if err != nil {
 		return err
 	}
-	// A GGUF session runs its own llama-server; it must not outlive the TUI.
+	pool := session.Pool
+	// A GGUF session runs its own llama-server; it must not outlive the TUI. The
+	// deferred call covers quitting during the load as well as after it, which is
+	// the case that used to leave an orphan holding a large model in memory.
 	defer discover.StopGGUF()
 
 	agentTools, err := tools.MakeTools()
@@ -161,19 +245,35 @@ func run(dir string) error {
 
 	mcpServers, mcpNotes := dmmcp.Load(mustGetwd())
 	mcpToolsets := dmmcp.Toolsets(mcpServers)
-	var mcpNames []string
+	// One eager pass per server, and the sidebar's MCP section is built from the
+	// same result the tool names come from: a second listing would be a second
+	// answer to "what does this server offer", and the two could disagree — a
+	// server that came up between the passes would appear in the panel and not
+	// in the agent's instrument set.
+	var mcpStates []dmmcp.ServerState
 	if len(mcpServers) > 0 {
-		names, moreNotes := dmmcp.List(ctx, mcpServers)
-		mcpNames = names
-		mcpNotes = append(mcpNotes, moreNotes...)
+		mcpStates = dmmcp.States(ctx, mcpServers)
+	}
+	for _, st := range mcpStates {
+		if st.Err != nil {
+			mcpNotes = append(mcpNotes, fmt.Sprintf("mcp: %s: %v", st.Name, st.Err))
+			continue
+		}
+		if st.CloseErr != nil {
+			mcpNotes = append(mcpNotes, fmt.Sprintf("mcp: %s: could not close the listing session: %v", st.Name, st.CloseErr))
+		}
 	}
 
 	toolNames := tools.ToolNames(agentTools)
-	toolNames = append(toolNames, mcpNames...)
+	for _, st := range mcpStates {
+		toolNames = append(toolNames, st.Tools...)
+	}
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpNotes, broker, bindSubNotifier, yoloTools)
+	// A GGUF load is still running when the interface appears; the UI shows it
+	// loading and swaps the provider in when it answers.
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpStates, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to
