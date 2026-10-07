@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/draw"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
@@ -180,6 +182,163 @@ func Load(data []byte, name string, cols, bleed int, profile colorprofile.Profil
 	art, rows := render(img, cols+bleed, profile)
 	out.Art, out.Rows, out.Width = art, rows, cols+bleed
 	return Attachment{Name: name, Preview: out}, nil
+}
+
+// Render draws one already-decoded picture as half-blocks at the given width
+// and returns the art with the number of terminal rows it occupies.
+//
+// Load is the wire path: it decodes, reduces and hands back both the preview and
+// the bytes for the model. The editor's image view needs neither of those — it
+// has the file already and sends nothing — but it needs the *same* renderer, or
+// the same picture would come out two different ways depending on which half of
+// dmcode opened it. So the renderer is exported rather than copied, and the
+// decision about sizing stays with the caller: the transcript's preview is a
+// fixed 32 columns, while a full-pane view wants the width it was given.
+func Render(img image.Image, cols int, profile colorprofile.Profile) (art string, rows int) {
+	if img == nil || cols < 1 {
+		return "", 0
+	}
+	return render(img, cols, profile)
+}
+
+// Decode reads one image, animated or not. An animated GIF comes back as every
+// frame with its own delay, because a still of frame zero is a preview of a GIF
+// in the same way a screenshot of a video is a preview of the video: the motion
+// is the content.
+//
+// The frame count is capped. A GIF can declare thousands of frames, and holding
+// every composited one is a memory cost the user did not ask for by opening a
+// file; past the cap the animation simply stops there.
+func Decode(data []byte) (*Animation, error) {
+	if len(data) == 0 {
+		return nil, errors.New("the file is empty")
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, unsupported(format, err)
+	}
+	if format == "gif" {
+		return decodeGIF(data, cfg)
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, unsupported(format, err)
+	}
+	// A still image has no delays at all rather than a zero one: FrameDelay
+	// floors a declared zero to something watchable, which is right for a GIF
+	// frame and wrong here — it would make a photograph look like it is meant to
+	// be advanced. No delays is how "there is nothing to time" is said.
+	return &Animation{
+		Frames:      []image.Image{img},
+		PixelWidth:  cfg.Width,
+		PixelHeight: cfg.Height,
+		MIME:        mimeFor(format),
+	}, nil
+}
+
+// MaxFrames bounds how much of an animation is decoded. It is deliberately
+// generous: a real GIF over this is either a mistake or something no terminal
+// preview could show anyway.
+const MaxFrames = 240
+
+// Animation is a decoded picture: one frame for a still image, many for a GIF.
+type Animation struct {
+	Frames      []image.Image
+	Delays      []time.Duration
+	PixelWidth  int
+	PixelHeight int
+	MIME        string
+}
+
+// FrameDelay is how long frame i is shown, clamped to something a person can
+// see.
+//
+// Delays arrive in hundredths of a second and a GIF is allowed to declare zero,
+// which would otherwise spin the frames as fast as the terminal redraws — a
+// strobe where the picture should be. The floor is 20ms and the ceiling 2s: the
+// first is below what reads as motion, the second is above what anyone waits.
+func (a *Animation) FrameDelay(i int) time.Duration {
+	if a == nil || len(a.Delays) == 0 {
+		return 0
+	}
+	if i < 0 || i >= len(a.Delays) {
+		return 0
+	}
+	d := a.Delays[i] * 10 * time.Millisecond
+	if d < 20*time.Millisecond {
+		d = 20 * time.Millisecond
+	}
+	if d > 2*time.Second {
+		d = 2 * time.Second
+	}
+	return d
+}
+
+// Animated reports whether there is more than one frame to show.
+func (a *Animation) Animated() bool { return a != nil && len(a.Frames) > 1 }
+
+// decodeGIF composites an animation frame by frame.
+//
+// The frames of a GIF are not whole pictures: each one is the rectangle that
+// changed, drawn over what came before, and the disposal method says whether
+// the canvas is put back afterwards. Rendering frame i without compositing
+// shows a transparent frame — literally nothing, since the art is drawn from
+// the decoded pixels — for every frame that is not full-size, which is most of
+// them in a real animation. So each frame is drawn onto the canvas the previous
+// one left behind, and DisposalPrevious keeps a copy to restore, because it is
+// the one disposal that says "put back what was there before this frame".
+func decodeGIF(data []byte, cfg image.Config) (*Animation, error) {
+	g, err := gif.DecodeAll(bytes.NewReader(data))
+	if err != nil {
+		return nil, unsupported("gif", err)
+	}
+	if len(g.Image) == 0 {
+		return nil, errors.New("the gif has no frames")
+	}
+	bounds := image.Rect(0, 0, cfg.Width, cfg.Height)
+	if cfg.Width < 1 || cfg.Height < 1 {
+		bounds = g.Image[0].Bounds()
+	}
+	canvas := image.NewRGBA(bounds)
+	var prev *image.RGBA
+	out := &Animation{
+		PixelWidth:  cfg.Width,
+		PixelHeight: cfg.Height,
+		MIME:        "image/gif",
+	}
+	limit := min(len(g.Image), MaxFrames)
+	for i := 0; i < limit; i++ {
+		frame := g.Image[i]
+		if i > 0 {
+			switch g.Disposal[i] {
+			case gif.DisposalPrevious:
+				if prev != nil {
+					draw.Draw(canvas, bounds, prev, bounds.Min, draw.Src)
+				}
+			case gif.DisposalBackground:
+				draw.Draw(canvas, bounds, image.Transparent, image.Point{}, draw.Src)
+			}
+		}
+		draw.Draw(canvas, frame.Bounds(), frame, frame.Bounds().Min, draw.Over)
+		// The frame is copied, not aliased: the next iteration draws onto the
+		// same canvas, and an aliased frame would change under the copy.
+		snapshot := image.NewRGBA(bounds)
+		draw.Draw(snapshot, bounds, canvas, bounds.Min, draw.Src)
+		out.Frames = append(out.Frames, snapshot)
+		// Delays are kept in hundredths of a second, the unit the GIF format
+		// itself uses, so FrameDelay is the single place that converts.
+		delay := 0
+		if i < len(g.Delay) {
+			delay = g.Delay[i]
+		}
+		out.Delays = append(out.Delays, time.Duration(delay))
+		if g.Disposal[i] == gif.DisposalPrevious {
+			prev = snapshot
+		} else {
+			prev = nil
+		}
+	}
+	return out, nil
 }
 
 // tooLarge reports a file over the wire limit, naming the step that produced the

@@ -10,6 +10,7 @@ import (
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/hinshun/vt10x"
 
 	"github.com/dedomorozoff/dmcode/internal/editor/buffer"
@@ -27,8 +28,13 @@ import (
 )
 
 type tab struct {
-	buf          *buffer.Buffer
-	path         string
+	buf  *buffer.Buffer
+	path string
+	// img is set when the file is a picture: the tab then draws the decoded
+	// frames where its lines would be and keeps an empty buffer. A nil img is
+	// every text tab, so the field costs one word and no branch anywhere but
+	// where a picture is actually drawn.
+	img          *imageView
 	syntaxCached []syntax.HighlightedLine
 	syntaxText   string
 	diffCached   vcs.FileDiff
@@ -301,8 +307,12 @@ type Model struct {
 	// syn is the syntax highlighter owned by the model. It was a package-level
 	// variable in internal/syntax, written from Update on config hot-reload
 	// and read while rendering; keeping it here removes that global mutable.
-	syn        *syntax.Highlighter
-	tr         i18n.Translator
+	syn *syntax.Highlighter
+	tr  i18n.Translator
+	// profile is what the terminal said it can show, which decides how a picture
+	// is drawn. colorprofile.NoTTY means nobody has said, and the render falls
+	// back to detecting it.
+	profile    colorprofile.Profile
 	plugins    *plugin.Manager
 	lspClient  *lsp.Client
 	diagCh     chan lspDiagMsg
@@ -455,6 +465,10 @@ type Model struct {
 	complStart  int
 
 	quitConfirm bool
+	// imgPending is true while an animation frame is scheduled. It is the single
+	// guard against running two tick chains for one picture, which would draw it
+	// at twice the speed its delays say.
+	imgPending  bool
 	quitTab     bool // true if confirming close of a single tab (not quit)
 	pendingQuit bool
 
@@ -674,6 +688,26 @@ func (m *Model) openPath(rawPath string) {
 		t.lineEnding = le
 		t.encoding = enc
 		t.buf = buffer.Load(strings.ReplaceAll(string(data), "\r\n", "\n"))
+		// A picture is opened as a picture, and only if the decoder agrees: a
+		// .png that is not one falls through to the text view above with the
+		// reason in the status line, because a tab full of mojibake and no
+		// explanation is worse than either.
+		//
+		// The extension is the cheap first question and the bytes are the real
+		// one, so a picture named without a suffix still opens as text — the
+		// alternative is attempting a decode on every file the editor opens,
+		// which is the wrong question to ask of a log.
+		if looksLikeImage(path) {
+			if v, err := loadImage(data); err == nil {
+				t.img = v
+				// The buffer is emptied rather than loaded: it exists so that
+				// cur() and renderPaneRows have something to index, and filling it
+				// with the bytes would put the picture back on screen as prose.
+				t.buf = buffer.New()
+			} else {
+				m.msg = m.t("msg.image_failed", err.Error())
+			}
+		}
 	}
 	if m.watcher != nil && path != "" {
 		if err := m.watcher.Watch(path); err != nil {
@@ -691,7 +725,9 @@ func (m *Model) openPath(rawPath string) {
 		m.plugins.Emit(m, "file_open")
 	}
 	// Hint when this file's language needs an LSP server that isn't installed.
-	if err == nil {
+	// A picture has no language, and asking about one produces a hint about a
+	// server for a file type that does not exist.
+	if err == nil && t.img == nil {
 		if hint := m.lspMissingHintFor(t.path); hint != "" {
 			m.msg = m.t("msg.lsp_missing", hint)
 		}
@@ -867,6 +903,14 @@ func (m *Model) pasteInput(text string) {
 		return
 	case m.paletteOpen:
 		m.paletteQ = append(m.paletteQ, []rune(text)...)
+		return
+	}
+	// A paste is one message carrying the whole text, so a guard written for key
+	// presses alone would not see it — and a picture tab's buffer is empty, so
+	// the paste would land in a document nobody can see and Ctrl+S would then
+	// write it over the picture.
+	if t := m.cur(); t != nil && t.img != nil {
+		m.msg = m.t("msg.image_readonly")
 		return
 	}
 	if m.cur().buf.HasMultipleCursors() {
@@ -1181,6 +1225,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// tab holds the name the editor was opened with; both absolute, not
 			// both the same string.
 			if pathnorm.Same(t.path, path) {
+				// A picture reloads as a picture. Left to the branch below it would
+				// be loaded into the buffer as text, which is the one thing this tab
+				// exists to avoid — and it would look like it worked, right up until
+				// the art was replaced by a screenful of mojibake.
+				if t.img != nil {
+					if data, err := os.ReadFile(t.path); err == nil {
+						if v, err := loadImage(data); err == nil {
+							t.img = v
+						} else {
+							// The file stopped being a picture. Fall back to text so
+							// the tab shows what is actually on disk, and say why.
+							t.img = nil
+							t.buf = buffer.Load(strings.ReplaceAll(string(data), "\r\n", "\n"))
+							m.msg = m.t("msg.image_failed", err.Error())
+						}
+						m.msg = m.t("msg.reloaded_name", t.name(m.baseDir()))
+					}
+					break
+				}
 				if !t.buf.Dirty() {
 					if data, err := os.ReadFile(t.path); err == nil {
 						t.buf = buffer.Load(strings.ReplaceAll(string(data), "\r\n", "\n"))
@@ -1218,6 +1281,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, waitForFileEvent(m.fileEvents)
+	case tea.ColorProfileMsg:
+		// Recorded because a picture is drawn in whatever the terminal can
+		// actually show: truecolor escapes sent to a 16-colour terminal come out
+		// as a field of wrong-coloured blocks, and the ramp is the fallback that
+		// still carries the picture.
+		m.profile = msg.Profile
+		return m, nil
+	case imgFrameMsg:
+		// The tick for the next frame of an animation. Scheduling the next one
+		// here rather than in a loop is what stops the animation by itself: a tab
+		// that is closed, a chat screen that covers the editor, or a program on
+		// its way out all mean animationDelay() is zero, and the chain ends
+		// without a cancel path to get wrong.
+		//
+		// The frame is advanced only when the delay says there is something to
+		// advance. A tick that arrives after the picture went away — the last one
+		// of a chain, scheduled before the tab was switched — must not leave the
+		// animation one frame on: coming back to it would show a different picture
+		// than the one the user opened.
+		m.imgPending = false
+		if d := m.animationDelay(); d > 0 {
+			m.advanceFrame()
+			m.imgPending = true
+			return m, imgTick(d)
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		if msg.Width > 0 {
 			m.width = msg.Width
@@ -1410,7 +1499,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.clampScroll()
-	return m, nil
+	// The tail is where an animation is *started*: every message passes through
+	// here, so the tick chain begins on whatever brought the picture on screen —
+	// the key that opened it, the tab switch, the resize — and an early return
+	// above costs at most one message of delay rather than a stuck picture.
+	return m, m.animCmd()
 }
 
 func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -1721,6 +1814,15 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	if m.quitConfirm {
 		return m.handleQuitConfirm(msg)
 	}
+	// A picture tab answers a smaller set of keys and drops the rest. This sits
+	// with the other modal handlers rather than inside the editing switch below,
+	// because the keys that must not arrive are precisely the ones that switch:
+	// typing, paste, backspace and Ctrl+S are the editing switch's own cases, so
+	// a check inside it would be one more case to forget, and forgetting it
+	// destroys the picture the user opened.
+	if t := m.cur(); t != nil && t.img != nil {
+		return m.handleImageKey(s)
+	}
 	if len(s) == 5 && strings.HasPrefix(s, "alt+") && s[4] >= '1' && s[4] <= '9' {
 		m.jumpTab(int(s[4] - '1'))
 		return nil
@@ -1967,7 +2069,7 @@ func OwnsMsg(msg tea.Msg) bool {
 	switch msg.(type) {
 	case terminalOutputMsg, terminalExitMsg, FileChangedMsg, lspDiagMsg,
 		lspCompletionMsg, lspDefinitionMsg, gitTransferMsg, gitBlameMsg,
-		pluginStoreMsg, pluginSourceMsg:
+		pluginStoreMsg, pluginSourceMsg, imgFrameMsg:
 		return true
 	}
 	return false
@@ -2193,6 +2295,20 @@ func (m *Model) clampScroll() {
 	p := m.curPane()
 	t := m.cur()
 	if t == nil {
+		return
+	}
+	// A picture is scrolled by the same offset but has no cursor to keep in
+	// view. Running the buffer's rules over it would pin the offset to zero on
+	// every message — the cursor of an empty buffer is line 0 — and the wheel
+	// would appear not to work at all.
+	if t.img != nil {
+		if maxOff := m.imageScrollMax(m.activePane, m.paneContentHeight(m.activePane)-1); p.offsetY > maxOff {
+			p.offsetY = maxOff
+		}
+		if p.offsetY < 0 {
+			p.offsetY = 0
+		}
+		p.offsetX = 0
 		return
 	}
 	h := m.paneViewHeight(m.activePane)

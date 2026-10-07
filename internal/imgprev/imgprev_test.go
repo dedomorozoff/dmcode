@@ -5,9 +5,11 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/png"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
@@ -48,6 +50,138 @@ func quadrants(t *testing.T, n int) []byte {
 		t.Fatalf("encode: %v", err)
 	}
 	return buf.Bytes()
+}
+
+// animGIF builds a GIF of n frames, each a solid colour, 40 hundredths of a
+// second per frame.
+func animGIF(t *testing.T, n int, cols []color.RGBA) []byte {
+	t.Helper()
+	g := &gif.GIF{}
+	for i := 0; i < n; i++ {
+		img := image.NewPaletted(image.Rect(0, 0, 4, 4), color.Palette{cols[i%len(cols)], color.RGBA{A: 255}})
+		for p := range img.Pix {
+			img.Pix[p] = 0
+		}
+		g.Image = append(g.Image, img)
+		g.Delay = append(g.Delay, 4)
+		g.Disposal = append(g.Disposal, gif.DisposalNone)
+	}
+	var buf bytes.Buffer
+	if err := gif.EncodeAll(&buf, g); err != nil {
+		t.Fatalf("encode gif: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestDecodeReturnsEveryFrame is the contract the editor's animation rests on:
+// a GIF decodes to all of its frames, not to frame zero. A decoder that hands
+// back the first frame is a working still-image decoder and a broken animation.
+func TestDecodeReturnsEveryFrame(t *testing.T) {
+	colors := []color.RGBA{
+		{R: 255, A: 255},
+		{G: 255, A: 255},
+		{B: 255, A: 255},
+	}
+	a, err := Decode(animGIF(t, 3, colors))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(a.Frames) != 3 {
+		t.Fatalf("frames = %d, want 3", len(a.Frames))
+	}
+	if !a.Animated() {
+		t.Error("a three-frame GIF reports itself as still")
+	}
+	if a.MIME != "image/gif" {
+		t.Errorf("MIME = %q, want image/gif", a.MIME)
+	}
+	if a.PixelWidth != 4 || a.PixelHeight != 4 {
+		t.Errorf("dimensions = %dx%d, want 4x4", a.PixelWidth, a.PixelHeight)
+	}
+	// Each frame must carry the colour it was drawn in, which is only true if
+	// the compositing put this frame over the canvas rather than beside it.
+	for i, want := range colors {
+		r, g, b, _ := a.Frames[i].At(1, 1).RGBA()
+		if uint8(r>>8) != want.R || uint8(g>>8) != want.G || uint8(b>>8) != want.B {
+			t.Errorf("frame %d is %d,%d,%d, want %d,%d,%d",
+				i, r>>8, g>>8, b>>8, want.R, want.G, want.B)
+		}
+	}
+}
+
+// TestFrameDelayIsClampedToSomethingWatchable pins the two bounds, because both
+// ends are ways a GIF's own numbers turn into a broken view: a declared zero
+// spins as fast as the terminal redraws, and a declared ten seconds is a picture
+// that appears frozen.
+func TestFrameDelayIsClampedToSomethingWatchable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		hundred time.Duration
+		want    time.Duration
+	}{
+		{"zero is floored", 0, 20 * time.Millisecond},
+		{"one is floored", 1, 20 * time.Millisecond},
+		{"a sane delay passes through", 5, 50 * time.Millisecond},
+		{"an absurd delay is capped", 10000, 2 * time.Second},
+	} {
+		a := &Animation{Delays: []time.Duration{tc.hundred}}
+		if got := a.FrameDelay(0); got != tc.want {
+			t.Errorf("%s: FrameDelay = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if (&Animation{}).FrameDelay(0) != 0 {
+		t.Error("an animation with no delays must report no delay, not a floored one")
+	}
+}
+
+// TestAStillImageIsNotAnimated is the other half: a PNG must not be scheduled a
+// tick, or the editor would redraw a photograph forever.
+func TestAStillImageIsNotAnimated(t *testing.T) {
+	a, err := Decode(solid(t, 8, 8, color.RGBA{B: 255, A: 255}))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if a.Animated() {
+		t.Error("a PNG reports itself as animated")
+	}
+	if a.FrameDelay(0) != 0 {
+		t.Error("a still image must report no delay")
+	}
+}
+
+// TestRenderIsTheSameRenderer pins the reason Render is exported rather than
+// copied: the editor and the transcript must draw one picture the same way.
+func TestRenderIsTheSameRenderer(t *testing.T) {
+	a, err := Load(quadrants(t, 8), "q.png", 8, 0, colorprofile.TrueColor)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	img, err := Decode(quadrants(t, 8))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	art, rows := Render(img.Frames[0], 8, colorprofile.TrueColor)
+	if art != a.Art {
+		t.Errorf("Render and Load drew the same picture differently:\n%q\n%q", art, a.Art)
+	}
+	if len(strings.Split(art, "\n")) != rows {
+		t.Errorf("rows = %d but the art has %d lines", rows, len(strings.Split(art, "\n")))
+	}
+	if art, rows := Render(nil, 8, colorprofile.TrueColor); art != "" || rows != 0 {
+		t.Errorf("Render(nil) = %q, %d; want empty", art, rows)
+	}
+}
+
+// TestDecodeNamesWhatItCannotRead: a file that is not a picture has to produce a
+// refusal that says so, because the editor's fallback opens it as text and the
+// user needs to know why.
+func TestDecodeNamesWhatItCannotRead(t *testing.T) {
+	if _, err := Decode([]byte("not a picture at all")); !errors.Is(err, ErrUnsupportedImage) {
+		t.Errorf("Decode(text) error = %v, want ErrUnsupportedImage", err)
+	}
+	if _, err := Decode(nil); err == nil {
+		t.Error("Decode(empty) must fail")
+	}
 }
 
 // TestSolidColourSurvivesTheRoundTrip is the basic contract: an image of one

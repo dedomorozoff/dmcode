@@ -299,11 +299,17 @@ func (m Model) paneStatusBar(paneIdx int) string {
 	lncol := ""
 	if !t.scratch() {
 		mark = fmt.Sprintf("[%d] %s", paneIdx+1, t.name(m.baseDir()))
-		lncol = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+		// A picture reports its dimensions, not a cursor position: Ln 1, Col 1 on
+		// a rendered image describes a document that does not exist.
+		if t.img != nil {
+			lncol = t.img.caption("") + " "
+		} else {
+			lncol = m.t("status.lncol", t.buf.CurLine()+1, t.buf.Col()+1)
+		}
 	}
 	fileInfo := ""
 	langTag := ""
-	if t.path != "" {
+	if t.path != "" && t.img == nil {
 		endings := map[string]string{"lf": "LF", "crlf": "CRLF"}
 		fileInfo = " " + endings[t.lineEnding] + "/" + strings.ToUpper(t.encoding)
 		if lang := syntax.Lang(t.path); lang != "" {
