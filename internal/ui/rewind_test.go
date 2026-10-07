@@ -433,7 +433,7 @@ func TestShortPathPrefersWorkspaceRelative(t *testing.T) {
 	if err := dmtools.SetRoot(dir); err != nil {
 		t.Fatal(err)
 	}
-	rel := shortPath(filepath.Join(dir, "src", "main.go"))
+	rel := shortPath(filepath.Join(dmtools.Root(), "src", "main.go"))
 	if rel != filepath.Join("src", "main.go") {
 		t.Errorf("shortPath = %q, want the workspace-relative form", rel)
 	}
