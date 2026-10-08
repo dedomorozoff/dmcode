@@ -56,17 +56,17 @@ and fails over to another one if the current provider dies mid-session.
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
 | **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
-| **Groq, OpenRouter, OpenCode Zen, Cline, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in `.env` or the environment |
+| **Groq, OpenRouter, OpenCode Zen, Cline, Kilo, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in the environment |
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
-and it lands in `.env`. The free tiers that need no card are all in that list —
-Cerebras (`CEREBRAS_API_KEY`), NVIDIA NIM (`NVIDIA_API_KEY`), SambaNova
-(`SAMBANOVA_API_KEY`) and Hugging Face (`HF_TOKEN`) all hand out working keys
-on signup, and any of them is picked up automatically once the variable is set.
-Some options need no key at all; others are your own endpoints (Unsloth,
-LM Studio, vLLM — anything speaking the OpenAI-compatible API).
+and it lands in `~/.dmcode/settings.json`. The free tiers that need no card are
+all in that list — Cerebras (`CEREBRAS_API_KEY`), NVIDIA NIM (`NVIDIA_API_KEY`),
+SambaNova (`SAMBANOVA_API_KEY`) and Hugging Face (`HF_TOKEN`) all hand out
+working keys on signup, and any of them is picked up automatically once the
+variable is set. Some options need no key at all; others are your own endpoints
+(Unsloth, LM Studio, vLLM — anything speaking the OpenAI-compatible API).
 
-A custom endpoint is three lines in `.env`:
+A custom endpoint is three variables in the environment:
 
 ```bash
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
@@ -74,14 +74,51 @@ OPENAI_API_KEY=gsk_...
 DMCODE_MODEL=qwen/qwen3-32b
 ```
 
+A `.env` file in the working directory is still read at start-up, so an older
+setup keeps working — but nothing writes it any more, and everything dmcode
+saves goes to `~/.dmcode/settings.json` instead. That file is written
+atomically, holds the provider credentials, the chosen model, the proxy and
+the interface language, and is global rather than per-project, so a choice made
+in one workspace applies in the next. `DMCODE_SETTINGS_PATH` points it
+somewhere else, which is what you want if you keep state beside a project.
+
 Worth knowing: `DMCODE_API=chat` forces the `/chat/completions` wire, and
-`DMCODE_REASONING_EFFORT=low` caps the reasoning channel.
+`DMCODE_REASONING_EFFORT=low` caps the reasoning channel. An environment
+variable beats the saved value for the endpoint, the key, the proxy and the
+GGUF path, so one run can override a stored choice without editing anything —
+with one exception: `DMCODE_MODEL` is replaced by the model `/models` saved, so
+a shell that exports it loses to the settings file.
+
+### Picking a model
+
+`/models` lists what the current endpoint serves, and the list is a browser
+rather than a wall: `↑` `↓` move, the wheel scrolls, and the box scrolls its
+body around the highlighted row instead of growing past the screen — three
+hundred models on a twenty-row terminal stay a twenty-row box.
+
+Typing filters, and the header counts how much of the catalogue survived, so
+"the list shrank" is distinguishable from "this endpoint has three models".
+Every word has to match, not the whole string: a model id is
+`meta-llama/Llama-3.3-70B-Instruct` and `llama 70b` is how somebody types it.
+
+`ctrl+f` narrows to what this endpoint serves without a paid plan — which is a
+question about the endpoint, not about the id. Groq's free tier has no `:free`
+in any of its names and OpenRouter's paid half is named exactly like its free
+one, so filtering by the id could only ever find the gateways that advertise
+themselves. `/models free` does the same thing in one word.
+
+The model you pick is saved and used by the next start. Picking one does not
+disturb the rest of the configuration: a GGUF path or a `llama-server` binary
+saved earlier survives a switch to a cloud model, so the local one is not
+orphaned by it.
 
 ### Running a GGUF model
 
 dmCode can start llama.cpp's `llama-server` itself, on any `.gguf` file you
 already have. Pick **Local GGUF** in `/setup` and either type the path or press
-`ctrl+o` to browse the disk for the file, or put it in `.env` by hand:
+`ctrl+o` to browse the disk for the file; the path is saved to
+`~/.dmcode/settings.json` and used by every later start. Setting it yourself
+works too:
 
 ```bash
 DMCODE_GGUF=C:\models\qwen2.5-coder-7b-q4_k_m.gguf
@@ -92,6 +129,11 @@ DMCODE_LLAMA_ARGS=--ctx-size 16384 -ngl 99  # llama-server flags, passed as-is
 The binary is looked up in this order: `DMCODE_LLAMA_SERVER`, then
 `./llama/llama-server(.exe)` — unpack a llama.cpp release into the project's
 `llama/` folder and it is found with no configuration — then `PATH`.
+
+A saved `.gguf` path outranks a saved cloud provider, because pointing at a
+file is the more explicit of the two. Choosing a cloud provider in `/setup`
+therefore clears the local one rather than leaving both on disk for the next
+start to arbitrate.
 
 The server is started on a free loopback port and the model loads **in the
 background**: the interface is up and usable while the weights are read, the
@@ -111,7 +153,7 @@ dmCode exits — including when it exits during the load.
 
 The agent works on files and a shell, rather than just talking:
 
-`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `project_map`
+`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `move_file` · `delete_file` · `project_map`
 
 `project_map` is the one to reach for first. It answers "what is this project"
 in a single call — the directory tree, the languages it is written in, and the
@@ -120,10 +162,28 @@ before it starts guessing at filenames. Its language share and file counts cover
 the whole tree however shallow the tree it shows, and it says so when a bound
 stopped it early.
 
+`edit_file` takes one replacement or a list of them. The batch form applies
+every replacement in order and writes the file **once** — so five edits to one
+file cost one round trip and produce one diff block in the transcript rather
+than five rewrites — and it writes nothing at all if one of them fails, because
+a file left with three of five changes applied is a state no diff describes.
+Each edit sees the result of the ones before it, so a later one can anchor on
+text an earlier one introduced.
+
+`move_file` and `delete_file` exist so a rename or a removal is *recorded*
+rather than routed through the shell. Every one of them is counted in the
+session's change list and undone by `ctrl+z` — see
+[Sessions and rewinding](#sessions-and-rewinding) — and `move_file` refuses to
+overwrite an existing destination, because a move that silently replaced a file
+would destroy content the agent may never have read.
+
 It can also reach past the workspace on purpose:
 
 - `web_search` — a web search over DuckDuckGo's HTML, no key needed, for when
   the answer is in a changelog or a man page rather than in the repository.
+- `fetch_url` — opens a URL `web_search` found (or one you gave) and hands back
+  the page as text. It is the second half of a search: without it the agent
+  could find a link and not follow it, which is what plan mode used to offer.
 - MCP servers — see the next section.
 
 On top of those, five that change how it works rather than what it touches —
@@ -160,7 +220,11 @@ or a remote one behind a URL:
 
 Servers come up lazily: a dead one costs nothing until a turn actually needs
 it, and its tools simply do not appear. `/tools` lists what is reachable, and
-the sidebar notes the servers that did not come up.
+the sidebar's `MCP` section says what came of asking each one — a `✗` for a
+server that did not answer, `(no tools)` for one that answered with an empty
+list, and the number of tools for the rest. The two failures are different
+problems and are drawn differently: the first needs a process hunted down, the
+second is a misconfigured server that is running perfectly well.
 
 ## Interface language
 
@@ -177,8 +241,17 @@ without changing directory first:
 dmcode -C ~/projects/myapp     # or: --dir ~/projects/myapp
 ```
 
-`/cd <path>` moves the session at runtime, and bare `/cd` prints where you are.
-The sidebar shows the full path, trimmed from the left.
+Bare `/cd` opens a folder browser rather than printing where you are: a path is
+not a choice, and a user who would have to type a folder they have not
+memorised has to open another terminal to look at it first. `enter` descends
+into a directory, `..` goes up, and the first row — **→ use this folder** — is
+the answer to the question the header asks. `esc` closes it and hands the prompt
+back. `/cd <path>` keeps the typed fast path, the same split `/proxy` makes
+between its dialog and its one-line form.
+
+The sidebar shows the full path, trimmed from the left, and the `GIT` section is
+cleared on the way out: the old folder's branch still drawn would be a claim
+about where the agent is working, and it is not working there.
 
 Every tool is confined to that directory: a path that resolves outside it is
 refused and the error names both directories. `run_command`'s `work_dir` is
@@ -225,6 +298,39 @@ Replies are laid out as markdown, not re-wrapped as plain prose:
 
 Prose without markup passes through unchanged. Tool output and your own prompts
 are never treated as markdown, so a JSON payload containing `**` survives intact.
+
+## What a turn cost
+
+Every finished turn prints one line under its answer, and a running turn prints a
+counter that keeps moving — a long wait and a hung one look identical otherwise:
+
+```
+time: 1m 04s · first token: 0.9s · answer: 842 tokens · context: 12% full (15 240 of 128 000 tokens) · 61 tok/s
+```
+
+Three numbers, because three different things go wrong separately: the wait to
+the first token is the endpoint and the network, the total is the turn, and the
+context is what the next request will have to carry. One "it took four minutes"
+cannot tell a slow model from a full context, which are fixed by opposite
+things. The context is a fraction of the window rather than a pair of numbers,
+because the fraction is the part that answers anything.
+
+A turn the endpoint cut at its output limit says so on the same row
+(`cut at the output limit`) — it is not an error, but the answer on screen is a
+half sentence, and without the note the only number left to read is the context
+meter, which invites exactly the wrong conclusion.
+
+`/stats` prints the same numbers in full plus what the whole session has cost:
+total time, average turn, mean first token and how many model calls a turn
+averages. That last one separates a slow endpoint from a tool loop that called
+the model five times — three cases a single duration hides.
+
+Near the window's end the conversation is summarised rather than refused. That
+needs a real figure for the window, so it is on only when dmcode knows one: a
+model it recognises, a window the endpoint reported, or `DMCODE_CONTEXT`. An
+unknown window gets compaction switched off rather than a guessed threshold —
+an invented one would compact a conversation that was never near full, or fail
+to compact one that was.
 
 ## Sending a picture
 
@@ -306,11 +412,13 @@ readable.
 
 Plan mode is enforced by withholding the write tools, not by asking the model in
 the prompt. `run_command` is withheld too, because a shell can write a file
-through `>` or `Out-File`. What is left is `read_file`, `list_dir`, `project_map`,
-`grep`, `glob`, `web_search`, the plan tools, `ask_user`, `sub_agent` and
-`switch_mode` — a plan
+through `>` or `Out-File`; `move_file` and `delete_file` are withheld for the
+same reason at their own scale, since they change the tree by name. What is
+left is `read_file`, `list_dir`, `project_map`, `grep`, `glob`, `web_search`,
+`fetch_url`, the plan tools, `ask_user`, `sub_agent` and `switch_mode` — a plan
 is a document and a question is a question, so a mode whose whole output is a
-plan should not be unable to publish one. The current mode is shown as a badge
+plan should not be unable to publish one, and neither should it be unable to
+open the page a search found. The current mode is shown as a badge
 in the status bar and the sidebar lists only the tools actually reachable.
 A switch is refused while a turn is running; the conversation is kept across a
 switch.
@@ -350,20 +458,25 @@ the agent is not going to ask before they stop watching.
 | `ctrl+p` | command palette |
 | `ctrl+b` | toggle the sidebar |
 | `ctrl+y` | copy the reply |
-| `ctrl+z` | undo the last message (rewind) |
+| `ctrl+z` | undo the last message, and the files it changed (rewind) |
+| `ctrl+l` | clear the screen (the conversation is kept — `/new` is what starts one) |
+| `ctrl+n` | new session |
+| `ctrl+v` | paste — text, or the clipboard's picture when it holds one (Windows) |
 | `alt+g` | open the next change the agent made, in the editor (repeat to walk them) |
 | `ctrl+q` | quit dmcode (in the editor it returns to the chat first) |
+| `f1` | the full key and command reference |
 | `tab` | plan / act mode |
 | `shift+tab` | yolo mode on / off (act and plan keep their tools) |
-| `esc` | close the command list, or stop the current turn |
+| `esc` | close the dialog, or stop the current turn |
 | `↑` `↓` | prompt history, or the command list while `/` is typed |
-| `pgup` `pgdn` | scroll |
-| wheel | scroll (`/mouse` turns it off, restoring drag-select) |
+| `pgup` `pgdn` | scroll · `home` `end` — top and bottom |
+| `wheel` | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
 | click | open the file at the line of the change you clicked |
 
 Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
 PTY, LSP completions, splits and bookmarks, which is too much for a table here.
+In the chat, `F1` opens the reference above, scrolled with `pgup`/`pgdn`.
 
 ## Going to a change
 
@@ -463,9 +576,40 @@ do both at once, because reporting mouse motion is what stops the terminal from
 doing it itself.
 
 The status bar carries the mode and the state, and nothing else — the model is in
-the header and the sidebar, and the keys are in `/help`.
+the header and the sidebar, and the keys are in `F1`.
 
-Commands: `/setup` `/models` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+## The panel
+
+`ctrl+b` opens the sidebar, and a terminal too narrow to hold it leaves the
+header bar in its place instead. Every section of the panel answers one question
+and **disappears when it has nothing to say** — which is what makes a panel
+readable, and why a fresh session's panel is not furniture:
+
+| Section | Says |
+|---|---|
+| `MODEL` | the model, and the provider it is reached through |
+| `PROXY` | the proxy type, its address, and the bypass list — only when one is set |
+| `SESSION` | the session id, the turn and tool counts, and what the session has cost |
+| `CONTEXT` | a bar, the token count against the window, and roughly how many more turns fit |
+| `FOLDER` | the working directory, trimmed from the left |
+| `GIT` | the branch, plus staged / changed / untracked counts — only inside a repository |
+| `LAST TOOL` | the last tool the agent called |
+| `CHANGES` | the files this session changed, with `+n -n` each, and clickable |
+| `MCP` | each configured server and what came of asking it |
+| `PLAN` | how far along the agent's plan is |
+
+Four details worth knowing. The `CHANGES` counts are the real diff rather than
+a sum of the write calls: a file edited three times shows the one line that
+differs at the end. A file a *command* changed is listed with a leading `±` and
+no counts at all, because nothing ever captured its contents — printing `+0 -0`
+would claim the command changed nothing. The panel carries the brand and the
+version rather than the header bar, since the header hides itself whenever the
+panel is open. And `GIT`'s counts are as of the last
+refresh (the start, the end of a turn, a `/cd`, leaving the editor), read off
+the frame rather than on it, so an unreadable tree says `status unavailable`
+instead of printing zeros about a clean tree nobody checked.
+
+Commands: `/setup` `/models` `/model <id>` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
 ## Commands
 
@@ -489,20 +633,35 @@ command hides.
 ## HTTP proxy
 
 `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` are honoured, so a proxy already
-configured for the rest of the system works with no setup. `/proxy` shows the
-setting and changes it:
+configured for the rest of the system works with no setup. `/proxy` on its own
+opens a dialog, and the typed forms still work beside it:
 
 ```
-/proxy                          show what is in effect, and whether it works
+/proxy                          the dialog: on, off, bypass
 /proxy 127.0.0.1:3128           set one (a bare host:port is fine)
 /proxy http://user:pass@host:8080
 /proxy off                      clear it
 /proxy no localhost,127.0.0.1   bypass list, without touching the proxy
 ```
 
+The dialog asks for **type, host, port, login and password** as separate fields,
+and the port is required — it will not accept an empty one. That is not fussiness:
+Go fills an absent port from the scheme, so a `socks5://user:pass@vpn.example.com`
+with no port dials 1080, and refused at 1080 it reads as "the proxy is down"
+rather than as the number nobody chose. A typed port is never overwritten by the
+one a type change suggests, and the type is a list stepped with arrows rather
+than free text, because `socks` is a value dmcode accepts as a bare host and
+then dials on 80.
+
+The password is masked everywhere it would otherwise appear — the dialog title,
+the transcript, the confirmation line — and is assembled through
+`url.UserPassword`, so a password containing `@` or `:` cannot split the
+address into a different host and a different password.
+
 The change applies to the running session — the next request goes through it —
-and is written to `.env`, so it survives a restart. `/proxy off` removes the
-variables from both, rather than leaving them in the file to be read back.
+and is written to `~/.dmcode/settings.json`, so it survives a restart and
+applies in every workspace rather than only where you set it. The `PROXY`
+section of the sidebar names it while it is in effect.
 
 `localhost` and the loopback addresses are never proxied: a proxy that cannot
 reach the machine's own services is common enough that following it would break
@@ -517,11 +676,29 @@ a restart. Set `DMCODE_SESSIONS_DIR` to keep them beside a project instead.
   input for editing, the transcript loses the exchange, and the model's memory
   is cut at the same place — so the next reply cannot be to a question the user
   can no longer see. Press it again to go back further.
+- **`ctrl+z` also puts the files back.** A turn journal records every write with
+  the content it replaced and whether the file existed at all; `move_file` and
+  `delete_file` record enough to invert themselves, so a rename comes back as a
+  rename and a deletion as the file. Restores go in reverse order, so two writes
+  to one file land where the first of them found it, and a file written, moved
+  and then edited lands exactly where the turn began. The transcript says what
+  came back — `files restored on disk: a.go, b.go` — because a rewind that
+  silently changed your tree is the same lie the change panel used to tell.
+- **What a command changed is reported, not guessed.** `run_command` is the one
+  instrument that can change the tree without saying so, so the tree is compared
+  either side of it and anything it touched is journalled as *unrestorable*: the
+  rewind names the paths and leaves them alone. Restoring post-write content
+  over an unknown pre-turn state would be a guess, and a half-restored file is
+  worse than an untouched one.
 - `/new [name]` starts a fresh conversation. The previous one is **kept**, not
   discarded, so a `/new` pressed by mistake costs one keypress.
 - `/sessions` lists what is there, searchable by typing; `enter` switches,
   `d` deletes (twice — a deleted session cannot be brought back), `esc` closes.
   `/resume <id>` opens one directly.
+
+The undo journal is memory-only: a resumed session has no undo history, exactly
+as it has no in-memory change tally, so `ctrl+z` in a restored session rewinds
+the conversation and has no files to put back.
 
 A failed request is retried on the same endpoint before the pool moves on: three
 attempts by default, with a growing pause, so a rate limit no longer ends a turn.
@@ -555,16 +732,23 @@ yours.
 ## Known limitations
 
 Stated plainly, not hidden: a rewind does not rewrite `~/.dmcode/history.jsonl`,
-so an undone prompt is still offered by `/history` until the next start.
-Cancellation reaches the context but not the process, so a running `run_command`
-finishes on its own schedule. The workspace boundary is a lexical check at
-resolve time; the tools that open files close the symlink gap themselves, but
-`grep` skipping symlinks means it will not follow one to a file outside the
-tree. Pictures reach only providers on the `/chat/completions` wire, and
-`ctrl+v` reads the clipboard's image on Windows alone — on Linux and macOS it
-pastes text, as it always did. A pasted DIB is read at 24 or 32 bits; a
-palettised or compressed one is refused with a message saying so rather than
-guessed at.
+so an undone prompt is still offered by `/history` until the next start, and it
+cannot put back a file a *command* changed — those paths are named on the rewind
+line and left alone rather than restored from a guess. Cancellation reaches the
+context but not the process, so a running `run_command` finishes on its own
+schedule. The workspace boundary is a lexical check at resolve time; the tools
+that open files close the symlink gap themselves, but `grep` skipping symlinks
+means it will not follow one to a file outside the tree. Pictures reach only
+providers on the `/chat/completions` wire, and `ctrl+v` reads the clipboard's
+image on Windows alone — on Linux and macOS it pastes text, as it always did. A
+pasted DIB is read at 24 or 32 bits; a palettised or compressed one is refused
+with a message saying so rather than guessed at.
+
+A `.env` file in the working directory is still read at start-up, so a setup
+written by an older build keeps working — but nothing writes it any more. A
+provider key left in a project's `.env` is worth moving into
+`~/.dmcode/settings.json` if you want `/setup`, the model picker and `/proxy` to
+remember it, since those three save only to the settings file.
 
 Attaching and previewing a picture is confirmed working end to end on Windows.
 **Sending one to a model is not yet confirmed** — no picture has been through a
@@ -627,8 +811,8 @@ main.go              chains the packages together, nothing else
 internal/agent       the agent, its instructions, sub-agents, the mode switch
 internal/ask         the ask_user broker and its timer
 internal/clipimg     reads a picture off the system clipboard (Windows)
-internal/config      .env, endpoints, the setup wizard
-internal/discover    finds the providers that actually answer
+internal/config      endpoints, the provider presets, the setup wizard, the proxy
+internal/discover    finds the providers that actually answer, starts llama-server
 internal/editor      the workspace editor: tree, git, terminal, splits, LSP, picture view
 internal/i18n        English source strings and the Russian catalog
 internal/imgprev     draws an image as coloured half-blocks, reduces it for the wire,
@@ -636,17 +820,24 @@ internal/imgprev     draws an image as coloured half-blocks, reduces it for the 
 internal/llm         OpenAI-compatible wire, failover, retries
 internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence
+internal/pathnorm    one spelling of a path, so two names for one file compare equal
+internal/settings    ~/.dmcode/settings.json — saved provider, model, proxy, language
 internal/todo        the agent's plan
-internal/tools       the workspace tools and the boundary they are confined to
+internal/tools       the workspace tools, the boundary they are confined to,
+                     the change tally and the turn journal ctrl+z reads
 internal/ui          the Bubble Tea terminal interface
 ```
 
 ## Configuration
 
-Everything is optional; the defaults work without any of it.
+Everything is optional; the defaults work without any of it. An environment
+variable beats the saved value in `~/.dmcode/settings.json`, so any of them
+overrides a stored choice for one run — except `DMCODE_MODEL`, which the saved
+model replaces.
 
 | Variable | What it does |
 |---|---|
+| `DMCODE_SETTINGS_PATH` | where `settings.json` lives (default `~/.dmcode/settings.json`) |
 | `DMCODE_SESSIONS_DIR` | where conversations are kept (default `~/.dmcode/sessions`) |
 | `DMCODE_LLM_RETRIES` | attempts per endpoint before failing over (default 3) |
 | `DMCODE_LLM_RETRY_MS` | first backoff pause, doubling after that (default 500) |
@@ -656,23 +847,27 @@ Everything is optional; the defaults work without any of it.
 | `DMCODE_REASONING_EFFORT` | caps the reasoning channel |
 | `DMCODE_MAX_OUTPUT` | the answer budget in tokens (`max_tokens`), default 16384 |
 | `DMCODE_CONTEXT` | the model's real window in tokens, when the built-in table gets it wrong |
+| `DMCODE_MODEL` | the model to run, ahead of the preset's own |
 | `DMCODE_GGUF` | a `.gguf` file to serve through llama-server, loaded in the background |
 | `DMCODE_LLAMA_SERVER` | the llama-server binary (default: `./llama/llama-server`, then `PATH`) |
 | `DMCODE_LLAMA_ARGS` | extra llama-server flags, split on spaces |
 | `DMCODE_GGUF_STARTUP` | seconds a local model may take to load (default 180; `esc` gives up sooner) |
 
-Both of the last two are about a limit dmcode cannot otherwise see. A request
-with no `max_tokens` leaves the output ceiling to the endpoint, so a model
-writing a long calculation stops mid-sentence and dmcode says so rather than
-leaving you to read the context meter; `DMCODE_MAX_OUTPUT` raises the ceiling
-for a model the default overshoots. `DMCODE_CONTEXT` names a window for a model
-the built-in table does not recognise — which also switches automatic context
-compaction on, because that needs a real figure rather than a guess.
+`DMCODE_MAX_OUTPUT` and `DMCODE_CONTEXT` are about two limits dmcode cannot
+otherwise see. A request with no `max_tokens` leaves the output ceiling to the
+endpoint, so a model writing a long calculation stops mid-sentence and dmcode
+says so rather than leaving you to read the context meter;
+`DMCODE_MAX_OUTPUT` raises the ceiling for a model the default overshoots.
+`DMCODE_CONTEXT` names a window for a model the built-in table does not
+recognise — which also switches automatic context compaction on, because that
+needs a real figure rather than a guess.
 
 ## Roadmap
 
-Plans are in [ROADMAP.md](ROADMAP.md): permissions for dangerous commands,
-context compaction, LSP.
+Plans are in [ROADMAP.md](ROADMAP.md). What is still open there: permissions for
+dangerous commands, `/export` for a conversation to a file, path completion in
+the prompt, and loading a project's own rules file into the system prompt.
+Context compaction and LSP in the editor have landed.
 
 ## License
 
