@@ -340,6 +340,38 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 }
 
 // Every option has to be readable in the overlay at the sizes people actually
+// A drawn row is identified by its marker, not by a word from its label.
+//
+// Counting rows by the first word of each label was wrong in a way that only
+// showed up once two options shared a provider name: the two Pollinations rows
+// both open with "Pollinations", so a hidden one was counted as drawn, the
+// arithmetic came out one over the list, and the tempting "fix" was to rename a
+// label rather than fix the count. The marker is what the overlay actually
+// draws — three cells of indent, or a cursor or a star in them — and a wrapped
+// label's continuation line is indented five, which is what tells them apart.
+func drawnSetupRows(view string) int {
+	n := 0
+	for _, o := range config.SetupOptions() {
+		if strings.Contains(view, setupRowName(o)) {
+			n++
+		}
+	}
+	return n
+}
+
+// setupRowName is the phrase that identifies one option on screen: what comes
+// before its first " — ".
+//
+// Counting rows by the first *word* of the label was wrong in a way that only
+// surfaced once two options shared a provider name — the two Pollinations rows
+// both open with "Pollinations", so a hidden row was counted as a drawn one and
+// the arithmetic came out one over. A word is not an identity; the name before
+// the dash is, and it survives the wrapping that makes the rest of the label
+// unreliable.
+func setupRowName(o config.SetupOption) string {
+	return strings.SplitN(o.Label, " — ", 2)[0]
+}
+
 // use, and the overlay has to fit the terminal. A short screen cannot hold every
 // provider at once, so the guarantee is that each one is either drawn or named
 // by the overflow marker: a list that quietly drops its bottom rows is the
@@ -354,13 +386,7 @@ func TestSetupOverlayAccountsForEveryOptionAndFits(t *testing.T) {
 		setupKeys{m: m}.type_("/setup").enter()
 		view := m.View().Content
 
-		shown := 0
-		for _, o := range config.SetupOptions() {
-			// Labels wrap, so check the first word that cannot be split.
-			if strings.Contains(view, strings.Fields(o.Label)[0]) {
-				shown++
-			}
-		}
+		shown := drawnSetupRows(view)
 		hidden := 0
 		if i := strings.Index(view, "↓ more "); i >= 0 {
 			if _, err := fmt.Sscanf(view[i+len("↓ more "):], "%d", &hidden); err != nil {

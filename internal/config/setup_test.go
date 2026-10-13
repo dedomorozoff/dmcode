@@ -232,7 +232,7 @@ func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
 		}
 	}
 	in := fmt.Sprintf("%d\nmodels\\qwen.gguf\n\n", idx)
-	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
+	if _, err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("the GGUF wizard rejected a complete answer: %v", err)
 	}
 	st, err := settings.Load()
@@ -254,7 +254,7 @@ func TestStdinWizardGGUFPersistsPathAndBinary(t *testing.T) {
 
 	// A named binary has to be recorded too.
 	in = fmt.Sprintf("%d\nmodels\\qwen.gguf\nC:\\llama\\llama-server.exe\n", idx)
-	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
+	if _, err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("the GGUF wizard rejected a named binary: %v", err)
 	}
 	st, err = settings.Load()
@@ -300,7 +300,7 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 	}
 
 	// key, then blank endpoint: rejected.
-	err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\nmodel-x\n", idx)), &strings.Builder{})
+	_, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\nmodel-x\n", idx)), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "base URL") {
 		t.Errorf("a blank endpoint gave %v, want a complaint about the URL", err)
 	}
@@ -309,14 +309,14 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 	}
 
 	// key, endpoint, blank Model: rejected.
-	err = SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\n\n", idx)), &strings.Builder{})
+	_, err = SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\n\n", idx)), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "model") {
 		t.Errorf("a blank model gave %v, want a complaint about the model", err)
 	}
 
 	// All three supplied: persisted exactly as given, which is the whole point
 	// of asking, since Unsloth's port and model id are not guessable.
-	if err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
+	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
 		t.Fatalf("a complete Unsloth answer was rejected: %v", err)
 	}
 	// Check settings.json has all the values.
@@ -344,13 +344,80 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 	}
 }
 
+// The wizard has to hand back a provider the caller can start on, because the
+// environment cannot carry one. Two things used to go missing on the way, and
+// both were invisible until a session refused to start:
+//
+//   - A keyless option writes no OPENAI_API_KEY — on purpose, so it cannot
+//     clobber a real one — so a caller reading the key back found it empty and
+//     called that "no provider configured". That was every free option in the
+//     list, and the first one the wizard offers.
+//   - DMCODE_MODEL is deliberately kept out of .env, being a user preference
+//     rather than part of the endpoint, so the chosen model did not come back
+//     either and OrDefaultModel substituted qwen2.5-coder:7b — an Ollama model
+//     id, sent to whichever host the user had just picked.
+//
+// An empty APIKey here is therefore the correct answer for a keyless option and
+// not a missing one, and it is what the chat adapter's placeholder bearer token
+// is for.
+func TestAWizardAnswerIsUsableWithoutReadingTheEnvironmentBack(t *testing.T) {
+	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
+
+	keyless := SetupOptions()[0]
+	if !keyless.Keyless {
+		t.Fatalf("option 1 (%q) is not keyless, so this covers nothing", keyless.Label)
+	}
+	p, err := SetupWizardWith(strings.NewReader("1\n"), &strings.Builder{})
+	if err != nil {
+		t.Fatalf("the keyless answer was rejected: %v", err)
+	}
+	if p.BaseURL != keyless.BaseURL || p.Model != keyless.Model ||
+		p.API != keyless.API || p.Reasoning != keyless.Reasoning {
+		t.Errorf("got %+v, want the option's endpoint, model, wire and reasoning", p)
+	}
+	if p.APIKey != "" {
+		t.Errorf("a keyless option returned the key %q", p.APIKey)
+	}
+	if p.APIKeyVar != "" {
+		t.Errorf("a keyless option named the key variable %q; it would overwrite a real key on load", p.APIKeyVar)
+	}
+
+	// The same must hold for a keyed option, or the fix only covered the half
+	// that was already broken loudly.
+	idx := 0
+	for i, o := range SetupOptions() {
+		if !o.Keyless && !o.GGUF && o.BaseURL != "" {
+			idx = i + 1
+			break
+		}
+	}
+	if idx == 0 {
+		t.Fatal("no option that asks for a key")
+	}
+	k, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-from-the-wizard\n", idx)), &strings.Builder{})
+	if err != nil {
+		t.Fatalf("the keyed answer was rejected: %v", err)
+	}
+	want := SetupOptions()[idx-1]
+	if k.APIKey != "sk-from-the-wizard" {
+		t.Errorf("api key = %q, want the one that was typed", k.APIKey)
+	}
+	if k.APIKeyVar != want.EnvKey {
+		t.Errorf("api key var = %q, want %q", k.APIKeyVar, want.EnvKey)
+	}
+	if k.Model != want.Model || k.BaseURL != want.BaseURL {
+		t.Errorf("got %+v, want %s at %s", k, want.Model, want.BaseURL)
+	}
+}
+
 // TestStdinWizardWritesKeylessChoice verifies the keyless option writes all
 // its config to settings.json.
 func TestStdinWizardWritesKeylessChoice(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	var out strings.Builder
-	if err := SetupWizardWith(strings.NewReader("1\n"), &out); err != nil {
+	if _, err := SetupWizardWith(strings.NewReader("1\n"), &out); err != nil {
 		t.Fatalf("choosing the keyless option failed: %v", err)
 	}
 	// Check settings.json has all the values.
@@ -395,7 +462,7 @@ func TestStdinWizardRejectsIncompleteCustomEndpoint(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inTempDir(t)
 			in := fmt.Sprintf("%d\n%s", custom, tc.input)
-			err := SetupWizardWith(strings.NewReader(in), &strings.Builder{})
+			_, err := SetupWizardWith(strings.NewReader(in), &strings.Builder{})
 			if err == nil {
 				t.Fatalf("%s was accepted", tc.name)
 			}
@@ -426,7 +493,7 @@ func TestStdinWizardRejectsEmptyKey(t *testing.T) {
 	if idx == 0 {
 		t.Fatal("no option that asks for a key")
 	}
-	err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\n\n", idx)), &strings.Builder{})
+	_, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\n\n", idx)), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "no key entered") {
 		t.Errorf("an empty key gave %v, want a complaint about the key", err)
 	}
@@ -440,7 +507,7 @@ func TestStdinWizardAcceptsCompleteCustomEndpoint(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	in := fmt.Sprintf("%d\nsk-abc\nhttp://127.0.0.1:1234/v1\nmy-model\n", len(SetupOptions()))
-	if err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
+	if _, err := SetupWizardWith(strings.NewReader(in), &strings.Builder{}); err != nil {
 		t.Fatalf("a complete custom endpoint was rejected: %v", err)
 	}
 	// Check settings.json has all the values.

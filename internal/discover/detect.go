@@ -141,20 +141,39 @@ func DetectProviders() (Session, error) {
 		return Session{Pool: pool}, nil
 	}
 
-	if err := config.SetupWizard(); err != nil {
+	// Nothing answered, and a proxy is the one thing that can make every
+	// endpoint look dead at once. It is named before the wizard, because the
+	// wizard's whole list fails the same way and nothing in it says why — and
+	// because "no free provider is configured" is a statement about providers
+	// that a dead proxy makes false.
+	if w := config.ProxyWarning(); w != "" {
+		fmt.Fprintln(os.Stderr, "dmcode: "+w)
+	}
+
+	// Nothing found and nothing configured: ask. The wizard's own answer is the
+	// provider — it is not rebuilt from the environment, because the environment
+	// cannot carry two of the things it needs. A keyless option writes no
+	// OPENAI_API_KEY and used to read back as "no provider configured", which is
+	// the answer every free option in the list earned; and DMCODE_MODEL is
+	// deliberately kept out of .env, so the chosen model came back as the qwen
+	// default and was sent to whatever host the user had picked.
+	p, err := config.SetupWizard()
+	if err != nil {
 		return Session{}, err
 	}
-	BaseURL = os.Getenv("OPENAI_BASE_URL")
-	APIKey = os.Getenv("OPENAI_API_KEY")
-	if BaseURL == "" || APIKey == "" {
+
+	// A GGUF answer is a path, not an endpoint: the model id and the port are
+	// decided when llama-server starts. DMCODE_GGUF was just exported by the
+	// wizard, so the branch at the top of this function is re-entered rather than
+	// copied — one rule for "a named .gguf outranks everything", not two.
+	if p.BaseURL == "" {
+		if l, gerr := StartGGUF(); gerr == nil {
+			return Session{Pool: []config.Provider{l.Provider()}, Loading: l}, nil
+		} else {
+			fmt.Fprintln(os.Stderr, "dmcode: gguf: "+gerr.Error())
+		}
 		return Session{}, fmt.Errorf("no provider configured — %s", config.FreeProviderHint())
 	}
-	return Session{Pool: []config.Provider{{
-		BaseURL:   BaseURL,
-		APIKey:    APIKey,
-		Model:     config.OrDefaultModel(os.Getenv("DMCODE_MODEL")),
-		API:       config.EnvAPI(),
-		Label:     i18n.T("OpenAI-compatible"),
-		Reasoning: os.Getenv("DMCODE_REASONING_EFFORT"),
-	}}}, nil
+
+	return Session{Pool: []config.Provider{p}}, nil
 }

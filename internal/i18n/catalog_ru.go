@@ -254,7 +254,8 @@ var catalog = map[Lang]map[string]string{
 
 		// Provider options.
 		"Local — Ollama (http://127.0.0.1:11434/v1)":                                 "Локально — Ollama (http://127.0.0.1:11434/v1)",
-		"Metered — Pollinations gen.pollinations.ai (key required)":                  "По счётчику — Pollinations gen.pollinations.ai (нужен ключ)",
+		"Pollinations gen — key required, meters pollen":                             "Pollinations gen — нужен ключ, считает pollen",
+		"Pollinations text — no key, tools work":                                     "Pollinations text — без ключа, тулсы работают",
 		"Unsloth (local) — key from Settings → API, URL and model from your console": "Unsloth (локально) — ключ из Settings → API, URL и модель из консоли",
 		"OpenRouter — free models (deepseek and others)":                             "OpenRouter — бесплатные модели (deepseek и др.)",
 		"Kilo — gateway with free models (kilo-auto/free, account key)":              "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)",
@@ -271,7 +272,9 @@ var catalog = map[Lang]map[string]string{
 		"Your own OpenAI-compatible endpoint":                                        "Свой OpenAI-совместимый endpoint",
 
 		// Setup wizard (stdin).
-		"\nNo free provider is configured. Pick one:\n": "\nБесплатный провайдер не настроен. Выбери:\n",
+		"\nNo free provider is configured. Pick one:\n":                               "\nБесплатный провайдер не настроен. Выбери:\n",
+		"every request goes through the proxy ":                                       "каждый запрос идёт через прокси ",
+		" — if nothing answers, check that it is running (/proxy off stops using it)": " — если ничего не отвечает, проверь, что он запущен (/proxy off отключает)",
 		"number [1]: ": "номер [1]: ",
 		"could not read the choice (stdin not a terminal?)": "не удалось прочитать выбор (stdin не терминал?)",
 		"Get a key here: ": "Возьми ключ тут: ",
