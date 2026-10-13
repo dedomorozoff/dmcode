@@ -11,6 +11,7 @@ import (
 
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/pathnorm"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // ggufOptionIndex is where the GGUF option sits in the wizard list.
@@ -28,6 +29,7 @@ func ggufOptionIndex() int {
 func setupTempModel(t *testing.T) (*uiModel, string, string) {
 	t.Helper()
 	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	models := filepath.Join(dir, "models")
 	if err := os.MkdirAll(models, 0o755); err != nil {
 		t.Fatal(err)
@@ -111,11 +113,16 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	if m.setup.open || m.setup.gguf.open {
 		t.Fatalf("a pick did not close the dialog (wizard=%v browser=%v)", m.setup.open, m.setup.gguf.open)
 	}
-	if _, err := os.Stat(filepath.Join(dir, ".env")); err != nil {
-		t.Fatalf(".env was not written: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, ".env")); err == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
-	if got := envValue(t, "DMCODE_GGUF"); !pathnorm.Same(got, ggufPath) {
-		t.Errorf(".env holds %q, want the picked file %q", got, ggufPath)
+	s, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	// GGUFPath should match the picked file. The browser gives the resolved path.
+	if !pathnorm.Same(s.GGUFPath, ggufPath) {
+		t.Errorf("settings.GGUFPath = %q, want the picked file %q", s.GGUFPath, ggufPath)
 	}
 
 	if run := d.cmd; run == nil {
@@ -128,25 +135,20 @@ func TestSetupGGUFPickerSelectsAFile(t *testing.T) {
 	}
 }
 
-// envValue reads one key out of the .env the wizard just wrote, through the
-// parser the app uses to read it back. Looking for the value as a substring
-// instead asks a different question — whether the exact spelling the test
-// happened to write appears somewhere in the file — and the browser resolves the
-// directory it walks, so on macOS the value lands as /private/var/... where the
-// test said /var/..., and the substring is not found on the machine where the
-// assertion is worth most.
+// envValue reads one key out of the settings.json the wizard just wrote.
 func envValue(t *testing.T, key string) string {
 	t.Helper()
-	lines, err := config.ReadDotEnv()
+	// Use settings.Load to read the path
+	s, err := settings.Load()
 	if err != nil {
-		t.Fatalf("reading .env: %v", err)
+		t.Fatalf("settings.Load: %v", err)
 	}
-	for _, line := range lines {
-		if k, v, ok := config.DotEnvPair(line); ok && k == key {
-			return v
-		}
+	switch key {
+	case "DMCODE_GGUF":
+		return s.GGUFPath
+	default:
+		t.Fatalf("unknown key %q for envValue", key)
 	}
-	t.Fatalf(".env has no %s", key)
 	return ""
 }
 
@@ -180,7 +182,7 @@ func TestSetupGGUFPickerEscKeepsThePrompt(t *testing.T) {
 // path is entered, and .env gains DMCODE_GGUF without any key variable. The
 // launcher is a stub, because a real model load has no place in a unit test.
 func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
-	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
 
 	stubStart(t, &fakeLoad{prov: config.Provider{
@@ -201,16 +203,17 @@ func TestSetupGGUFWalksToThePathPrompt(t *testing.T) {
 		t.Fatal("the wizard stayed open after the .gguf path was entered")
 	}
 
-	data, err := os.ReadFile(filepath.Join(dir, ".env"))
+	// Check settings.json has the GGUF path.
+	s, err := settings.Load()
 	if err != nil {
-		t.Fatalf(".env was not written: %v", err)
+		t.Fatalf("settings.Load: %v", err)
 	}
-	text := string(data)
-	if !strings.Contains(text, "DMCODE_GGUF=models\\qwen.gguf") {
-		t.Errorf(".env is missing the .gguf path:\n%s", text)
+	if s.GGUFPath != "models\\qwen.gguf" {
+		t.Errorf("settings.GGUFPath = %q, want models\\qwen.gguf", s.GGUFPath)
 	}
-	if strings.Contains(text, "API_KEY") {
-		t.Errorf("a key was written for the GGUF option:\n%s", text)
+	// .env should not be created.
+	if _, err := os.Stat(".env"); err == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
 
 	// The launch must not run on the event loop: startGGUFSetup returns it as

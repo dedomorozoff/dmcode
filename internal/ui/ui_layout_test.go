@@ -67,7 +67,7 @@ func TestSidebarMatchesPanelHeight(t *testing.T) {
 // with an ellipsis so a cut-off panel is not read as a complete one.
 func TestSidebarTrimsOverflowWithMarker(t *testing.T) {
 	m := &uiModel{
-		prov:      config.Provider{Model: "some/very/long/model/name", Label: "Pollinations (без ключа)"},
+		prov:      config.Provider{Model: "some/very/long/model/name", Label: "Поллинации (Pollinations)"},
 		sessionID: "sess-0123456789abcdef",
 		workDir:   "C:/cygwin64/home/alexl/dmcode",
 		toolNames: []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob", "run_command"},
@@ -292,7 +292,7 @@ func TestRejectedKeyExplainsNothingWasSaved(t *testing.T) {
 }
 
 func TestTruncateCountsCellsNotBytes(t *testing.T) {
-	got := truncate("Pollinations (без ключа)", 20)
+	got := truncate("Поллинации (Pollinations)", 20)
 	if n := ansi.StringWidth(got); n > 20 {
 		t.Errorf("truncate returned %d cells, want at most 20", n)
 	}
@@ -432,7 +432,7 @@ func TestOverlayPanelsFitTerminal(t *testing.T) {
 // unbreakable words, Cyrillic, multi-row tool output and a busy status.
 func framedModel(w, h int, model string) *uiModel {
 	m := &uiModel{
-		prov:        config.Provider{Model: model, Label: "Pollinations (без ключа)"},
+		prov:        config.Provider{Model: model, Label: "Поллинации (Pollinations)"},
 		sessionID:   "sess-1234567890123",
 		workDir:     "C:/cygwin64/home/alexl/dmcode",
 		toolNames:   []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob", "run_command"},

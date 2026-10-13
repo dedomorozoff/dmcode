@@ -935,7 +935,7 @@ func TestEscapeClosesTheListAndKeepsTheText(t *testing.T) {
 // place now that the bar leads with the mode.
 func TestStatusBarShowsTheModeAndNothingElse(t *testing.T) {
 	m := modeModel(t)
-	m.prov = config.Provider{Label: "text.pollinations.ai", Model: "openai/gpt-oss-120b"}
+	m.prov = config.Provider{Label: "gen.pollinations.ai", Model: "openai/gpt-5.4-nano"}
 
 	for _, mode := range []agentMode{modePlan, modeAct} {
 		m.mode = mode

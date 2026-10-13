@@ -18,10 +18,13 @@ func TestContextWindow(t *testing.T) {
 		{"gpt-4o-mini", 128_000},
 		{"claude-sonnet-4", 200_000},
 		{"llama3.1:8b", 32_768},
-		// dmcode's anonymous hosted tier answers with GPT-OSS, which has a
-		// known 128k window — recognising it turns on compaction that the guess
-		// (and the "~" the meter would otherwise show) denied it.
+		// GPT-OSS has a known 128k window — recognising it turns on compaction
+		// that the guess (and the "~" the meter would otherwise show) denied it.
 		{"gpt-oss-20b", 128_000},
+		// Pollinations serves this one and states its own 400k window on
+		// /models; the table agrees, so a session configured by hand rather than
+		// through a probe still compacts at the right place.
+		{"openai/gpt-5.4-nano", 400_000},
 		// Not recognised: zero says so, and every caller shows a bare token
 		// count rather than dividing by a number it made up.
 		{"some-finetune-abc", 0},

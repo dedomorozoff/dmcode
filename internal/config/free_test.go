@@ -78,6 +78,56 @@ func TestFreeModelCombinesBothAnswers(t *testing.T) {
 	}
 }
 
+// The wizard is the first thing a new user reads and dmcode's claim is that it
+// runs for nothing, so the order is a promise: a free option is never ranked
+// below one that can bill. Nothing else in the code would notice a provider
+// added to the wrong side — /models badges rows and FreeEndpoint answers
+// questions, but neither one looks at position — so this is where the rule is
+// kept.
+//
+// "Free" is asked of the option the user would actually get, which is not always
+// what the Free flag says. OpenRouter and Kilo carry Free: false because their
+// whole catalogue is mixed, yet the model each one defaults to names itself
+// :free — a user who takes option 3 pays nothing. Reading the flag alone would
+// call them paid and rank them below the line, which is exactly the false
+// negative that pushes a free choice out of reach.
+//
+// An option with no preset endpoint is not ranked at all: the user's own
+// endpoint costs whatever their machine's provider charges, and the wizard's
+// last row is the escape hatch rather than a recommendation.
+func TestNoFreeOptionIsRankedBelowAPaidOne(t *testing.T) {
+	opts := SetupOptions()
+	billedAt := -1
+	for i, o := range opts {
+		if o.BaseURL == "" {
+			continue // local, prompt-only or the user's own endpoint
+		}
+		if o.Free || FreeModelID(o.Model) {
+			if billedAt >= 0 {
+				t.Errorf("%q costs nothing but is ranked at %d, below %q which can bill",
+					o.Label, i, opts[billedAt].Label)
+			}
+			continue
+		}
+		if billedAt < 0 {
+			billedAt = i
+		}
+	}
+}
+
+// The promise has to hold at the top too, or "free first" is only true of the
+// middle of the list. The stdin wizard defaults to option 1 on an empty answer,
+// so this row is the one a user who presses enter gets.
+func TestTheFirstOptionIsFreeAndKeyless(t *testing.T) {
+	first := SetupOptions()[0]
+	if !first.Keyless {
+		t.Errorf("the first option (%q) needs a key", first.Label)
+	}
+	if !first.Free && !FreeModelID(first.Model) {
+		t.Errorf("the first option (%q, model %q) can bill the user", first.Label, first.Model)
+	}
+}
+
 // TestTheFreeFlagSaysWhatTheLabelSays: /setup already promises "free" in the
 // labels it prints. The flag is the same claim in a form code can read, so a
 // label that grows a new free provider and forgets the flag would leave the
