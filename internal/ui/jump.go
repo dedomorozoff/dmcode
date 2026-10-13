@@ -64,12 +64,54 @@ func (m *uiModel) codeRefAt(y int) (int, codeRef, bool) {
 
 // refAtPointer is codeRefAt for a mouse position, with the column checked too.
 // A change row is inside the chat panel, and a click to the right of it belongs
-// to the sidebar — which has its own targets, and none of them is a diff.
+// to the sidebar — which has its own targets, and only one kind: a row of the
+// changed-file list.
 func (m *uiModel) refAtPointer(x, y int) (int, codeRef, bool) {
 	if x < 0 || x >= m.chatBoxWidth() {
 		return 0, codeRef{}, false
 	}
 	return m.codeRefAt(y)
+}
+
+// sidebarTop is the frame row the sidebar's first body row is drawn on: the
+// header when it is up, and the box's own top border either way. It is the same
+// arithmetic as transcriptTop and it is written out rather than shared, because
+// the two are separate facts that happen to agree today: the panel is a
+// transcript above a border and the sidebar is a bordered box, and nothing about
+// the frame layout requires them to start on the same row.
+func (m *uiModel) sidebarTop() int {
+	top := panelTopBorder
+	if m.headerVisible() {
+		top += headerHeight
+	}
+	return top
+}
+
+// sideRefAt resolves a frame row to the file that row of the sidebar names, if
+// any. The index was filled while the panel was drawn, so it describes the rows
+// that are on screen — but only if the panel was drawn at this geometry. A
+// sidebar that has never been rendered has no index, and a click into an empty
+// one must resolve to nothing rather than to a stale file from an earlier frame.
+func (m *uiModel) sideRefAt(y int) (codeRef, bool) {
+	if !m.sidebarVisible() {
+		return codeRef{}, false
+	}
+	i := y - m.sidebarTop()
+	if i < 0 || i >= len(m.sideRefs) {
+		return codeRef{}, false
+	}
+	ref := m.sideRefs[i]
+	return ref, ref.ok()
+}
+
+// sideRefAtPointer is sideRefAt for a mouse position, with the column checked too:
+// a sidebar row is to the right of the chat panel, and a click to the left of it
+// belongs to the transcript's own index.
+func (m *uiModel) sideRefAtPointer(x, y int) (codeRef, bool) {
+	if x < m.chatBoxWidth() || x >= m.width {
+		return codeRef{}, false
+	}
+	return m.sideRefAt(y)
 }
 
 // nextChange is the change row the walk should go to next: the one after the

@@ -10,6 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/dedomorozoff/dmcode/internal/i18n"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // HTTP proxy support.
@@ -51,6 +54,34 @@ type ProxySettings struct {
 	// Active reports whether a proxy is in effect for ordinary provider calls,
 	// which are almost always https.
 	Active bool
+}
+
+// ProxyWarning names the proxy every request is about to go through, or says
+// nothing when none is set.
+//
+// It exists because a dead proxy is the one failure that makes every endpoint
+// look dead at once. A proxy remembered in settings.json from a session when it
+// was needed answers connection-refused, the startup probe reports that no
+// provider is reachable, and the person is sent into /setup — where all the
+// options fail identically and none of them mention the proxy. The complaint is
+// about providers and the cause is one line in their own settings file, which is
+// the hardest kind of cause to see from the message alone.
+//
+// It says what is configured, not a verdict on it: a proxy that works is silent
+// here, and a proxy that is down is named whether or not it is what broke the
+// request. That is the limit of what can be claimed without making one, and it
+// is the part that is otherwise invisible.
+func ProxyWarning() string {
+	s := CurrentProxy()
+	if !s.Active {
+		return ""
+	}
+	addr := s.HTTPS
+	if addr == "" {
+		addr = s.HTTP
+	}
+	return i18n.T("every request goes through the proxy ") + addr +
+		i18n.T(" — if nothing answers, check that it is running (/proxy off stops using it)")
 }
 
 // Spec is a proxy address as its parts. The URL is the shape the wire wants;
@@ -397,4 +428,13 @@ func firstEnv(names ...string) string {
 		}
 	}
 	return ""
+}
+
+// SaveProxy writes the proxy settings to ~/.dmcode/settings.json so they
+// survive restarts and are global — not tied to any working directory.
+func SaveProxy(s ProxySettings) error {
+	return settings.Update(func(st *settings.S) {
+		st.Proxy = s.Effective()
+		st.NoProxy = s.NoProxy
+	})
 }

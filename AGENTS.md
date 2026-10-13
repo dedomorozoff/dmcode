@@ -41,6 +41,10 @@
 >   strand the runner — the UI test covers the pending-mode bookkeeping only;
 > - yolo mode has unit tests for the binding, the tool set and the badge, but no
 >   TUI session has been driven through a real yolo turn;
+> - the file half of a rewind (the turn journal in `internal/tools/undo.go`) is
+>   unit-tested against the tools, but no live session has been rewound after a
+>   real tool-writing turn — the UI wiring is covered by a transcript assertion
+>   on the unrestorable branch only;
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
@@ -66,14 +70,16 @@
   - `internal/discover`: which providers the session can run on, and the llama-server around a local `.gguf`.
   - `internal/llm`: the OpenAI-compatible wire and the failover pool.
   - `internal/agent`: the system instruction (act and plan variants), agent construction, and the two tools that change what the agent *is* — `subagent.go` (delegation) and `modeswitch.go` (the plan→act switch).
-  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `web_search`, `project_map`) **and the workspace boundary** they are confined to. `web_search` is the one instrument that reaches past the boundary on purpose (DuckDuckGo HTML, no key). `todo_*` is added from `internal/todo`, not here.
-  - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `List` is the one eager pass: names for the sidebar, notes for the servers that did not come up.
+  - `internal/tools`: the workspace instruments (`read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `run_command`, `move_file`, `delete_file`, `web_search`, `fetch_url`, `project_map`) **and the workspace boundary** they are confined to. `web_search` and `fetch_url` are the two instruments that reach past the boundary on purpose (DuckDuckGo HTML, no key; and the page a search finds), and both only ever read. `move_file`/`delete_file` exist because the only route before them was `mv`/`rm` through `run_command`, which the shell watcher could mark as "changed somewhere" but not invert — see §1's "The turn journal". `todo_*` is added from `internal/todo`, not here.
+  - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `States` is the one eager pass: what each server offered, or why it could not be asked.
   - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar),
     `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending
     agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go`
-    (ctrl+z, session switching), `jump.go` (clicking a change opens the file at
-    that line), `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the
-    question overlay and the sub-agent notes), `plan_view.go` (the plan block).
+    (ctrl+z, session switching), `jump.go` (clicking a change opens the file at that line),
+    `sessions_view.go` (the `/sessions` overlay), `ask_view.go` (the
+    question overlay and the sub-agent notes), `plan_view.go` (the plan
+    block), `git_sidebar.go` (the repository snapshot, read off the
+    frame path) and `sidebar_sections.go` (CHANGES, GIT, MCP).
   - `internal/memsession`: the session store — the ADK `session.Service` dmcode runs on, plus the JSONL persistence under `~/.dmcode/sessions`.
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
@@ -213,6 +219,71 @@ Three things that are easy to get wrong here:
   model as a question about a filename. `command.takesArg` is the per-command
   half, and it is deliberately narrow — `/proxy`, `/cd`, `/new`, `/mode` and
   `/todo` all have a useful *bare* form, and completing those would take it away.
+
+### The sidebar
+
+`internal/ui/sidebarView` draws a 31-column panel whose inner width is 27, so
+every decision about it is really about how much a row can say. The sections are
+`MODEL`, `SESSION`, `CONTEXT`, `FOLDER`, `GIT`, `LAST TOOL`, `CHANGES`, `MCP`
+and `PLAN`, and each one is **hidden when it has nothing to say** — that rule is
+older than this feature and is the reason the panel is readable. `PROXY` set the
+precedent, `LAST TOOL` followed, and `TestAFreshPanelIsNotAFurniture` holds all
+of them to it.
+
+Two sections are gone. `TOOLS` listed the agent's instrument names and was the
+one part of the panel that answered no question: identical on every frame of
+every session, unchanged while a turn ran, nothing the user could do with it —
+and at twelve rows it was the largest thing on the panel, which is what pushed
+`PLAN` off the bottom of a short terminal. `TestTheSidebarDoesNotListTheTools`
+guards that removal, and it is a test that something is *gone* because the list
+was deliberate once: it showed the plan-mode instrument set honestly, and a mode
+change with no visible consequence is how a panel starts lying again. `HOTKEYS`
+went next, for the same reason one row lower: `/help` lists the same keys in the
+same place a user would look, `ctrl+q` — the only way out of the chat — was on
+the panel and *not* in `/help`, so it moved rather than vanishing.
+
+Five things about what replaced them are not obvious, and each is one that reads
+fine until it is wrong:
+
+- **A row's file is a value beside the row, not text inside it.** `sideRefs` is
+  filled by `valueRef`/`row` while the panel is drawn, index-aligned with the
+  body — the same shape as the transcript's `rowRefs`, and for the same reason:
+  by the time a click arrives the row is a styled, possibly-wrapped string.
+  `sidebarTop` / `sideRefAt` are the sidebar's answer to "which screen row is
+  which file", and they are written out rather than shared with `transcriptTop`
+  because the two are separate facts that happen to agree today.
+- **Every row records a ref, including the ones naming nothing.** A heading, a
+  section separator (`blank()`) and a count all push a zero ref. The index is
+  positional, so a row that skipped its entry would shift every ref below it by
+  one — and the separator rows were the ones doing it, because they were the only
+  writer that bypassed `row()`.
+- **`build` returns the index rather than storing it.** It used to be called
+  twice for one frame (with the hotkeys, then without), so a field would describe
+  the body from the *first* call: the right file at the wrong row. The trimmed
+  body also cuts the index, and clears the entry the ellipsis replaced.
+- **A separator between nothing and nothing is not a row.** `blank()` compares
+  against `marked` and writes nothing when the section above it drew no rows. The
+  hotkeys hid this for as long as they were there — they filled the bottom of the
+  panel, so nobody looked at the gaps above them — and a panel whose four hidden
+  sections leave four blank lines reads as four sections that *failed* to draw.
+  `TestAHiddenSectionLeavesNoGapBehindIt` is the guard.
+- **The repository is read off the frame path, never on it.** `readGitState`
+  walks the worktree, which is disk I/O, and `View` runs on every keystroke — so
+  `gitStatusCmd` answers on a goroutine and sends `gitStatusMsg`. It is asked for
+  at `Init`, at the end of every turn, and on `/cd` and on leaving the editor: the
+  turn is the only moment the agent can have moved the tree, and the editor is the
+  only place the user can have. The counts are therefore as of the last refresh,
+  which is why `walked` exists — an unreadable tree says `status unavailable`
+  rather than printing zeros, which would be a claim about a clean tree nobody
+  checked. A `/cd` **clears** the state: the old folder's branch still drawn is a
+  claim about where the agent is working, and it is not working there.
+- **An MCP server that answered is not one that did not.** `mcp.States` carries
+  `Tools` *and* `Err`, because "reachable and offering nothing" and "unreachable"
+  were one row between them and they are not the same: the first is a
+  misconfigured server, the second needs a process hunted down. One eager pass
+  feeds both the sidebar and `toolNames` — a second listing would be a second
+  answer to "what does this server offer", and a server that came up between the
+  passes would appear in the panel and not in the agent's reach.
 
 ### Mode switches
 
@@ -492,6 +563,38 @@ with an error naming both directories. Two consequences to keep in mind:
   outside the root is only refused when the caller says so. An image leaves the
   machine either way, which is the thing the boundary is actually for.
 
+### The turn journal
+
+`ctrl+z` rewinds a turn twice: the conversation in the store and the files on
+disk. The second half lives in `internal/tools/undo.go` — a stack of turn
+groups the UI opens with `dmtools.BeginTurn()` at the same moment it sends a
+prompt, and pops with `dmtools.UndoTurn()` inside `rewind()`. Every write the
+tools make passes through `writeFileAtomic`, which records what it replaced
+and whether the file existed at all; `move_file` and `delete_file` record
+enough to invert themselves (a rename back, a restore); the shell watcher
+records its finds as **unrestorable** — a `sed -i` result is reported on the
+rewind line and left alone, because no content was ever captured for it. Three
+rules hold it together, each with a test in `internal/tools/undo_test.go`:
+
+- **Undo applies in reverse order, without dedupe.** Two writes to one file
+  undo to where the first one found it; a file written, moved and edited lands
+  exactly where the turn began. Restoring forward — or restoring "each path
+  once" — leaves every compound case on its last-but-one state.
+- **A restore does not become an edit.** Undo writes go through
+  `writeFileBytes`, the bare writer, not `writeFileAtomic` — otherwise a rewind
+  would count itself in the tally and journal itself for another rewind. The
+  tally *is* updated alongside (`recordChange` recomputes against the session
+  baseline), so the CHANGES panel stops showing an edit the rewind just removed.
+- **A shell-touched path is never half-restored.** If any entry in the turn
+  names a path the shell changed, its content restores are skipped and the path
+  is reported as not restored — restoring the post-write content over an unknown
+  pre-turn state would be the same guess the panel's `touched` flag refuses to
+  print as a number.
+
+`ResetChanges` clears the journal along with the tally, so `/new` cannot let a
+rewind reach back into a previous session's files. The journal is memory-only:
+a resumed session has no undo history, exactly as it has no in-memory tally.
+
 ---
 
 ## 2. Development Workflow & Commands
@@ -628,10 +731,10 @@ Already fixed, and worth not regressing:
   bar only when the sidebar is absent (narrow terminal or ctrl+b), and its rows
   go back to the transcript.
 - **The sidebar lost its bottom sections** — one row per tool spilled past the
-  panel width or ate the whole height, trimming the plan and the hotkeys. The
-  tool list is now one wrapped entry (capped at 12 rows with a "…" marker), and a
-  too-short panel drops the hotkeys — the most replaceable rows — before it trims
-  anything else.
+  panel width or ate the whole height, trimming the plan. The tool list became one
+  wrapped entry, and the hotkeys then left the panel entirely; the sections now on
+  it are in §1's sidebar. What replaced the two is the point: a list of names that
+  never changes was never what a panel is for.
 - **Markdown "working every other time"** — the per-turn text accumulator was never
   reset at the end of an LLM round, so a turn that used a tool had its second
   round's closing response appended on top of the deltas already shown. The

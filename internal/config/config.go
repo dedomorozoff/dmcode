@@ -22,11 +22,12 @@ const (
 )
 
 type Provider struct {
-	BaseURL string
-	APIKey  string
-	Model   string
-	API     string // apiResponses (default) or apiChat
-	Label   string // human-readable provider name for the UI
+	BaseURL   string
+	APIKey    string
+	APIKeyVar string // environment variable name for API key (e.g., OPENAI_API_KEY)
+	Model     string
+	API       string // apiResponses (default) or apiChat
+	Label     string // human-readable provider name for the UI
 	// Context is the model's context window in tokens as the endpoint itself
 	// reported it (/v1/models), zero when the endpoint said nothing. It wins
 	// over the heuristic table because it is the server's own answer, which
@@ -332,6 +333,26 @@ func ReadDotEnv() ([]string, error) {
 		return nil, err
 	}
 	return strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n"), nil
+}
+
+// WriteDotEnv writes the .env file with the permissions it needs — it holds
+// provider keys — and in the order that cannot lose it: a temporary file in the
+// same directory, then a rename over the original. A plain write truncates the
+// file first, so a crash or a full disk in between leaves a session with no
+// configuration at all and no way back to the one it had.
+func WriteDotEnv(lines []string) error {
+	var sb strings.Builder
+	for _, l := range lines {
+		sb.WriteString(l + "\n")
+	}
+	if err := os.WriteFile(".env.tmp", []byte(sb.String()), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(".env.tmp", ".env"); err != nil {
+		os.Remove(".env.tmp")
+		return err
+	}
+	return nil
 }
 
 // mergeDotEnv overlays vars onto existing .env lines. Keys the wizard does not

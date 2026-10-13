@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
@@ -53,29 +55,54 @@ func hasErr(m *uiModel, sub string) bool {
 	return false
 }
 
-// The sidebar's SESSION block reports what the agent actually changed, and stays
-// quiet until something has: a column of zeroes on a fresh session is noise, and
-// their absence is the information.
-func TestSidebarShowsTheChangeTally(t *testing.T) {
+// The sidebar's CHANGES section lists what the agent actually changed, one file
+// per row with that file's own counts, and stays quiet until something has: a
+// heading and rows over an empty list is not a list of no news, it is furniture,
+// and their absence is the information.
+func TestSidebarListsTheChangedFiles(t *testing.T) {
 	cleanTally(t)
 	m := tallyModel(t)
 
-	if s := ansi.Strip(m.sidebarView(20)); strings.Contains(s, "files:") {
+	if s := ansi.Strip(m.sidebarView(40)); strings.Contains(s, "CHANGES") {
 		t.Errorf("a fresh session already reports changes:\n%s", s)
 	}
 
 	dmtools.RecordChange("new.txt", "", "a\nb\nc\n")
-	dmtools.RecordChange("other.txt", "", "x\n")
+	dmtools.RecordChange("other.txt", "p\nq\n", "p\n")
 
-	s := ansi.Strip(m.sidebarView(20))
-	if !strings.Contains(s, "files: 2") {
-		t.Errorf("the sidebar does not report two changed files:\n%s", s)
+	s := ansi.Strip(m.sidebarView(40))
+	for _, want := range []string{"CHANGES", "new.txt", "other.txt", "+3", "+0", "-1"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("the sidebar does not report %q:\n%s", want, s)
+		}
 	}
-	if !strings.Contains(s, "+4") {
-		t.Errorf("the sidebar does not report the added lines:\n%s", s)
+	// The counts belong to the file beside them, not to the session as a whole:
+	// a list where every row carries the session's total would answer "how much"
+	// twice and never "which file".
+	if !strings.Contains(s, "new.txt +3 -0") {
+		t.Errorf("new.txt does not carry its own counts:\n%s", s)
 	}
-	if !strings.Contains(s, "-0") {
-		t.Errorf("the sidebar does not report the removed lines:\n%s", s)
+	if !strings.Contains(s, "other.txt +0 -1") {
+		t.Errorf("other.txt does not carry its own counts:\n%s", s)
+	}
+}
+
+// A changed file that no longer differs — the session edited it and put it back —
+// is not a row. "+0 -0" would be a statement about work that is not in the tree.
+func TestSidebarOmitsAFileWhoseNetChangeIsZero(t *testing.T) {
+	cleanTally(t)
+	m := tallyModel(t)
+
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nB\n")
+	dmtools.RecordChange("same.txt", "a\nb\n", "a\nb\n")
+	dmtools.RecordChange("kept.txt", "", "x\n")
+
+	s := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(s, "same.txt") {
+		t.Errorf("a file changed back is still listed:\n%s", s)
+	}
+	if !strings.Contains(s, "kept.txt") {
+		t.Errorf("the file that did change is missing:\n%s", s)
 	}
 }
 
@@ -248,22 +275,28 @@ func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 		prev = c
 	}
 
-	s := ansi.Strip(tallyModel(t).sidebarView(20))
+	s := ansi.Strip(tallyModel(t).sidebarView(40))
 	// The file did not exist when the session found it, so the baseline is empty
 	// and the end state is wholly additive — two lines that were not there
 	// before. What is being checked is that it is two and not six: the two later
 	// writes each replaced a line, and counting them separately would show +6.
-	if !strings.Contains(s, "files: 1") || !strings.Contains(s, "+2") || !strings.Contains(s, "-0") {
+	if !strings.Contains(s, "f.txt +2 -0") {
 		t.Errorf("three writes to one file reported as:\n%s", s)
+	}
+	// One row, not three: a list that grew a row per write would be a history of
+	// the agent's steps rather than of its result, which is the whole property
+	// being tested.
+	if n := strings.Count(s, "f.txt"); n != 1 {
+		t.Errorf("f.txt appears %d times, want one row:\n%s", n, s)
 	}
 }
 
-// /proxy with a URL sets it for this session and writes it to .env, so the next
-// start does not silently go direct. With "off" it removes the variables from
-// both: MergeDotEnv only adds and replaces, so a proxy left behind in the file
-// would be read back and "off" would not mean anything.
+// /proxy with a URL sets it for this session and writes it to settings.json, so
+// the next start does not silently go direct. With "off" it removes the setting
+// from settings.json too.
 func TestProxyCommandSetsAndClears(t *testing.T) {
-	dir := inTempDir(t)
+	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	m := newSetupModel(t)
@@ -273,12 +306,12 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	if s := config.CurrentProxy(); !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
 		t.Fatalf("the live proxy is %+v, want the one just set", s)
 	}
-	env, err := os.ReadFile(dir + "/.env")
+	s, err := settings.Load()
 	if err != nil {
-		t.Fatalf("the proxy was not written to .env: %v", err)
+		t.Fatalf("settings.Load: %v", err)
 	}
-	if !strings.Contains(string(env), config.EnvHTTPProxy+"=http://127.0.0.1:3128") {
-		t.Errorf(".env does not carry the proxy:\n%s", env)
+	if s.Proxy != "http://127.0.0.1:3128" {
+		t.Errorf("settings.Proxy = %q, want %q", s.Proxy, "http://127.0.0.1:3128")
 	}
 
 	// A value that is not a URL must be refused and must not disturb what works.
@@ -294,18 +327,16 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	if config.CurrentProxy().Active {
 		t.Error("the proxy is still active after /proxy off")
 	}
-	env, _ = os.ReadFile(dir + "/.env")
-	for _, k := range config.ProxyEnvKeys() {
-		if strings.Contains(string(env), k+"=") {
-			t.Errorf("%s survived /proxy off in .env:\n%s", k, env)
-		}
+	s2, _ := settings.Load()
+	if s2.Proxy != "" {
+		t.Errorf("settings.Proxy = %q after /proxy off, want empty", s2.Proxy)
 	}
 }
 
-// /proxy must not eat the user's other settings when it rewrites .env: the file
-// is merged, and the proxy keys are the only thing it removes.
+// /proxy must not touch the user's .env at all — credentials stay there.
 func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	if err := os.WriteFile(dir+"/.env", []byte("# my note\nOPENAI_API_KEY=sk-real\n"), 0o600); err != nil {
@@ -317,10 +348,19 @@ func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	m.applyProxy("http://127.0.0.1:8080")
 
 	env, _ := os.ReadFile(dir + "/.env")
-	for _, want := range []string{"# my note", "OPENAI_API_KEY=sk-real", config.EnvHTTPProxy + "="} {
+	// .env must be unchanged — only settings.json is written
+	for _, want := range []string{"# my note", "OPENAI_API_KEY=sk-real"} {
 		if !strings.Contains(string(env), want) {
 			t.Errorf(".env lost %q:\n%s", want, env)
 		}
+	}
+	if strings.Contains(string(env), "HTTP_PROXY") {
+		t.Errorf("proxy leaked into .env:\n%s", env)
+	}
+	// But settings.json must have it
+	s, _ := settings.Load()
+	if s.Proxy != "http://127.0.0.1:8080" {
+		t.Errorf("settings.Proxy = %q, want %q", s.Proxy, "http://127.0.0.1:8080")
 	}
 }
 

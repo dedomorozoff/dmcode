@@ -8,7 +8,7 @@ package i18n
 var catalog = map[Lang]map[string]string{
 	Russian: {
 		// Command palette descriptions.
-		"choose a provider (free, no key needed)": "выбрать провайдера (бесплатно, без ключа)",
+		"choose a provider (local ones need no key)": "выбрать провайдера (локальным ключ не нужен)",
 		"list models":                                        "список моделей",
 		"copy the agent's reply (ctrl+y)":                    "скопировать ответ агента (ctrl+y)",
 		"toggle the sidebar (ctrl+b)":                        "боковая панель (ctrl+b)",
@@ -33,18 +33,17 @@ var catalog = map[Lang]map[string]string{
 		"describe the task… (/help for commands, esc to cancel)":                                                           "опиши задачу… (/help — команды, esc — отмена)",
 
 		// Session and turn state.
-		"— session reset —":                   "— сессия сброшена —",
-		"turn stopped":                        "ход прерван",
-		"stopped":                             "прервано",
-		"error":                               "ошибка",
-		"ready":                               "готов",
-		"cancelled":                           "отменено",
-		"generating a reply…":                 "генерация ответа...",
-		"running…":                            "выполнение...",
-		"waiting for a task":                  "ожидание задачи",
-		"⏹ turn stopped by the user (Esc)":    "⏹ ход прерван пользователем (Esc)",
-		"⏹ turn stopped by the user (Ctrl+C)": "⏹ ход прерван пользователем (Ctrl+C)",
-		"⏹ turn stopped":                      "⏹ ход прерван",
+		"— session reset —":                 "— сессия сброшена —",
+		"turn stopped":                      "ход прерван",
+		"stopped":                           "прервано",
+		"error":                             "ошибка",
+		"ready":                             "готов",
+		"cancelled":                         "отменено",
+		"generating a reply…":               "генерация ответа...",
+		"running…":                          "выполнение...",
+		"waiting for a task":                "ожидание задачи",
+		"turn stopped by the user (Esc)":    "ход прерван пользователем (Esc)",
+		"turn stopped by the user (Ctrl+C)": "ход прерван пользователем (Ctrl+C)",
 
 		// Timing, tokens and the context meter.
 		"time:":                               "время:",
@@ -67,7 +66,7 @@ var catalog = map[Lang]map[string]string{
 		"output:":                             "ответ:",
 		"the context was compressed":          "контекст был сжат",
 		"cut at the output limit":             "обрезан лимитом вывода",
-		"⚠ the answer hit the output limit — say «continue» and it will pick up from there": "⚠ ответ упёрся в лимит вывода — скажите «продолжай», и модель продолжит с места обрыва",
+		"the answer hit the output limit — say «continue» and it will pick up from there": "ответ упёрся в лимит вывода — скажите «продолжай», и модель продолжит с места обрыва",
 		"no turn has run yet": "ещё ни одного хода не было",
 		"session (%d turns)":  "сессия (%d ходов)",
 		"total time:":         "всего времени:",
@@ -84,9 +83,9 @@ var catalog = map[Lang]map[string]string{
 
 		// Provider status.
 		"provider without tools": "провайдер без tools",
-		"⚠ %s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another.": "⚠ %s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
+		"%s (%s) cannot call tools: tasks will stay prose with no file edits. /setup — pick another.": "%s (%s) не умеет вызывать инструменты: задачи останутся текстом без правок файлов. /setup — выбрать другой.",
 		"failover: ": "запасной: ",
-		"⚡ %s is unavailable (%s) — %s (%s) answered": "⚡ %s недоступен (%s) — ответил %s (%s)",
+		"%s is unavailable (%s) — %s (%s) answered": "%s недоступен (%s) — ответил %s (%s)",
 		"provider: ":               "провайдер: ",
 		"provider saved to .env: ": "провайдер сохранён в .env: ",
 		"unavailable":              "недоступен",
@@ -100,6 +99,7 @@ var catalog = map[Lang]map[string]string{
 		" (context kept)":   " (контекст сохранён)",
 		"· model → ":        "· модель → ",
 		"   ↓ more ":        "   ↓ ещё ",
+		"   ↑ more ":        "   ↑ ещё ",
 
 		// Setup wizard.
 		"setup cancelled":                                  "настройка отменена",
@@ -136,18 +136,18 @@ var catalog = map[Lang]map[string]string{
 		"the interface is ready; a message will send as soon as the model answers":             "интерфейс готов; сообщение уйдёт, как только модель ответит",
 		"loading the local model — the interface is ready, messages will not send until it is": "загружаю локальную модель — интерфейс готов, сообщения уйдут после загрузки",
 		"model load cancelled":                                                                 "загрузка модели отменена",
-		"⏹ stopped loading the local model — llama-server was shut down":                       "⏹ загрузка локальной модели остановлена — llama-server выключен",
-		"⏹ stopped loading the local model":                                                    "⏹ загрузка локальной модели остановлена",
+		"stopped loading the local model — llama-server was shut down":                         "загрузка локальной модели остановлена — llama-server выключен",
+		"stopped loading the local model":                                                      "загрузка локальной модели остановлена",
 		"the model is still loading":                                                           "модель ещё загружается",
-		"⏳ kept your prompt — the model is still loading, press enter again when it is ready":  "⏳ ваш запрос сохранён — модель ещё загружается, нажмите enter ещё раз, когда она будет готова",
-		"⏳ LOADING": "⏳ ЗАГРУЗКА",
+		"kept your prompt — the model is still loading, press enter again when it is ready":    "ваш запрос сохранён — модель ещё загружается, нажмите enter ещё раз, когда она будет готова",
+		"LOADING": "ЗАГРУЗКА",
 		"? provider  (* — current, enter — select, esc — cancel)": "? провайдер  (* — текущий, enter — выбрать, esc — отмена)",
 
 		// Clipboard.
-		"nothing to copy":                              "нет ответа для копирования",
-		"clipboard error: ":                            "ошибка буфера: ",
-		"reply copied to the clipboard!":               "ответ скопирован в буфер обмена!",
-		"📋 the last reply was copied to the clipboard": "📋 последний ответ скопирован в буфер обмена",
+		"nothing to copy":                            "нет ответа для копирования",
+		"clipboard error: ":                          "ошибка буфера: ",
+		"reply copied to the clipboard!":             "ответ скопирован в буфер обмена!",
+		"the last reply was copied to the clipboard": "последний ответ скопирован в буфер обмена",
 
 		// Sidebar.
 		"MODEL":                  "МОДЕЛЬ",
@@ -155,24 +155,23 @@ var catalog = map[Lang]map[string]string{
 		"PROXY":                  "ПРОКСИ",
 		"FOLDER":                 "ПАПКА",
 		"LAST TOOL":              "ПОСЛЕДНИЙ ТУЛ",
-		"TOOLS":                  "ИНСТРУМЕНТЫ",
-		"HOTKEYS":                "ГОРЯЧИЕ КЛАВИШИ",
+		"CHANGES":                "ИЗМЕНЕНИЯ",
+		"GIT":                    "GIT",
+		"MCP":                    "MCP",
+		"staged":                 "в индексе",
+		"changed":                "изменено",
+		"new":                    "новых",
+		"status unavailable":     "статус недоступен",
+		"(no tools)":             "(нет инструментов)",
+		"and %d more":            "и ещё %d",
+		"± changed by a command": "± изменено командой",
 		"turns: %d":              " ходов: %d",
-		"files: %d":              " файлов: %d",
 		"tools: %d":              " тулов: %d",
-		" ctrl+e  editor":        " ctrl+e  редактор",
-		" ctrl+p  commands":      " ctrl+p  команды",
-		" ctrl+b  project panel": " ctrl+b  панель проекта",
-		" ctrl+y  copy reply":    " ctrl+y  копировать ответ",
-		" ctrl+q  quit":          " ctrl+q  выход",
-		" alt+t  terminal":       " alt+t  терминал",
-		" esc     stop turn":     " esc     отмена хода",
-		" pgup/dn scroll":        " pgup/dn скролл",
 
 		// Status badges.
-		"⏳ WORKING": "⏳ РАБОТАЕТ",
-		"⏹ STOPPED": "⏹ ПРЕРВАНО",
-		"● READY":   "● ГОТОВ",
+		"WORKING": "РАБОТАЕТ",
+		"STOPPED": "ПРЕРВАНО",
+		"READY":   "ГОТОВ",
 
 		// Floating panels.
 		"esc — close":      "esc — закрыть",
@@ -180,6 +179,15 @@ var catalog = map[Lang]map[string]string{
 		"⌘ commands":       "⌘ команды",
 		"↑↓ · enter · esc": "↑↓ выбор · enter запуск · esc закрыть",
 		"⌘ models":         "⌘ модели",
+		"models":           "моделей",
+
+		// /models. The keys move a list of three hundred rows, so they are named
+		// on the box itself rather than only in the reference.
+		"esc — close · ctrl+f — free only · ↑↓/pgup/pgdn — scroll": "esc — закрыть · ctrl+f — только бесплатные · ↑↓/pgup/pgdn — скролл",
+		"free only":       "только бесплатные",
+		"free":            "бесплатных",
+		"type to filter…": "печатай, чтобы фильтровать…",
+		"list the models — type to filter, ctrl+f for the free ones": "список моделей — печатай, чтобы фильтровать, ctrl+f — только бесплатные",
 
 		// Boot.
 		"dmcode is starting…": "dmcode загружается…",
@@ -194,25 +202,23 @@ var catalog = map[Lang]map[string]string{
 		" mode":                    " режиме",
 		"usage: /mode plan|act":    "использование: /mode plan|act",
 		"plan mode is unavailable": "режим плана недоступен",
-		"wait for the turn to finish before switching mode":      "дождитесь окончания хода перед сменой режима",
-		"switch plan/act mode (tab)":                             "переключить режим план/работа (tab)",
-		"change the working folder":                              "сменить рабочую папку",
-		"change the working folder (/cd opens a folder browser)": "сменить рабочую папку (/cd открывает выбор папки)",
-		"current folder: ":                                       "текущая папка: ",
-		"folder changed to: ":                                    "рабочая папка изменена: ",
-		"cannot enter that folder: ":                             "не удалось перейти в папку: ",
-		"choose a folder — enter opens, esc back":                "выберите папку — enter открыть, esc назад",
-		"→ use this folder":                                      "→ перейти в эту папку",
-		"mouse on — the wheel scrolls":                           "мышь включена — колесо прокручивает",
-		"mouse off — the wheel is ignored":                       "мышь выключена — колесо не работает",
-		" tab     plan/act":                                      " tab    план/работа",
+		"wait for the turn to finish before switching mode":                "дождитесь окончания хода перед сменой режима",
+		"switch plan/act mode (tab)":                                       "переключить режим план/работа (tab)",
+		"change the working folder":                                        "сменить рабочую папку",
+		"change the working folder (/cd opens a folder browser)":           "сменить рабочую папку (/cd открывает выбор папки)",
+		"current folder: ":                                                 "текущая папка: ",
+		"folder changed to: ":                                              "рабочая папка изменена: ",
+		"cannot enter that folder: ":                                       "не удалось перейти в папку: ",
+		"choose a folder — enter opens, esc back":                          "выберите папку — enter открыть, esc назад",
+		"→ use this folder":                                                "→ перейти в эту папку",
+		"mouse on — the wheel scrolls":                                     "мышь включена — колесо прокручивает",
+		"mouse off — the wheel is ignored":                                 "мышь выключена — колесо не работает",
 		"tab — plan/act mode · wheel — scroll · /mouse — toggle the wheel": "tab — режим план/работа · колесо — скролл · /mouse — переключить мышь",
 
 		// Yolo mode. The badge and the hotkey are deliberately left in Latin
 		// script: they are read at a glance while a turn runs, and "YOLO" is
 		// what the key is called everywhere else.
 		"YOLO":                     "YOLO",
-		"shift+tab yolo":           "shift+tab yolo",
 		"yolo mode is unavailable": "режим yolo недоступен",
 		"yolo mode is turned on with shift+tab, not with a command": "режим yolo включается через shift+tab, а не командой",
 
@@ -247,8 +253,9 @@ var catalog = map[Lang]map[string]string{
 		"proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it": "прокси: /proxy открывает диалог · /proxy <url> задать сразу · /proxy off отключить",
 
 		// Provider options.
-		"No key — Pollinations (OpenAI-compatible, anonymous)":                       "Без ключа — Pollinations (OpenAI-совместимый, анонимно)",
 		"Local — Ollama (http://127.0.0.1:11434/v1)":                                 "Локально — Ollama (http://127.0.0.1:11434/v1)",
+		"Pollinations gen — key required, meters pollen":                             "Pollinations gen — нужен ключ, считает pollen",
+		"Pollinations text — no key, tools work":                                     "Pollinations text — без ключа, тулсы работают",
 		"Unsloth (local) — key from Settings → API, URL and model from your console": "Unsloth (локально) — ключ из Settings → API, URL и модель из консоли",
 		"OpenRouter — free models (deepseek and others)":                             "OpenRouter — бесплатные модели (deepseek и др.)",
 		"Kilo — gateway with free models (kilo-auto/free, account key)":              "Kilo — шлюз с бесплатными моделями (kilo-auto/free, ключ аккаунта)",
@@ -265,7 +272,9 @@ var catalog = map[Lang]map[string]string{
 		"Your own OpenAI-compatible endpoint":                                        "Свой OpenAI-совместимый endpoint",
 
 		// Setup wizard (stdin).
-		"\nNo free provider is configured. Pick one:\n": "\nБесплатный провайдер не настроен. Выбери:\n",
+		"\nNo free provider is configured. Pick one:\n":                               "\nБесплатный провайдер не настроен. Выбери:\n",
+		"every request goes through the proxy ":                                       "каждый запрос идёт через прокси ",
+		" — if nothing answers, check that it is running (/proxy off stops using it)": " — если ничего не отвечает, проверь, что он запущен (/proxy off отключает)",
 		"number [1]: ": "номер [1]: ",
 		"could not read the choice (stdin not a terminal?)": "не удалось прочитать выбор (stdin не терминал?)",
 		"Get a key here: ": "Возьми ключ тут: ",
@@ -295,6 +304,9 @@ var catalog = map[Lang]map[string]string{
 		"rewind failed: ":                                              "откат не удался: ",
 		"rolled back to the previous message":                          "откат к предыдущему сообщению",
 		"the message is back in the input — edit it and send again":    "сообщение вернулось в поле ввода — отредактируйте и отправьте снова",
+		"files restored on disk: ":                                     "восстановлены на диске: ",
+		"could not restore a file: ":                                   "не удалось восстановить файл: ",
+		"changed by a shell command and not restored: ":                "изменено шелл-командой и не восстановлено: ",
 
 		// Sessions.
 		"start a new session, the old one is kept (ctrl+n)":        "начать новую сессию, старая сохраняется (ctrl+n)",
@@ -322,7 +334,6 @@ var catalog = map[Lang]map[string]string{
 		"no saved sessions yet":                                    "сохранённых сессий пока нет",
 		"session deleted":                                          "сессия удалена",
 		"could not delete that session: ":                          "не удалось удалить сессию: ",
-		" ctrl+z  undo last message":                               " ctrl+z  откат сообщения",
 		"(untitled)":                                               "(без названия)",
 		"events":                                                   "событий",
 		"just now":                                                 "только что",

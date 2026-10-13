@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
+	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
 // Going from a change in the transcript to that change in the file.
@@ -212,11 +213,85 @@ func TestAClickOnAnythingElseStillDoesNothing(t *testing.T) {
 		t.Fatalf("a jump was left pending from a click on nothing: %v", *m.pendingJump)
 	}
 
-	// And the sidebar is not the transcript: a click past the chat panel's own
-	// columns is the panel's, whatever it happens to be drawn over.
+	// The sidebar has targets of its own now — one per changed file — so "a click
+	// past the chat panel does nothing" is no longer true of the panel as a whole.
+	// It is true of every row in it except those, and this session has changed
+	// nothing, so the whole panel is still inert: a click on a heading must not
+	// open the workspace.
 	clickAt(m, m.chatBoxWidth()+1, row)
 	if m.ed != nil {
-		t.Fatal("a click in the sidebar must not open the workspace")
+		t.Fatal("a click on a sidebar row that names no file must not open the workspace")
+	}
+}
+
+// TestAClickOnAChangedFileRowOpensThatFile is the sidebar's half of the same
+// feature: a row of the CHANGES list names a file, and clicking it opens the
+// file. The row is found in a real frame rather than computed, for the reason
+// jump.go gives for the transcript — a sidebarTop that is off by one would
+// otherwise open a plausible wrong file rather than failing.
+func TestAClickOnAChangedFileRowOpensThatFile(t *testing.T) {
+	dir := t.TempDir()
+	writeJumpFile(t, dir, "alpha.txt", "one", "two", "three")
+	cleanTally(t)
+	m := jumpModel(t, dir)
+	m.showSidebar = true
+	// A tall terminal, because the panel's sections are trimmed from the bottom
+	// and the hotkeys — twelve rows of them — are the first thing to go. A short
+	// frame would test the trim rather than the click.
+	m.height = 44
+	m.layout()
+	m.followVP()
+
+	dmtools.RecordChange(filepath.Join(dir, "alpha.txt"), "one\n", "ONE\n")
+
+	frame := m.View().Content
+	row, col := frameRowContaining(t, frame, "alpha.txt")
+	// The panel's own columns must be left behind: the row is found in the
+	// sidebar, and a click short of it would be a click on the transcript.
+	side := m.chatBoxWidth() + sidebarGap + 2
+	if col < side {
+		t.Fatalf("the row was found at column %d, left of the panel's edge at %d", col, side)
+	}
+	clickAt(m, side, row)
+
+	if m.ed == nil {
+		t.Fatal("a click on a changed-file row must bring the workspace up")
+	}
+	if m.ed.Chat {
+		t.Fatal("the workspace must be showing the file, not the chat")
+	}
+	// The status line names the place it opened, which is the path the tools
+	// recorded — absolute, because that is what the tally holds and what OpenAt
+	// is given. What is being checked is that it is *this* file and line 1.
+	if !strings.HasSuffix(m.statusText, string(filepath.Separator)+"alpha.txt:1") {
+		t.Fatalf("status = %q, want it to end in alpha.txt:1", m.statusText)
+	}
+	if shown := ansi.Strip(m.View().Content); !strings.Contains(shown, "alpha.txt") {
+		t.Fatalf("the workspace does not show alpha.txt:\n%s", shown)
+	}
+	m.ed.Shutdown()
+}
+
+// TestAClickOnASidebarHeadingOpensNothing: the panel's other rows — MODEL, SESSION,
+// GIT, the plan — stand for nothing, and a click on one must still do nothing.
+// Without this the sidebar would turn every click inside it into a jump.
+func TestAClickOnASidebarHeadingOpensNothing(t *testing.T) {
+	dir := t.TempDir()
+	cleanTally(t)
+	m := jumpModel(t, dir)
+	m.showSidebar = true
+	m.layout()
+	m.followVP()
+
+	frame := m.View().Content
+	row, _ := frameRowContaining(t, frame, "SESSION")
+	clickAt(m, m.chatBoxWidth()+sidebarGap+2, row)
+
+	if m.ed != nil {
+		t.Fatal("a click on a sidebar heading must not open the workspace")
+	}
+	if m.pendingJump != nil {
+		t.Fatalf("a jump was left pending from a click on a heading: %v", *m.pendingJump)
 	}
 }
 

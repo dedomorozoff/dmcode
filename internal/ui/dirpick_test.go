@@ -81,7 +81,7 @@ func TestDirPickDescendsAndPicks(t *testing.T) {
 		t.Fatalf("the browser does not list src/: %v", m.dirPick.entries)
 	}
 	d := setupKeys{m: m}
-	for m.dirPick.selected < idx {
+	for m.dirPick.list.sel < idx {
 		d = d.down()
 	}
 	d = d.enter()

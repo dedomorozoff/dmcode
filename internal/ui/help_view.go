@@ -113,12 +113,16 @@ func (m *uiModel) helpRows(inner int) []string {
 	entry("esc", "stop the turn, close a dialog")
 	entry("↑/↓", "prompt history")
 	entry("pgup/pgdn", "scroll · home/end — top/bottom")
+	// ctrl+q is the only way out of the chat, and the panel used to be where it
+	// was written down. With the hotkeys gone from the panel this is the one place
+	// it is named — so it belongs here rather than nowhere.
+	entry("ctrl+q", "quit dmcode")
 	entry("f1", "this reference")
 	rows = append(rows, "")
 
 	section("COMMANDS")
 	entry("/setup", "choose a provider")
-	entry("/models", "list the models · /model <id> — switch")
+	entry("/models", "list the models — type to filter, ctrl+f for the free ones")
 	entry("/editor", "open the code editor")
 	entry("/changes", "next change in the editor")
 	entry("/cd <path>", "change the working folder")

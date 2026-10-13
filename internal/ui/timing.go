@@ -195,7 +195,7 @@ func timingLine(t turnTiming, window int) string {
 	if r := t.TokensPerSecond(); r >= 1 {
 		parts = append(parts, fmt.Sprintf("%.0f %s", r, i18n.T("tok/s")))
 	}
-	return "⏱ " + strings.Join(parts, " · ")
+	return strings.Join(parts, " · ")
 }
 
 // elapsedNote is the live counter shown while a turn runs: the time so far, and
@@ -378,7 +378,7 @@ func (m *uiModel) statsLine() string {
 		return i18n.T("no turn has run yet")
 	}
 	var b strings.Builder
-	b.WriteString("⏱ " + i18n.T("last turn"))
+	b.WriteString(i18n.T("last turn"))
 	b.WriteString("\n  " + fmt.Sprintf("%s %s", i18n.T("total:"), formatWait(t.Elapsed)))
 	if t.FirstToken > 0 {
 		b.WriteString("\n  " + fmt.Sprintf("%s %s", i18n.T("first token:"), formatWait(t.FirstToken)))
@@ -417,7 +417,7 @@ func (m *uiModel) totalBlock() string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n⏱ " + fmt.Sprintf(i18n.T("session (%d turns)"), s.Turns))
+	b.WriteString("\n" + fmt.Sprintf(i18n.T("session (%d turns)"), s.Turns))
 	b.WriteString("\n  " + fmt.Sprintf("%s %s", i18n.T("total time:"), formatWait(s.Elapsed)))
 	if avg := s.Average(s.Turns); avg > 0 {
 		b.WriteString("\n  " + fmt.Sprintf("%s %s", i18n.T("per turn:"), formatWait(avg)))

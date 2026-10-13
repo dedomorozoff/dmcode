@@ -256,8 +256,14 @@ func spawnGGUF() (*Launch, error) {
 		stop: func() {
 			stopOnce.Do(func() {
 				cancelOnce.Do(func() { close(cancelled) })
-				cmd.Process.Kill()
-				<-died
+				if err := cmd.Process.Kill(); err != nil {
+					logFile.Close()
+					return
+				}
+				select {
+				case <-died:
+				case <-time.After(5 * time.Second):
+				}
 				logFile.Close()
 			})
 		},

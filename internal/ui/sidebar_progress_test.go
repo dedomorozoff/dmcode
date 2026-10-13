@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -63,28 +64,51 @@ func TestHeaderYieldsToTheSidebar(t *testing.T) {
 	}
 }
 
-// A sidebar too tall for its box loses the hotkeys first and keeps the plan.
-func TestSidebarDropsHotkeysBeforeThePlan(t *testing.T) {
+// A sidebar too tall for its box is cut and marked, rather than quietly
+// overflowing. It used to be cut in two stages — the hotkeys dropped, then the
+// rest trimmed — and with the hotkeys gone there is only the second stage left.
+func TestSidebarTrimsOverflowAndSaysSo(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
-	// A height that fits nothing like the whole body: deep in the trimmed case.
-	tight := m.sidebarView(8)
-	plain := ansi.Strip(tight)
-	if strings.Contains(plain, "HOTKEYS") {
-		t.Error("a tight sidebar still spends rows on the hotkeys")
+	tight := ansi.Strip(m.sidebarView(8))
+	if !strings.Contains(tight, "…") {
+		t.Errorf("a trimmed panel does not mark the cut:\n%s", tight)
+	}
+	if h := lipgloss.Height(m.sidebarView(8)); h != 8 {
+		t.Errorf("a trimmed panel is %d rows, want exactly the 8 it was given", h)
 	}
 }
 
-// The tool list wraps under its own marker instead of being cut to one row:
-// the joined list of names is far wider than the panel, and the old one-name-
-// per-row layout both spilled past the frame and ate a row per tool.
-func TestSidebarToolsWrapInsteadOfTruncating(t *testing.T) {
+// The panel does not list the agent's instrument names.
+//
+// The list was the one section that answered no question: identical on every
+// frame of every session, unchanged while a turn ran, with nothing the user could
+// do with it — and at twelve rows it was the largest thing on a panel 27 columns
+// wide, which is what pushed the plan off the bottom. It has been replaced by
+// CHANGES, GIT and MCP, each of which answers something a user asks mid-session.
+//
+// This is a test that a section is *gone*, which is unusual, and it is here
+// because the list was deliberate once: it was there to show the plan-mode
+// instrument set honestly, and a change to the mode's instruments with no visible
+// consequence is how a panel starts lying again. What replaced it has to be checked
+// by the tests beside this one, or "the tools are not listed" is all anyone knows.
+func TestTheSidebarDoesNotListTheTools(t *testing.T) {
 	m := framedModel(120, 40, "gpt-4o-mini")
 	m.toolNames = []string{"read_file", "write_file", "mcp_fetch_docs", "edit_file", "grep", "glob"}
+
 	plain := ansi.Strip(m.sidebarView(40))
+	if strings.Contains(plain, "TOOLS") {
+		t.Errorf("the panel still spends rows on the instrument list:\n%s", plain)
+	}
 	for _, name := range m.toolNames {
-		if !strings.Contains(plain, name) {
-			t.Errorf("tool %q is not in the sidebar; the list was cut rather than wrapped", name)
+		if strings.Contains(plain, name) {
+			t.Errorf("the panel still names %q:\n%s", name, plain)
 		}
+	}
+	// The mode's reach is still visible, just not as a list of names: the badge
+	// is what says which set is in play, and the sections below say what the
+	// agent did with it.
+	if !strings.Contains(plain, "SESSION") || !strings.Contains(plain, "FOLDER") {
+		t.Errorf("the panel lost the sections it should have kept:\n%s", plain)
 	}
 }
 

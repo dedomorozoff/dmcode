@@ -196,9 +196,14 @@ func (m *uiModel) changeDir(path string) tea.Cmd {
 	m.workDirShort = filepath.Base(m.workDir)
 	m.history = append(m.history, line{kindSys, i18n.T("folder changed to: ") + m.workDir})
 	m.historyDirty = true
+	// The repository the sidebar's GIT section names is a property of the folder,
+	// so it is re-read here. Until the refresh lands the old folder's branch is
+	// still drawn — which is why the state is cleared rather than left: a branch
+	// that is known to belong somewhere else is worse than no section at all.
+	m.gitState = gitState{}
 	// The agent is told where it is through its instruction, so a stale one
 	// would have it reasoning about the previous directory.
-	return m.rebuildRunner()
+	return tea.Batch(m.rebuildRunner(), m.gitStatusCmd())
 }
 
 // savePrompt records a sent prompt for ↑/↓ recall and persists it to disk.

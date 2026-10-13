@@ -10,14 +10,48 @@ import (
 	"google.golang.org/genai"
 )
 
-// TestLiveKeylessEndpoint talks to a real keyless provider, so it is opt-in:
-// set DMCODE_LIVE=1 to run it. It is the check that the zero-config path
-// end-to-end still works, which the httptest fakes cannot prove.
-func TestLiveKeylessEndpoint(t *testing.T) {
+// liveModel is the endpoint the three checks below talk to.
+//
+// It is hardcoded to Pollinations' anonymous host, and that is still the right
+// default: it is the only endpoint reachable with no key at all that carries a
+// tool call, so it is the one these checks can actually run against.
+// gen.pollinations.ai is not a substitute — it answers 401 to any body carrying
+// `tools` unless a key is present, so a live tool check pointed there would only
+// ever test that a 401 is parsed.
+//
+// Any other endpoint can be named in the environment instead: DMCODE_LIVE_URL,
+// DMCODE_LIVE_MODEL and DMCODE_LIVE_KEY, read in that order so a developer
+// overrides only the piece they need. That keeps the checks pointed at whatever
+// provider they actually have, which is the point of a test that has to reach a
+// real model to mean anything.
+func liveModel(t *testing.T) *chatModel {
+	t.Helper()
 	if os.Getenv("DMCODE_LIVE") != "1" {
 		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
 	}
-	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+	url := firstEnv("DMCODE_LIVE_URL", "https://text.pollinations.ai/openai")
+	name := firstEnv("DMCODE_LIVE_MODEL", "openai-fast")
+	// "dmcode" is the placeholder the anonymous host requires: it rejects a
+	// request carrying no Authorization header but never reads the value.
+	key := firstEnv("DMCODE_LIVE_KEY", "dmcode")
+	return NewChatModel(url, key, name)
+}
+
+// firstEnv returns the value of the first variable that is set.
+func firstEnv(names ...string) string {
+	for _, n := range names {
+		if v := os.Getenv(n); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// TestLiveEndpointStream is the check that the streaming adapter works against a
+// real server end to end, which the httptest fakes cannot prove: deltas arrive,
+// the final event is not partial, and the aggregate matches what was streamed.
+func TestLiveEndpointStream(t *testing.T) {
+	m := liveModel(t)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "Ответь одним словом: ok"}}}},
 	}
@@ -39,14 +73,11 @@ func TestLiveKeylessEndpoint(t *testing.T) {
 	t.Logf("streamed=%q aggregated=%q turnComplete=%v", text.String(), final.Content.Parts[0].Text, final.TurnComplete)
 }
 
-// TestLiveKeylessToolCall is the load-bearing check for dmcode: a free keyless
-// provider must actually emit a tool call, not just text. A provider that
-// ignores the tools array would silently turn every turn into prose.
-func TestLiveKeylessToolCall(t *testing.T) {
-	if os.Getenv("DMCODE_LIVE") != "1" {
-		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
-	}
-	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+// TestLiveEndpointToolCall is the load-bearing check for dmcode: a real provider
+// must actually emit a tool call, not just text. A provider that ignores the
+// tools array would silently turn every turn into prose.
+func TestLiveEndpointToolCall(t *testing.T) {
+	m := liveModel(t)
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{
 			{Text: "Сколько сейчас времени? Вызови инструмент get_time."},
@@ -79,19 +110,16 @@ func TestLiveKeylessToolCall(t *testing.T) {
 		}
 	}
 	if call == nil {
-		t.Fatalf("free provider did not emit a tool call, parts: %+v", final.Content.Parts)
+		t.Fatalf("provider did not emit a tool call, parts: %+v", final.Content.Parts)
 	}
 	t.Logf("tool call: %s id=%s args=%v", call.Name, call.ID, call.Args)
 }
 
-// TestLiveKeylessBigToolCall replays the failure that started it all: a
+// TestLiveEndpointBigToolCall replays the failure that started it all: a
 // write_file large enough that a capped endpoint truncates it. With the
 // reasoning effort held low the call must arrive complete and parseable.
-func TestLiveKeylessBigToolCall(t *testing.T) {
-	if os.Getenv("DMCODE_LIVE") != "1" {
-		t.Skip("set DMCODE_LIVE=1 to hit a real endpoint")
-	}
-	m := NewChatModel("https://text.pollinations.ai/openai", "dmcode", "openai-fast")
+func TestLiveEndpointBigToolCall(t *testing.T) {
+	m := liveModel(t)
 	m.setReasoningEffort("low")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{

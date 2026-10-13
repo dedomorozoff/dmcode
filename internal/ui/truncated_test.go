@@ -39,7 +39,7 @@ func TestACutAnswerNamesTheOutputLimitAndHowToContinue(t *testing.T) {
 
 	note := ""
 	for _, l := range m.history {
-		if strings.Contains(l.text, "⚠") {
+		if strings.Contains(l.text, "output limit") {
 			note = l.text
 		}
 	}

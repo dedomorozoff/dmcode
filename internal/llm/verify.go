@@ -8,10 +8,11 @@ import (
 	"google.golang.org/genai"
 )
 
-// ToolProbeTimeout bounds the tool-calling check. The anonymous Pollinations
-// backend cold-starts its model, and the first request after an idle spell has
-// been observed taking ~18s, so this has to be generous. It is only ever paid
-// once per run, in the background, and the UI stays usable meanwhile.
+// ToolProbeTimeout bounds the tool-calling check. A cold local model, or a
+// host that has not seen this id for a while, has been observed taking ~18s to
+// answer the first request after an idle spell, so this has to be generous. It
+// is only ever paid once per run, in the background, and the UI stays usable
+// meanwhile.
 const ToolProbeTimeout = 45 * time.Second
 
 // VerifyTools asks a candidate to call a dummy tool and reports whether it
@@ -40,9 +41,9 @@ func VerifyTools(BaseURL, APIKey, modelName string, timeout time.Duration) (ok, 
 		},
 	}
 
-	// The real client is used on purpose, not a hand-rolled request: keyless
-	// hosts (Pollinations) answer 404 to a non-streaming call, so a probe that
-	// skipped the adapter would reject a Provider that works perfectly.
+	// The real client is used on purpose, not a hand-rolled request: some
+	// OpenAI-compatible hosts answer 404 to a non-streaming call, so a probe
+	// that skipped the adapter would reject a Provider that works perfectly.
 	var final *model.LLMResponse
 	for resp, err := range NewChatModel(BaseURL, APIKey, modelName).GenerateContent(ctx, req, true) {
 		if err != nil {

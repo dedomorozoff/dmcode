@@ -113,6 +113,92 @@ func TestUnchangedFileIsNotCounted(t *testing.T) {
 	}
 }
 
+// The sidebar's per-file list has to be the same tally the aggregate answers
+// for, split by file — one walk over one map, not a second bookkeeping.
+func TestChangedFilesDetailedAgreesWithTheAggregate(t *testing.T) {
+	dir := t.TempDir()
+	if err := SetRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	ResetChanges()
+	t.Cleanup(ResetChanges)
+
+	// a.txt is put in place outside the tally, so its baseline is its original
+	// content and the edit below reads as a replacement: one line added and one
+	// removed. b.txt does not exist yet, so the session creates it and every one
+	// of its lines is an addition — two files in the list with two different
+	// kinds of row, which is the case a single aggregate number could not show.
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ResetChanges()
+	if _, err := writeFileAtomic(filepath.Join(dir, "b.txt"), []byte("a\nb\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeFileAtomic(filepath.Join(dir, "a.txt"), []byte("one\nTWO\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	files := ChangedFilesDetailed()
+	if len(files) != 2 {
+		t.Fatalf("files = %d, want one row per touched file: %+v", len(files), files)
+	}
+	// Sorted by path, because a list that reshuffled between frames could not be
+	// read and a click would land on a different file than the row named.
+	if filepath.Base(files[0].Path) != "a.txt" || filepath.Base(files[1].Path) != "b.txt" {
+		t.Errorf("files are not in path order: %+v", files)
+	}
+	if files[0].Added != 1 || files[0].Removed != 1 {
+		t.Errorf("a.txt = +%d -%d, want +1 -1 for the one line that differs", files[0].Added, files[0].Removed)
+	}
+	if files[1].Added != 2 || files[1].Removed != 0 {
+		t.Errorf("b.txt = +%d -%d, want +2 -0 for a new file", files[1].Added, files[1].Removed)
+	}
+
+	// The aggregate is the sum of the rows: two answers to one question have to
+	// be the same answer.
+	agg := Changes()
+	var add, rm int
+	for _, f := range files {
+		add += f.Added
+		rm += f.Removed
+	}
+	if agg.Files != len(files) || agg.Added != add || agg.Removed != rm {
+		t.Errorf("aggregate %+v does not match the rows %+v", agg, files)
+	}
+}
+
+// A file the session edited and then put back is not in the list: "+0 -0" is a
+// statement about work that is not in the tree. It stays in ChangedFiles, which
+// answers what was touched.
+func TestAFileChangedBackIsLeftOutOfTheList(t *testing.T) {
+	dir := t.TempDir()
+	if err := SetRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	ResetChanges()
+	t.Cleanup(ResetChanges)
+
+	p := filepath.Join(dir, "same.txt")
+	if _, err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
+		t.Fatal(err)
+	}
+	ResetChanges()
+	if _, err := writeFileAtomic(p, []byte("a\nB\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeFileAtomic(p, []byte("a\nb\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	if files := ChangedFilesDetailed(); len(files) != 0 {
+		t.Errorf("a file whose net change is zero is listed: %+v", files)
+	}
+	if len(ChangedFiles()) != 1 {
+		t.Error("the file was dropped from ChangedFiles too, which answers a different question")
+	}
+}
+
 func TestDiffBlockShowsTheChangedLines(t *testing.T) {
 	got := DiffBlock("src/app.go", "a\nb\nc\n", "a\nB\nc\n")
 	want := "── src/app.go\n-2: b\n+2: B"
