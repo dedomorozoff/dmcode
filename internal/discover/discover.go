@@ -52,6 +52,22 @@ var localCandidates = []freeCandidate{
 // openai-fast and openai are aliases of the same anonymous model (GPT-OSS 20B),
 // so listing both would only make the probe try the same thing twice.
 //
+// Pollinations' *other* host is deliberately absent, and the reason is measured
+// rather than assumed. gen.pollinations.ai answers an unauthenticated bare
+// completion and an unauthenticated `stream: true`, and answers 401 "A valid API
+// key is required" as soon as the body carries `tools`, `stream_options` or
+// `reasoning_effort` — on every model tried, so it is the host and not the model.
+// A candidate here is probed with GET /models, which gen.pollinations.ai serves
+// happily, so it would pass the probe and then fail every real turn with a 401
+// that points at the provider instead of at the missing credential. It is
+// offered by /setup and picked up from POLLINATIONS_API_KEY instead
+// (keyedPresets, detect.go).
+//
+// The anonymous text host was re-verified after that migration was written: it
+// still serves the exact body dmcode sends — stream, tools, stream_options and
+// reasoning_effort together — without a key, and returns a real tool call. The
+// free path was never closed, only moved, so this entry stays.
+//
 // Other keyless hosts were probed live and rejected, so they do not belong
 // here:
 //   - Kilo (api.kilo.ai/api/gateway): Cloudflare answers 403 to every
@@ -59,8 +75,8 @@ var localCandidates = []freeCandidate{
 //     alike. It is offered by /setup instead, where the free account key
 //     unlocks kilo-auto/free.
 //   - LLM7.io: the documented anonymous token is refused on almost every
-//     model, and the one model that does answer (codestral-latest) ignores
-//     the tools array entirely — a turn would degrade into prose.
+//     model, and the one model that does answer (codestral-latest) ignores the
+//     tools array entirely — a turn would degrade into prose.
 //   - OVHcloud AI Endpoints: /models is open, but chat completions require
 //     an OAuth-issued key, and the anonymous tier is ~2 requests/minute.
 var hostedCandidates = []freeCandidate{
@@ -202,10 +218,10 @@ func probe(cand freeCandidate, timeout time.Duration) (modelName string, context
 }
 
 // discoverFreeProviders probes every candidate and returns the working ones in
-// preference order: a local server first, a keyless host after. Every candidate
-// is probed, not just the first that answers — that is the whole point of the
-// pool, since a second reachable endpoint is the difference between a turn that
-// completes and a turn that ends in an error.
+// preference order: a local server first, a keyless hosted host after. Every
+// candidate is probed, not just the first that answers — that is the whole point
+// of the pool, since a second reachable endpoint is the difference between a
+// turn that completes and a turn that ends in an error.
 func DiscoverFreeProviders() []config.Provider {
 	all := append(append([]freeCandidate{}, localCandidates...), hostedCandidates...)
 

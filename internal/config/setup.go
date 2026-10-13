@@ -46,23 +46,54 @@ type SetupOption struct {
 // A keyless option deliberately names no key variable. Writing a placeholder
 // into OPENAI_API_KEY would destroy a real key the user already had, and dmcode
 // talks to keyless hosts without any key anyway.
+//
+// The order is free-first and that is a promise, not a habit: dmcode's claim is
+// that it runs for nothing, and the wizard is the first screen a new user reads.
+// Every option whose whole cost is zero comes before every option that can bill
+// them, and TestNoFreeOptionIsRankedBelowAPaidOne fails the build if a provider
+// is added to the wrong side — nothing else in the code would notice.
+//
+// The first word of a label is the one that has to differ between options, and
+// the tests count on it: it is what the overlay shows when a label wraps, and it
+// is how a reader tells two Pollinations apart on a 72-column screen. Leading
+// with the cost — "No key —", "Free", "Metered" — is what keeps them apart, so
+// adding a provider means saying what it costs rather than repeating its name.
+//
+// The list opens with Pollinations' anonymous host because it is the only
+// endpoint that answers with tools and no key at all, and it survives the move
+// to gen.pollinations.ai: that newer host needs a key the moment a request
+// carries `tools`, so it appears further down as an ordinary keyed provider.
 func SetupOptions() []SetupOption {
 	return []SetupOption{
+		// Free with nothing configured: a keyless host and two local servers.
 		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low", Free: true},
 		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true, Free: true},
-		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true, Free: true},
+
+		// Free with a key: a free tier that never bills, so the signup is the
+		// only cost. OpenRouter and Kilo are here rather than below because the
+		// model they default to names itself free — the mixed catalogue is the
+		// provider's, not the option's.
 		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
 		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "big-pickle", EnvKey: "OPENCODE_API_KEY", API: APIResponses, Free: true},
-		{Label: i18n.T("Cline — gateway to Anthropic, OpenAI and Google models"), Signup: "https://app.cline.bot/settings/api-keys", BaseURL: "https://api.cline.bot/api/v1", Model: "anthropic/claude-sonnet-4-6", EnvKey: "CLINE_API_KEY", API: APIChat},
 		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses, Free: true},
 		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIResponses, Free: true},
-		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
 		{Label: i18n.T("Cerebras — free tier, no card, very fast"), Signup: "https://inference.cerebras.ai", BaseURL: "https://api.cerebras.ai/v1", Model: "qwen-3.8-27b", EnvKey: "CEREBRAS_API_KEY", API: APIChat, Free: true},
-		{Label: i18n.T("NVIDIA NIM — free credits, many coding models"), Signup: "https://build.nvidia.com", BaseURL: "https://integrate.api.nvidia.com/v1", Model: "z-ai/glm-5.3", EnvKey: "NVIDIA_API_KEY", API: APIChat},
 		{Label: i18n.T("SambaNova — free key, fast OpenAI-compatible"), Signup: "https://cloud.sambanova.ai", BaseURL: "https://api.sambanova.ai/v1", Model: "Meta-Llama-3.3-70B-Instruct", EnvKey: "SAMBANOVA_API_KEY", API: APIChat, Free: true},
+		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
+
+		// Below the line: something here can bill. It is all still offered, and
+		// it is all still picked up automatically once its key is exported — the
+		// rule is about what the wizard recommends first, not about what may
+		// exist. Credits (NVIDIA, Hugging Face) sit here rather than above
+		// because a credit that runs out stops being free.
+		{Label: i18n.T("NVIDIA NIM — free credits, many coding models"), Signup: "https://build.nvidia.com", BaseURL: "https://integrate.api.nvidia.com/v1", Model: "z-ai/glm-5.3", EnvKey: "NVIDIA_API_KEY", API: APIChat},
 		{Label: i18n.T("Hugging Face — free credits, OpenAI-compatible router"), Signup: "https://huggingface.co/settings/tokens", BaseURL: "https://router.huggingface.co/v1", Model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", EnvKey: "HF_TOKEN", API: APIChat},
+		{Label: i18n.T("Metered — Pollinations gen.pollinations.ai (key required)"), Signup: "https://enter.pollinations.ai/keys", BaseURL: "https://gen.pollinations.ai/v1", Model: "openai/gpt-5.4-nano", EnvKey: "POLLINATIONS_API_KEY", API: APIChat},
+		{Label: i18n.T("Cline — gateway to Anthropic, OpenAI and Google models"), Signup: "https://app.cline.bot/settings/api-keys", BaseURL: "https://api.cline.bot/api/v1", Model: "anthropic/claude-sonnet-4-6", EnvKey: "CLINE_API_KEY", API: APIChat},
+		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
+
 		{Label: i18n.T("Your own OpenAI-compatible endpoint"), EnvKey: "OPENAI_API_KEY", API: APIChat},
 	}
 }

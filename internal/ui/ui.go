@@ -1184,7 +1184,7 @@ func (m *uiModel) chatFrame(w, h int) []string {
 
 func (m *uiModel) commands() []command {
 	return []command{
-		{name: "setup", desc: i18n.T("choose a provider (free, no key needed)"), run: func(m *uiModel) tea.Cmd {
+		{name: "setup", desc: i18n.T("choose a provider (local ones need no key)"), run: func(m *uiModel) tea.Cmd {
 			return m.openSetup()
 		}},
 		{name: "models", desc: i18n.T("list models"), run: func(m *uiModel) tea.Cmd {

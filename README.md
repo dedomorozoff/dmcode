@@ -55,8 +55,13 @@ and fails over to another one if the current provider dies mid-session.
 | What it finds | When |
 |---|---|
 | **Ollama, LM Studio, llama.cpp, vLLM, Jan** | running locally — probed first |
-| **Pollinations** | an anonymous OpenAI-compatible API, no key at all |
+| **Pollinations** | its anonymous text host — no key at all, tools included |
 | **Groq, OpenRouter, OpenCode Zen, Cline, Kilo, Mistral, GitHub Models, Cerebras, NVIDIA NIM, SambaNova, Hugging Face** | the key is already in the environment |
+
+`/setup` is ordered free-first, and a test fails the build if that stops being
+true: every option whose whole cost is zero is listed above every option that can
+bill you. Credit-based signups (NVIDIA, Hugging Face) count as billable, because
+a credit that runs out stops being free.
 
 If nothing answers, the `/setup` wizard runs: pick a provider, paste the key,
 and it lands in `~/.dmcode/settings.json`. The free tiers that need no card are
@@ -65,6 +70,17 @@ SambaNova (`SAMBANOVA_API_KEY`) and Hugging Face (`HF_TOKEN`) all hand out
 working keys on signup, and any of them is picked up automatically once the
 variable is set. Some options need no key at all; others are your own endpoints
 (Unsloth, LM Studio, vLLM — anything speaking the OpenAI-compatible API).
+
+> **Two Pollinations, and they are not the same.** The anonymous
+> `text.pollinations.ai` host is the free path: no key, and it serves tool calls,
+> which is why it is probed at startup. The newer `gen.pollinations.ai` host has
+> the large catalogue but answers `401 A valid API key is required` the moment a
+> request carries `tools` — measured on every model tried, so it is the host and
+> not the model — and it meters usage in pollen. It is offered as a separate
+> option under `POLLINATIONS_API_KEY`, signed up at
+> [enter.pollinations.ai/keys](https://enter.pollinations.ai/keys), and picked up
+> automatically once that variable is set. Most of its catalogue runs on the
+> free Quest Pollen tier with no card, so it is metered rather than paid.
 
 A custom endpoint is three variables in the environment:
 

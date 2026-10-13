@@ -412,8 +412,21 @@ func TestStdinWizardRejectsIncompleteCustomEndpoint(t *testing.T) {
 
 func TestStdinWizardRejectsEmptyKey(t *testing.T) {
 	inTempDir(t)
-	// Option 3 is OpenRouter, which needs a key.
-	err := SetupWizardWith(strings.NewReader("3\n\n"), &strings.Builder{})
+	// The option is found by what it asks for, not by where it sits: /setup's
+	// order is free-first and moves as providers are added, and a test pinned to
+	// a row number ends up prompting for the wrong thing — a .gguf path — and
+	// reports a failure about the key that never happened.
+	idx := 0
+	for i, o := range SetupOptions() {
+		if !o.Keyless && !o.GGUF && o.BaseURL != "" {
+			idx = i + 1
+			break
+		}
+	}
+	if idx == 0 {
+		t.Fatal("no option that asks for a key")
+	}
+	err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\n\n", idx)), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "no key entered") {
 		t.Errorf("an empty key gave %v, want a complaint about the key", err)
 	}

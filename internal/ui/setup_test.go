@@ -54,6 +54,41 @@ func (d setupKeys) walkTo(i int) setupKeys {
 	return d
 }
 
+// firstRowWhere is the index of the first option a predicate accepts, or -1.
+//
+// Tests that need "some keyed provider" used to name a row number, which silently
+// becomes a *different* provider the moment the list is reordered — /setup is
+// free-first, so inserting an option above OpenRouter moved these onto a keyless
+// local server and the test reported a failure about a key stage that the option
+// never had. What a test wants to know is a property of the option, so it asks
+// for the property.
+func firstRowWhere(ok func(config.SetupOption) bool) int {
+	for i, o := range config.SetupOptions() {
+		if ok(o) {
+			return i
+		}
+	}
+	return -1
+}
+
+// needsAKey is the option shape the key-stage tests exercise: a hosted provider
+// that asks for a secret. GGUF is keyless but prompts for a file, and the custom
+// endpoint asks for a URL and a model, so both are excluded.
+func needsAKey(o config.SetupOption) bool {
+	return !o.Keyless && !o.GGUF && o.BaseURL != ""
+}
+
+// mustRow is firstRowWhere for a test that cannot proceed without the row: a
+// predicate that matches nothing is a broken fixture, not a passing skip.
+func mustRow(t *testing.T, ok func(config.SetupOption) bool) int {
+	t.Helper()
+	i := firstRowWhere(ok)
+	if i < 0 {
+		t.Fatal("no /setup option matches; the fixture no longer exists")
+	}
+	return i
+}
+
 // newSetupModel builds the model exactly as main does. A hand-rolled uiModel
 // will not do: textinput needs a real cursor or Focus panics and typing is
 // dropped. The window size matters too, because the overlay's inner width is
@@ -225,7 +260,7 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter() // OpenRouter
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("a keyed provider skipped the key stage (stage=%d)", m.setup.stage)
 	}
@@ -248,7 +283,7 @@ func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
 
 	m := newSetupModel(t)
 	m.prov = config.Provider{BaseURL: "https://opencode.ai/zen/v1", APIKey: "oc_sk_working", Model: "big-pickle", API: config.APIChat}
-	setupKeys{m: m}.type_("/setup").enter().down().down().enter().type_("oc_sk_for_openrouter").enter()
+	setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter().type_("oc_sk_for_openrouter").enter()
 
 	// The rejection arrives: nothing may have been written yet.
 	_, _ = m.Update(setupCheckMsg{
@@ -276,7 +311,7 @@ func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
 func TestSetupKeyIsNeverRendered(t *testing.T) {
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}
@@ -367,7 +402,7 @@ func TestMaskedKeyFitsPanel(t *testing.T) {
 func TestSetupEscapeLeavesEveryStage(t *testing.T) {
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}

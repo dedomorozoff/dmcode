@@ -37,8 +37,10 @@ func TestExplicitBaseURLNeedsNoKey(t *testing.T) {
 	}
 }
 
-// The polling default is the point of the whole feature, so keep it honest: the
-// hosted list must contain a provider that needs no key at all.
+// A candidate in this list is probed with no key, so every entry must be a host
+// that answers an unauthenticated request *and carries a tool call*. Answering
+// /models is not enough, and it is not even necessary — a bare-completion probe
+// passes on a host that refuses every real turn.
 func TestHostedCandidatesAreKeyless(t *testing.T) {
 	if len(hostedCandidates) == 0 {
 		t.Fatal("no hosted free candidate: a fresh checkout would need setup")
@@ -53,6 +55,75 @@ func TestHostedCandidatesAreKeyless(t *testing.T) {
 		if len(c.Models) == 0 {
 			t.Errorf("%s names no model to fall back on", c.name)
 		}
+	}
+}
+
+// Pollinations has two hosts and they answer opposite questions, so both facts
+// have to hold at once or the list is wrong in one direction or the other.
+//
+// The anonymous text host belongs in the probed list: it serves the exact body
+// dmcode sends — stream, tools, stream_options and reasoning_effort — without a
+// key, which is the whole free path. gen.pollinations.ai must stay out of it: the
+// host answers 401 as soon as a body carries `tools`, but its /models is open,
+// so a candidate there would pass the probe and fail every real turn.
+func TestPollinationsHostsAreSplitByWhatTheyServeWithoutAKey(t *testing.T) {
+	var anonymous bool
+	for _, c := range hostedCandidates {
+		if !strings.Contains(c.BaseURL, "pollinations.ai") {
+			continue
+		}
+		if c.BaseURL != "https://text.pollinations.ai/openai" {
+			t.Errorf("%s probes %s with no key, which answers 401 to any tools request", c.name, c.BaseURL)
+		}
+		if c.Models[0] != "openai-fast" {
+			t.Errorf("%s defaults to %q, want openai-fast", c.name, c.Models[0])
+		}
+		if c.Reasoning != "low" {
+			t.Errorf("%s does not cap reasoning: GPT-OSS truncates its tool call arguments at the anonymous output cap", c.name)
+		}
+		anonymous = true
+	}
+	if !anonymous {
+		t.Fatal("no anonymous Pollinations candidate: a checkout with nothing configured would need setup")
+	}
+
+	var preset keyedPreset
+	found := false
+	for _, p := range keyedPresets() {
+		if p.env == "POLLINATIONS_API_KEY" {
+			preset, found = p, true
+		}
+	}
+	if !found {
+		t.Fatal("POLLINATIONS_API_KEY is not a preset: a key in the environment would select nothing")
+	}
+	if preset.url != "https://gen.pollinations.ai/v1" {
+		t.Errorf("preset base = %q, want %q", preset.url, "https://gen.pollinations.ai/v1")
+	}
+	if preset.API != config.APIChat {
+		t.Errorf("wire = %q, want %q", preset.API, config.APIChat)
+	}
+}
+
+// The preset scan stops at the first key it finds, so a paid provider must come
+// after every free tier: exporting both Pollinations and Cerebras should still
+// land on Cerebras, not bill the user for the one that happens to sort first.
+func TestPollinationsDoesNotOutrankAFreeTier(t *testing.T) {
+	presets := keyedPresets()
+	var pollinations, free int = -1, -1
+	for i, p := range presets {
+		if p.env == "POLLINATIONS_API_KEY" {
+			pollinations = i
+		}
+		if config.FreeEndpoint(p.url) {
+			free = i
+		}
+	}
+	if pollinations < 0 {
+		t.Fatal("no Pollinations preset")
+	}
+	if free >= 0 && free > pollinations {
+		t.Errorf("free endpoint at %d sorts after Pollinations at %d", free, pollinations)
 	}
 }
 
@@ -120,7 +191,7 @@ func TestKiloPresetSelected(t *testing.T) {
 	t.Setenv("KILO_API_KEY", "kilo-key")
 	// The preset scan stops at the first key it finds, so the other preset
 	// variables must be emptied even when the developer's shell carries them.
-	for _, k := range []string{"OPENCODE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "SAMBANOVA_API_KEY", "HF_TOKEN", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
+	for _, k := range []string{"OPENCODE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "SAMBANOVA_API_KEY", "HF_TOKEN", "POLLINATIONS_API_KEY", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
 		t.Setenv(k, "")
 	}
 	provs, err := DetectProviders()
@@ -130,6 +201,30 @@ func TestKiloPresetSelected(t *testing.T) {
 	if len(provs.Pool) != 1 || provs.Pool[0].BaseURL != "https://api.kilo.ai/api/gateway" ||
 		provs.Pool[0].Model != "kilo-auto/free" || provs.Pool[0].Wire() != config.APIChat {
 		t.Errorf("KILO_API_KEY did not select the Kilo provider: %+v", provs.Pool)
+	}
+}
+
+// The other half of the split: POLLINATIONS_API_KEY selects the *new* host, not
+// the anonymous one both presets and probes could have reached. The two are
+// different endpoints serving different models, and picking the wrong one is a
+// silent downgrade rather than an error — gen.pollinations.ai answers /models
+// without a key too, so a wrong base URL here looks fine until the first turn.
+func TestPollinationsPresetSelected(t *testing.T) {
+	for _, k := range []string{"OPENCODE_API_KEY", "CLINE_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "KILO_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "SAMBANOVA_API_KEY", "HF_TOKEN", "OPENAI_BASE_URL", "DMCODE_MODEL"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("POLLINATIONS_API_KEY", "sk_test")
+
+	provs, err := DetectProviders()
+	if err != nil {
+		t.Fatalf("DetectProviders: %v", err)
+	}
+	if len(provs.Pool) != 1 || provs.Pool[0].BaseURL != "https://gen.pollinations.ai/v1" ||
+		provs.Pool[0].Model != "openai/gpt-5.4-nano" || provs.Pool[0].Wire() != config.APIChat {
+		t.Fatalf("POLLINATIONS_API_KEY did not select the Pollinations provider: %+v", provs.Pool)
+	}
+	if provs.Pool[0].APIKey != "sk_test" {
+		t.Errorf("api key = %q, want the one in the environment", provs.Pool[0].APIKey)
 	}
 }
 

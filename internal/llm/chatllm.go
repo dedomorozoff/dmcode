@@ -23,10 +23,10 @@ import (
 
 // chatModel implements model.LLM on top of the classic OpenAI
 // /chat/completions endpoint. google/adk-go's openaimodel package speaks only
-// the Responses API (/v1/responses), which the providers that are actually
-// free and keyless do not expose: Ollama, LM Studio, llama.cpp and Pollinations
-// all answer on /chat/completions only. This adapter is what makes them
-// usable without any key or configuration.
+// the Responses API (/v1/responses), which the endpoints people actually run for
+// free do not expose: Ollama, LM Studio and llama.cpp answer on
+// /chat/completions only. This adapter is what makes them usable without any key
+// or configuration.
 // genaiSchemaToJSON converts a genai.Schema into the plain JSON Schema map the
 // chat/completions tool format expects. genai encodes the type as an uppercase
 // enum name ("OBJECT"), while JSON Schema wants lowercase ("object"), and
@@ -507,8 +507,11 @@ func (m *chatModel) doRequest(ctx context.Context, body chatRequest) (*http.Resp
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// Some keyless endpoints (Pollinations) ignore the header but reject a
-	// request without one, so a placeholder is always sent.
+	// A placeholder is sent even with no key. Pollinations' anonymous endpoint
+	// used to ignore the header but reject a request without one, and an endpoint
+	// that validates the header should not be handed a request carrying none.
+	// The cost is nil: a bearer token is never consulted on the way out, only
+	// by the server on the way back.
 	if m.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+m.APIKey)
 	} else {
@@ -652,10 +655,10 @@ func httpError(op string, resp *http.Response) error {
 //
 // A 4xx is that refusal by definition. A 5xx is not — but a gateway that
 // validates the payload itself and reports its own rejection through a
-// different code is still describing the same thing, and Pollinations does
-// exactly this: HTTP 500 with `{"error":"400 Bad Request"}` inside. Matching
-// the status alone therefore breaks that provider outright, which is worse than
-// never sending the field at all.
+// different code is still describing the same thing, and Pollinations'
+// text endpoint did exactly this: HTTP 500 with `{"error":"400 Bad Request"}`
+// inside. Matching the status alone therefore breaks that provider outright,
+// which is worse than never sending the field at all.
 //
 // The payload is read and put back, because the caller still has to report the
 // error this describes; consuming it here would turn a readable diagnosis into
@@ -759,11 +762,11 @@ func (m *chatModel) generateStream(ctx context.Context, body chatRequest) iter.S
 		// refuses to answer at all.
 		//
 		// The status alone does not identify this failure, and getting that
-		// wrong is worse than not trying: Pollinations answers a rejected body
-		// with a 500 whose payload reads "400 Bad Request", so a retry keyed on
-		// 400 alone never fired and every turn against it failed outright.
-		// rejectsStreamOptions therefore also reads the payload, and restores
-		// the body so the caller can still report the error it describes.
+		// wrong is worse than not trying: Pollinations' text endpoint answered a
+		// rejected body with a 500 whose payload read "400 Bad Request", so a
+		// retry keyed on 400 alone never fired and every turn against it failed
+		// outright. rejectsStreamOptions therefore also reads the payload, and
+		// restores the body so the caller can still report the error it describes.
 		if body.StreamOptions != nil && rejectsStreamOptions(resp) {
 			resp.Body.Close()
 			body.StreamOptions = nil

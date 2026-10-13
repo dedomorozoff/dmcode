@@ -65,6 +65,15 @@ func keyedPresets() []keyedPreset {
 		{"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1", "z-ai/glm-5.3", config.APIChat, "NVIDIA NIM"},
 		{"SAMBANOVA_API_KEY", "https://api.sambanova.ai/v1", "Meta-Llama-3.3-70B-Instruct", config.APIChat, "SambaNova"},
 		{"HF_TOKEN", "https://router.huggingface.co/v1", "Qwen/Qwen3-Coder-30B-A3B-Instruct", config.APIChat, "Hugging Face"},
+		// Last, because it is the only preset that bills: gen.pollinations.ai
+		// meters generation in pollen, so it must not outrank a free tier
+		// somebody exported. It needs a key even though its anonymous tier still
+		// answers a bare completion — the host answers 401 to any body carrying
+		// `tools`, `stream_options` or `reasoning_effort`, and every dmcode turn
+		// carries a tools array. Probing it with no key would pass the /models
+		// check and then fail every turn. The anonymous text host is the free
+		// path and lives in hostedCandidates instead.
+		{"POLLINATIONS_API_KEY", "https://gen.pollinations.ai/v1", "openai/gpt-5.4-nano", config.APIChat, "Pollinations"},
 	}
 }
 

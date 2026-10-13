@@ -72,5 +72,6 @@ if ($userPath -notlike "*$target*") {
 Write-Host ''
 Write-Host 'Готово. Открой новый терминал и запусти: dmcode'
 Write-Host ''
-Write-Host 'Провайдера подберём сами: локальный Ollama/LM Studio, бесплатный'
-Write-Host 'хост без ключа или мастер /setup при первом старте.'
+Write-Host 'Провайдера подберём сами: локальный Ollama/LM Studio, уже'
+Write-Host 'экспортированный ключ (GROQ, OPENROUTER, POLLINATIONS…)'
+Write-Host 'или мастер /setup при первом старте.'
