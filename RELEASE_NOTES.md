@@ -108,6 +108,27 @@ line in your own settings file. dmcode now names the proxy before the wizard,
 because "no free provider is configured" is a claim about providers that a dead
 proxy makes false.
 
+### A proxy you typed is checked before it is remembered
+
+`/proxy <addr>` used to save the address and apply it at once, which is how a
+proxy that stopped running two weeks later ended up failing every turn with a
+complaint about the provider. It is now verified first, and an address that does
+not answer is put back to whatever was working before and named on screen. The
+same goes for a failed request: instead of Go's own text — which mentions a proxy
+once, in the middle of a wall of syscall detail — it says the proxy is not
+answering and that the provider may be perfectly fine.
+
+### Tool output is prose again
+
+A tool call in the transcript read as `grep({"limit":20,"path":"","pattern":"..."})`
+and its answer as `{"matches":"","next_offset":0,"offset":0,"returned":0,"total":0,
+"truncated":false}` — the envelope, and none of the information. Both are now
+written for a person: the line says what the call was about, and the result says
+what came back. `grep "pattern" in path`, `no matches`, `3 of 17 — more from
+offset 3`, `wrote 148213 bytes`, `moved a.go → b.go`, `failed` for a command that
+did. A run_command verdict is pulled out of its output and given a line of its
+own, because a bracketed marker twenty lines under build output is not a report.
+
 ### Settings moved out of `.env`
 
 Everything dmcode saves now lives in `~/.dmcode/settings.json`. A `.env` in the

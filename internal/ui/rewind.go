@@ -351,7 +351,7 @@ func (m *uiModel) printTurn(t memsession.Turn) {
 			if e.Call == nil {
 				continue
 			}
-			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, toolArgs(e.Call.Args))})
+			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, e.Call.Args)})
 		case memsession.EntryToolResult:
 			if e.Result == nil {
 				continue

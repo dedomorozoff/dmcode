@@ -2,10 +2,8 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -261,7 +259,11 @@ type toolPart struct {
 
 type toolCallMsg struct {
 	name string
-	args string
+	// args travels as the map, not as a rendered string, so the line is built
+	// where it is drawn. Rendering it at the call site would put the choice of
+	// what to name next to the event loop instead of next to the code that knows
+	// the tools, and a restored session would have to repeat the decision.
+	args map[string]any
 }
 type toolResMsg struct {
 	name   string
@@ -2467,6 +2469,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleToolCheck(msg)
 	case proxyCheckMsg:
 		m.handleProxyCheck(msg)
+	case proxyVerifyMsg:
+		m.handleProxyVerify(msg)
 	case failoverMsg:
 		extra = m.handleFailover(msg)
 	}
@@ -3574,6 +3578,7 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 	// "no" sets the bypass list rather than the proxy, so a user with a proxy
 	// already in the environment can exempt their own services without turning
 	// the proxy off entirely.
+	prev := config.CurrentProxy()
 	if rest, ok := strings.CutPrefix(arg, "no "); ok {
 		if err := config.SetNoProxy(strings.TrimSpace(rest)); err != nil {
 			return fail(err)
@@ -3583,17 +3588,73 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 	}
 
 	s := config.CurrentProxy()
-	if err := m.persistProxy(s); err != nil {
-		return fail(err)
-	}
-	if s.Active {
-		m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
-	} else {
+	if !s.Active {
+		// Turning it off has nothing to verify — a proxy that is not used cannot
+		// be the wrong one — so it persists straight away.
+		if err := m.persistProxy(s); err != nil {
+			return fail(err)
+		}
 		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
+		m.historyDirty = true
+		m.followVP()
+		return m.showProxy()
 	}
+
+	// A live address is verified before it is persisted, and put back if it does
+	// not answer. Saving first is what leaves a stale proxy in
+	// ~/.dmcode/settings.json: two weeks later every turn fails and the complaint
+	// is about the provider, which never saw the request. The address is in
+	// effect for the probe — which is what makes the probe worth doing — but
+	// nothing on disk has moved yet.
+	m.statusText = i18n.T("checking the proxy…")
+	m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
 	m.historyDirty = true
 	m.followVP()
-	return m.showProxy()
+	return func() tea.Msg {
+		_, err := config.ListModels(m.prov)
+		return proxyVerifyMsg{err: err, prev: prev.ProxyVars()}
+	}
+}
+
+// proxyVerifyMsg is the answer to "does the address I just set work". prev is
+// the proxy in effect before, so a failed address can be undone rather than
+// merely reported.
+type proxyVerifyMsg struct {
+	err  error
+	prev map[string]string
+}
+
+func (m *uiModel) handleProxyVerify(msg proxyVerifyMsg) {
+	m.statusText = ""
+	if msg.err == nil {
+		s := config.CurrentProxy()
+		if err := m.persistProxy(s); err != nil {
+			m.history = append(m.history, line{kindErr, "proxy: " + err.Error()})
+		} else {
+			m.history = append(m.history, line{kindSys, i18n.T("proxy: the provider answered through it")})
+		}
+		m.historyDirty = true
+		m.followVP()
+		return
+	}
+
+	// Nothing reached the disk, so undoing is only about this process: the
+	// previous address goes back into the environment and the failure is reported
+	// with its reason, because "it did not work" without the refusal is a much
+	// worse thing to read than "connection refused".
+	_ = config.SetProxy("off")
+	for k, v := range msg.prev {
+		_ = os.Setenv(k, v)
+	}
+	restored := config.CurrentProxy()
+	text := i18n.T("proxy: not saved — it did not answer, and every request goes through it")
+	if restored.Active {
+		text = i18n.T("proxy: not saved — it did not answer; still using ") + config.RedactProxy(restored.Effective())
+	}
+	m.history = append(m.history, line{kindErr, text})
+	m.history = append(m.history, line{kindErr, "  " + msg.err.Error()})
+	m.historyDirty = true
+	m.followVP()
 }
 
 // persistProxy writes the proxy settings to ~/.dmcode/settings.json so they
@@ -4862,7 +4923,7 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 			for _, tp := range parts {
 				switch {
 				case tp.call != nil:
-					p.Send(toolCallMsg{name: tp.call.Name, args: toolArgs(tp.call.Args)})
+					p.Send(toolCallMsg{name: tp.call.Name, args: tp.call.Args})
 				case tp.resp != nil:
 					summary, diff := renderToolResponse(tp.resp)
 					p.Send(toolResMsg{name: tp.resp.Name, output: summary, diff: diff})
@@ -5070,29 +5131,23 @@ func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 // answer to "what does a tool call look like" — free to drift, and with the
 // transcript of a resumed session quietly showing a different shape from the one
 // the user remembers.
-func toolLine(name, args string) string { return name + "(" + args + ")" }
-
-// toolArgs is a call's arguments as the transcript shows them: the marshalled
-// map, shortened so a long path cannot take the row.
-func toolArgs(args map[string]any) string {
-	b, _ := json.Marshal(args)
-	return truncate(string(b), 160)
+// toolLine is one line of the transcript: what the agent called, and the one
+// argument that decided what it was calling about. Two callers build it — the
+// live turn and a restored session — and they go through here so a resumed
+// transcript cannot show a different shape from the one the user remembers.
+func toolLine(name string, args map[string]any) string {
+	return toolCallSummary(name, args)
 }
 
-func renderToolResponse(fr *genai.FunctionResponse) (summary, diff string) {
-	resp := fr.Response
-	if m := resp; m != nil {
-		if d, ok := m["diff"].(string); ok && d != "" {
-			diff = d
-			resp = maps.Clone(m)
-			delete(resp, "diff")
-		}
+// toolArgs is a call's arguments as the transcript shows them. It is only a
+// fallback now — toolCallSummary knows the tool and names the argument that
+// decided what the call was about — and it is what an MCP tool's arguments go
+// through, because those names are the server's, not dmcode's.
+func toolArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
 	}
-	b, err := json.Marshal(resp)
-	if err != nil {
-		return fmt.Sprint(resp), diff
-	}
-	return truncate(string(b), 600), diff
+	return genericArgs(args)
 }
 
 // truncate cuts s to at most n terminal cells. Counting cells instead of bytes

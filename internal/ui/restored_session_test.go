@@ -120,7 +120,7 @@ func TestARestoredSessionStillShowsTheCode(t *testing.T) {
 // would notice.
 func TestARestoredToolLineIsTheOneTheLiveTurnDrew(t *testing.T) {
 	call := &genai.FunctionCall{Name: "edit_file", Args: editArgs}
-	live := toolLine(call.Name, toolArgs(call.Args))
+	live := toolLine(call.Name, call.Args)
 
 	m := newSessionModel(t)
 	m.sessions = sessionWithAWrite(t)
@@ -138,8 +138,8 @@ func TestARestoredToolLineIsTheOneTheLiveTurnDrew(t *testing.T) {
 }
 
 // TestARestoredToolResultHasNoDiffLeftInIt: the live turn pulls the diff out of
-// the result and draws it as its own block, so the JSON one-liner does not carry
-// it twice. The restored path goes through the same function, and this says so.
+// the result and draws it as its own block, so the summary line does not carry it
+// twice. The restored path goes through the same function, and this says so.
 func TestARestoredToolResultHasNoDiffLeftInIt(t *testing.T) {
 	m := newSessionModel(t)
 	m.sessions = sessionWithAWrite(t)
@@ -152,7 +152,10 @@ func TestARestoredToolResultHasNoDiffLeftInIt(t *testing.T) {
 		if strings.Contains(l.text, "diff") {
 			t.Errorf("the restored result still carries the diff: %q", l.text)
 		}
-		if !strings.Contains(l.text, "replacements") {
+		if strings.ContainsAny(l.text, "{}") {
+			t.Errorf("the restored result is a JSON envelope: %q", l.text)
+		}
+		if !strings.Contains(l.text, "replacement") {
 			t.Errorf("the restored result lost the summary: %q", l.text)
 		}
 		return

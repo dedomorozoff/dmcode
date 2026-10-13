@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -302,10 +303,20 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	m := newSetupModel(t)
 	m.prov = config.Provider{BaseURL: "http://provider.invalid/v1", Model: "m"}
 
-	m.applyProxy("127.0.0.1:3128")
+	// An address is not persisted until it has answered, so the test drives the
+	// verification the way the event loop would: run the command, then deliver
+	// the answer. Nothing reaches settings.json until that answer says yes.
+	cmd := m.applyProxy("127.0.0.1:3128")
+	if cmd == nil {
+		t.Fatal("setting a proxy produced no verification")
+	}
 	if s := config.CurrentProxy(); !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
 		t.Fatalf("the live proxy is %+v, want the one just set", s)
 	}
+	if s, _ := settings.Load(); s.Proxy != "" {
+		t.Errorf("settings.Proxy = %q before the proxy was verified, want empty", s.Proxy)
+	}
+	m.handleProxyVerify(proxyVerifyMsg{})
 	s, err := settings.Load()
 	if err != nil {
 		t.Fatalf("settings.Load: %v", err)
@@ -333,6 +344,44 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	}
 }
 
+// A proxy that does not answer must not be remembered, and the one that was
+// working before it must come back. This is the whole reason the verification
+// exists: an address saved on request and validated never is how a dead proxy
+// ends up in settings.json and poisons every later start.
+func TestAProxyThatDoesNotAnswerIsNotSavedAndTheOldOneComesBack(t *testing.T) {
+	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
+	cleanProxyEnv(t)
+
+	m := newSetupModel(t)
+	m.prov = config.Provider{BaseURL: "http://provider.invalid/v1", Model: "m"}
+
+	// A working proxy first, so there is something to fall back to.
+	m.applyProxy("127.0.0.1:3128")
+	m.handleProxyVerify(proxyVerifyMsg{})
+
+	// Now one that refuses. prev is what was in effect before the bad address,
+	// which is what the handler needs to put back — captured here before the
+	// switch, the way applyProxy does it.
+	prev := config.CurrentProxy().ProxyVars()
+	m.applyProxy("127.0.0.1:8080")
+	m.handleProxyVerify(proxyVerifyMsg{
+		err:  errors.New("proxyconnect tcp: dial tcp 127.0.0.1:8080: connection refused"),
+		prev: prev,
+	})
+
+	if s := config.CurrentProxy(); !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
+		t.Errorf("after a failed proxy the live one is %+v, want the previous 3128", s)
+	}
+	s, _ := settings.Load()
+	if s.Proxy != "http://127.0.0.1:3128" {
+		t.Errorf("settings.Proxy = %q, want the working one still at %q", s.Proxy, "http://127.0.0.1:3128")
+	}
+	if !hasErr(m, "not saved") {
+		t.Error("a proxy that refused was saved without saying so")
+	}
+}
+
 // /proxy must not touch the user's .env at all — credentials stay there.
 func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	dir := inTempDir(t)
@@ -346,6 +395,7 @@ func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	m := newSetupModel(t)
 	m.prov = config.Provider{BaseURL: "http://provider.invalid/v1", Model: "m"}
 	m.applyProxy("http://127.0.0.1:8080")
+	m.handleProxyVerify(proxyVerifyMsg{}) // the address answered; save it
 
 	env, _ := os.ReadFile(dir + "/.env")
 	// .env must be unchanged — only settings.json is written

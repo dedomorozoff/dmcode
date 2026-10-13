@@ -6,10 +6,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -619,11 +622,63 @@ func (e *providerError) retryable() bool {
 }
 
 // transportError reports an endpoint that could not be reached at all.
+//
+// A dead proxy is separated out of the generic transport error on purpose. Every
+// other transport failure is a question about the endpoint, and this one is not:
+// the address in the message belongs to a proxy out of the user's own settings,
+// and Go buries the word "proxyconnect" in the middle of a wall of syscall
+// detail. Left as-is, a turn behind a proxy that stopped running reads as the
+// provider being down — and the provider is fine. The message therefore names
+// the proxy and the way out, which is the only part of it that can be acted on.
 func transportError(BaseURL string, err error) error {
+	if addr, ok := proxyDialFailure(err); ok {
+		return &providerError{
+			err: fmt.Errorf("dmcode: the proxy %s is not answering (%v) — turn it off with /proxy off, or start it. %s itself may be fine",
+				addr, dialCause(err), BaseURL),
+			reason: failTransport,
+		}
+	}
 	return &providerError{
 		err:    fmt.Errorf("dmcode: %s: %w", BaseURL, err),
 		reason: failTransport,
 	}
+}
+
+// proxyDialFailure recognises the error a dead proxy produces and returns its
+// address. Go wraps it as *url.Error → *net.OpError{"proxyconnect", …} →
+// *os.SyscallError, and the address lives in the url.Error's URL, not in the
+// op: by the time the dial failed the proxy has not yet been asked to connect
+// to anything, so there is no request target in the message at all.
+//
+// The type walk rather than a substring is deliberate. "connection refused" is
+// also what a provider on a dead port says, and treating that as a proxy problem
+// would point the reader at the wrong line of their own settings.
+func proxyDialFailure(err error) (string, bool) {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return "", false
+	}
+	var opErr *net.OpError
+	if !errors.As(err, &opErr) || opErr.Op != "proxyconnect" {
+		return "", false
+	}
+	if uerr.URL == "" {
+		return "", false
+	}
+	if u, perr := url.Parse(uerr.URL); perr == nil && u.Host != "" {
+		return u.Host, true
+	}
+	return uerr.URL, true
+}
+
+// dialCause is the reason without the proxy connect wrapper, so the message
+// carries "connection refused" rather than "proxyconnect tcp: dial tcp".
+func dialCause(err error) error {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Err
+	}
+	return err
 }
 
 // httpError renders a non-2xx reply, including the server's own JSON message,
