@@ -1,3 +1,133 @@
+# dmCode v0.2.4
+
+v0.2.4 is a provider release. The agent gets better instruments — it can fetch a
+page, edit several files in one call, move and delete — and the provider you end
+up on is no longer chosen by accident: the free ones come first, in the list and
+in the automatic search, and a test fails the build if that stops being true.
+
+> ### ?? Read this before trusting a provider
+>
+> **Pollinations moved, and the two hosts are not the same.** The anonymous
+> `text.pollinations.ai` host is still free and still serves tool calls; the newer
+> `gen.pollinations.ai` host answers `401 A valid API key is required` the moment
+> a request carries `tools`, and meters usage in pollen. Both are offered, on
+> purpose, and they are separate rows in `/setup` for that reason.
+>
+> **Nothing has been driven by a person for hours on any platform.** The startup
+> path changed the most in this release and is covered by tests that drive the
+> wizard end to end, but a fresh machine going through setup by hand has not been
+> watched.
+
+## Install
+
+```bash
+# macOS / Linux / BSD
+curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
+```
+
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
+
+```bash
+go install github.com/dedomorozoff/dmcode@latest
+```
+
+## What's new since v0.2.3
+
+### `ctrl+z` takes the files back too
+
+A rewind used to cut the conversation and leave the disk exactly as the turn had
+left it. It now undoes the writes as well. Every tool write passes through one
+journal: two writes to one file undo to where the first one found it, and a file
+that was written, moved and then edited lands exactly where the turn began. An
+`mv` or `rm` issued through `run_command` is recorded as *not restored* and says
+so on the rewind line, because no content was ever captured for it — better a
+line that admits it than a file restored to a guess.
+
+### The agent can fetch a page
+
+`fetch_url` reads a URL and hands the page over as text. `web_search` was always
+there for finding something; this is for reading what it found.
+
+### One call edits several files, and it can move and delete
+
+`move_file` and `delete_file` exist because the only route before them was
+`mv`/`rm` through the shell, which could report that something changed but could
+not be inverted by the rewind. `edit_file` takes several edits in one call, so a
+refactor across four files does not cost four round trips.
+
+### `/setup` is ordered free-first, and a test holds it there
+
+This is the release's one rule: **every option whose whole cost is zero is listed
+above every option that can bill you.** `TestNoFreeOptionIsRankedBelowAPaidOne`
+fails the build if that ever stops being true, and it reads a model's own id for
+cost as well as the `Free` flag — otherwise OpenRouter and Kilo, whose catalogue
+is mixed but whose default model is `:free`, would be ranked as paid and a free
+choice would sit below the line. Credits count as billable, because a credit that
+runs out stops being free.
+
+### Pollinations, twice
+
+The anonymous host answers with tools and no key; the newer `gen.pollinations.ai`
+host has the large catalogue and needs a key (`POLLINATIONS_API_KEY`, signed up at
+[enter.pollinations.ai/keys](https://enter.pollinations.ai/keys)) before it will
+carry a single tool call. Most of its catalogue runs on the free Quest Pollen tier
+with no card attached, so it meters rather than bills. The newer host is kept out
+of the automatic search on purpose: its `/models` is open, so probing it with no
+key would pass startup and then fail every real turn with a 401 that points at
+the provider rather than at the missing credential.
+
+### Choosing a provider now starts
+
+The startup wizard collected the whole configuration and then threw it away — the
+provider was rebuilt from the environment, and the environment cannot carry two
+things the wizard had just been told. A keyless option writes no
+`OPENAI_API_KEY`, on purpose, so the key read back empty and every free option in
+the list was answered with `no provider configured`. `DMCODE_MODEL` is kept out
+of `.env` too, so the chosen model came back as a qwen default and was sent to
+whichever host you had picked. The wizard now hands back the provider it
+described. Picking a `.gguf` also starts llama-server instead of reporting that
+nothing is configured.
+
+### A dead proxy says so
+
+The one failure that makes every endpoint look dead at once is a proxy that no
+longer answers, and nothing said so: the search found nothing, the wizard listed
+seventeen options, and all seventeen failed identically for a reason that is one
+line in your own settings file. dmcode now names the proxy before the wizard,
+because "no free provider is configured" is a claim about providers that a dead
+proxy makes false.
+
+### Settings moved out of `.env`
+
+Everything dmcode saves now lives in `~/.dmcode/settings.json`. A `.env` in the
+working directory is still read at start-up, so an older setup keeps working —
+but nothing writes it any more.
+
+### `/models` scrolls
+
+A window that grows used to show nothing at all.
+
+## Known limitations
+
+Unchanged from v0.2.3 unless noted: sending a picture to a model is still
+unverified end to end — attaching and previewing are confirmed on Windows against
+a live session, but no picture has been through a real vision endpoint. The
+editor's keys and the terminal panel are exercised by tests, not by a person over
+a long session. A rewind does not rewrite `~/.dmcode/history.jsonl`; cancellation
+reaches the context but not the process; the workspace boundary is lexical, so a
+symlink can escape it. See `AGENTS.md` for the full list and for what each entry
+is worth.
 # dmCode v0.2.3
 
 dmcode is a workspace now. The chat is still the agent you know; the same
