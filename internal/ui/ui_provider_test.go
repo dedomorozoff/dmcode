@@ -65,8 +65,18 @@ func TestSetupLabel(t *testing.T) {
 			t.Errorf("%q produced %q, which still carries the scheme", o.Label, l)
 		}
 	}
-	if got := setupLabel(config.SetupOptions()[0]); got != "text.pollinations.ai" {
-		t.Errorf("Pollinations label = %q, want %q", got, "text.pollinations.ai")
+	// The sidebar names the host, so a preset endpoint has to survive the scheme
+	// and the /v1 path being stripped off it. The option is found by its endpoint
+	// rather than by position: /setup's order is a user-facing choice and moves,
+	// while the host a provider resolves to is the thing being checked here.
+	var pollinations config.SetupOption
+	for _, o := range config.SetupOptions() {
+		if o.BaseURL == "https://gen.pollinations.ai/v1" {
+			pollinations = o
+		}
+	}
+	if got := setupLabel(pollinations); got != "gen.pollinations.ai" {
+		t.Errorf("Pollinations label = %q, want %q", got, "gen.pollinations.ai")
 	}
 }
 
@@ -91,7 +101,7 @@ func TestToolCheckSkipsResponsesWire(t *testing.T) {
 // A failed check is worth showing; a passed or undecided one is noise.
 func TestHandleToolCheckReporting(t *testing.T) {
 	base := func() *uiModel {
-		return &uiModel{prov: config.Provider{Label: "Pollinations (без ключа)", Model: "openai-fast", API: config.APIChat}}
+		return &uiModel{prov: config.Provider{Label: "Pollinations", Model: "openai/gpt-5.4-nano", API: config.APIChat}}
 	}
 
 	m := base()

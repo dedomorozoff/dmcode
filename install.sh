@@ -105,5 +105,6 @@ echo
 echo "Готово. Запуск:"
 echo "  $BIN"
 echo
-echo "Провайдера подберём сами: локальный Ollama/LM Studio, бесплатный"
-echo "хост без ключа или мастер /setup при первом старте."
+echo "Провайдера подберём сами: локальный Ollama/LM Studio, уже"
+echo "экспортированный ключ (GROQ, OPENROUTER, POLLINATIONS…)"
+echo "или мастер /setup при первом старте."

@@ -119,9 +119,9 @@ func TestARejectedStreamOptionsFieldIsRetriedWithoutIt(t *testing.T) {
 }
 
 // A gateway may validate the payload itself and report its own rejection under
-// a different code. Pollinations answers with HTTP 500 carrying
+// a different code. Pollinations' text endpoint answered with HTTP 500 carrying
 // `{"error":"400 Bad Request"}`, so a retry keyed on the 400 alone never fires
-// and every turn against that provider fails — which is exactly the regression
+// and every turn against that provider failed — which is exactly the regression
 // this case was found in.
 func TestARejectedStreamOptionsWrappedInA500IsStillRetried(t *testing.T) {
 	var calls int
@@ -360,16 +360,17 @@ func TestContentsToChatToolLoop(t *testing.T) {
 	}
 }
 
-// TestChatModelTruncatedToolCall covers what Pollinations actually does to a
-// long write_file: the output cap cuts the arguments mid-JSON and the stream
-// still ends cleanly with finish_reason=length. The turn must fail with an
-// error that names the real cause instead of a bare JSON parser complaint.
+// TestChatModelTruncatedToolCall covers what a tight output budget does to a
+// long write_file — first seen on Pollinations: the cap cuts the arguments
+// mid-JSON and the stream still ends cleanly with finish_reason=length. The
+// turn must fail with an error that names the real cause instead of a bare JSON
+// parser complaint.
 func TestChatModelTruncatedToolCall(t *testing.T) {
 	srv := fakeChatServer(t, []string{
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"index.html\",\"content\":\"<html>"}}]}}]}`,
 	}, `{"choices":[{"delta":{},"finish_reason":"length"}]}`)
 
-	m := NewChatModel(srv.URL+"/v1", "", "openai-fast")
+	m := NewChatModel(srv.URL+"/v1", "", "some-model")
 	req := &model.LLMRequest{
 		Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "напиши тетрис"}}}},
 	}

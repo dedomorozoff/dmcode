@@ -2,7 +2,7 @@ package ui
 
 import (
 	"net/url"
-	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // proxyKeys drives the /proxy dialog through the real Update dispatch, the way
@@ -112,13 +113,12 @@ func TestProxyCommandOpensTheDialog(t *testing.T) {
 	}
 }
 
-// ansiStripProxy is gone: the frame is read via m.View().Content and stripped
-// with ansi.Strip inline.
 // TestProxyDialogSetsTheAddress walks the dialog: pick "turn on", type the
-// address, apply. The proxy must go live, land in .env, and the dialog must
-// close — the probe that follows reports reachability in the transcript.
+// address, apply. The proxy must go live, land in settings.json, and the dialog
+// must close.
 func TestProxyDialogSetsTheAddress(t *testing.T) {
 	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	m := newSetupModel(t)
@@ -129,9 +129,6 @@ func TestProxyDialogSetsTheAddress(t *testing.T) {
 	if m.proxy.stage != proxyURL {
 		t.Fatalf("the first menu row did not open the address stage: %d", m.proxy.stage)
 	}
-	// The type is the focused field. The host is then filled, and the port — which
-	// the form pre-filled with the http default — is replaced rather than appended
-	// to, which is what a user standing in front of the form would do.
 	d = d.tab().type_("127.0.0.1").clearField(pfPort).type_("3128").enter()
 
 	if m.proxy.open {
@@ -141,9 +138,9 @@ func TestProxyDialogSetsTheAddress(t *testing.T) {
 	if !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
 		t.Fatalf("the live proxy is %+v, want http://127.0.0.1:3128", s)
 	}
-	env, err := os.ReadFile(".env")
-	if err != nil || !strings.Contains(string(env), config.EnvHTTPProxy+"=http://127.0.0.1:3128") {
-		t.Errorf(".env does not carry the proxy: %q, %v", env, err)
+	st, err := settings.Load()
+	if err != nil || st.Proxy != "http://127.0.0.1:3128" {
+		t.Errorf("settings.Proxy = %q (err=%v), want http://127.0.0.1:3128", st.Proxy, err)
 	}
 }
 
@@ -209,9 +206,10 @@ func TestProxyDialogRejectsABadAddressBeforeClosing(t *testing.T) {
 }
 
 // TestProxyDialogTurnsItOff picks the "off" row and expects the live setting
-// and .env to lose the proxy.
+// and settings.json to lose the proxy.
 func TestProxyDialogTurnsItOff(t *testing.T) {
 	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	m := newSetupModel(t)
@@ -225,11 +223,9 @@ func TestProxyDialogTurnsItOff(t *testing.T) {
 	if config.CurrentProxy().Active {
 		t.Error("the proxy is still active after the dialog's off action")
 	}
-	env, _ := os.ReadFile(".env")
-	for _, k := range config.ProxyEnvKeys() {
-		if strings.Contains(string(env), k+"=") {
-			t.Errorf("%s survived the dialog's off action in .env:\n%s", k, env)
-		}
+	st, _ := settings.Load()
+	if st.Proxy != "" {
+		t.Errorf("settings.Proxy = %q after off, want empty", st.Proxy)
 	}
 }
 

@@ -262,10 +262,10 @@ var enCatalog = map[string]string{
 	"chat.mode_act":         "act mode: the AI can propose changes (you still review them)",
 	"chat.switch_status":    "the AI asks to leave plan mode  (y switch / n stay)",
 	"chat.subagent_status":  "the AI delegated a task to a sub-agent — working, Esc to cancel  (review in Alt+L)",
-	"chat.fallback_notice": "No local AI answered, so this session uses Pollinations (free, no key). " +
+	"chat.fallback_notice": "No local AI answered, so this session uses a hosted one. " +
 		"Your prompts, files and tool output now leave this machine. " +
 		"Configure a provider (Ctrl+P → 'AI: Preferences') or set free_fallback = false to turn this off.",
-	"chat.fallback_status": "using Pollinations (free, no key)",
+	"chat.fallback_status": "using a hosted provider",
 	"chat.fallback_badge":  "CLOUD",
 	"finder.prompt":        " find file: ",
 
@@ -570,11 +570,11 @@ var ruCatalog = map[string]string{
 	"chat.mode_act":         "рабочий режим: ИИ может предлагать правки (вы всё равно их проверяете)",
 	"chat.switch_status":    "ИИ просит выйти из режима плана  (y переключить / n остаться)",
 	"chat.subagent_status":  "ИИ передал задачу под-агенту — идёт работа, Esc отменить  (ревью в Alt+L)",
-	"chat.fallback_notice": "Локальный ИИ не ответил, поэтому сессия использует Pollinations " +
-		"(бесплатно, без ключа). Ваши запросы, файлы и результаты инструментов " +
+	"chat.fallback_notice": "Локальный ИИ не ответил, поэтому сессия использует облачный. " +
+		"Ваши запросы, файлы и результаты инструментов " +
 		"теперь уходят с этой машины. Настройте провайдер (Ctrl+P → 'AI: Настройки') " +
 		"или поставьте free_fallback = false.",
-	"chat.fallback_status": "используется Pollinations (бесплатно, без ключа)",
+	"chat.fallback_status": "используется облачный провайдер",
 	"chat.fallback_badge":  "ОБЛАКО",
 	"finder.prompt":        " найти файл: ",
 

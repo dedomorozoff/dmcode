@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
 
@@ -289,12 +291,12 @@ func TestSidebarTallyIsTheSessionDiff(t *testing.T) {
 	}
 }
 
-// /proxy with a URL sets it for this session and writes it to .env, so the next
-// start does not silently go direct. With "off" it removes the variables from
-// both: MergeDotEnv only adds and replaces, so a proxy left behind in the file
-// would be read back and "off" would not mean anything.
+// /proxy with a URL sets it for this session and writes it to settings.json, so
+// the next start does not silently go direct. With "off" it removes the setting
+// from settings.json too.
 func TestProxyCommandSetsAndClears(t *testing.T) {
-	dir := inTempDir(t)
+	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	m := newSetupModel(t)
@@ -304,12 +306,12 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	if s := config.CurrentProxy(); !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
 		t.Fatalf("the live proxy is %+v, want the one just set", s)
 	}
-	env, err := os.ReadFile(dir + "/.env")
+	s, err := settings.Load()
 	if err != nil {
-		t.Fatalf("the proxy was not written to .env: %v", err)
+		t.Fatalf("settings.Load: %v", err)
 	}
-	if !strings.Contains(string(env), config.EnvHTTPProxy+"=http://127.0.0.1:3128") {
-		t.Errorf(".env does not carry the proxy:\n%s", env)
+	if s.Proxy != "http://127.0.0.1:3128" {
+		t.Errorf("settings.Proxy = %q, want %q", s.Proxy, "http://127.0.0.1:3128")
 	}
 
 	// A value that is not a URL must be refused and must not disturb what works.
@@ -325,18 +327,16 @@ func TestProxyCommandSetsAndClears(t *testing.T) {
 	if config.CurrentProxy().Active {
 		t.Error("the proxy is still active after /proxy off")
 	}
-	env, _ = os.ReadFile(dir + "/.env")
-	for _, k := range config.ProxyEnvKeys() {
-		if strings.Contains(string(env), k+"=") {
-			t.Errorf("%s survived /proxy off in .env:\n%s", k, env)
-		}
+	s2, _ := settings.Load()
+	if s2.Proxy != "" {
+		t.Errorf("settings.Proxy = %q after /proxy off, want empty", s2.Proxy)
 	}
 }
 
-// /proxy must not eat the user's other settings when it rewrites .env: the file
-// is merged, and the proxy keys are the only thing it removes.
+// /proxy must not touch the user's .env at all — credentials stay there.
 func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	cleanProxyEnv(t)
 
 	if err := os.WriteFile(dir+"/.env", []byte("# my note\nOPENAI_API_KEY=sk-real\n"), 0o600); err != nil {
@@ -348,10 +348,19 @@ func TestProxyCommandKeepsTheRestOfDotEnv(t *testing.T) {
 	m.applyProxy("http://127.0.0.1:8080")
 
 	env, _ := os.ReadFile(dir + "/.env")
-	for _, want := range []string{"# my note", "OPENAI_API_KEY=sk-real", config.EnvHTTPProxy + "="} {
+	// .env must be unchanged — only settings.json is written
+	for _, want := range []string{"# my note", "OPENAI_API_KEY=sk-real"} {
 		if !strings.Contains(string(env), want) {
 			t.Errorf(".env lost %q:\n%s", want, env)
 		}
+	}
+	if strings.Contains(string(env), "HTTP_PROXY") {
+		t.Errorf("proxy leaked into .env:\n%s", env)
+	}
+	// But settings.json must have it
+	s, _ := settings.Load()
+	if s.Proxy != "http://127.0.0.1:8080" {
+		t.Errorf("settings.Proxy = %q, want %q", s.Proxy, "http://127.0.0.1:8080")
 	}
 }
 

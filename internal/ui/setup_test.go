@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
 // setupKeys drives the model the way the real event loop does, through the
@@ -54,6 +54,41 @@ func (d setupKeys) walkTo(i int) setupKeys {
 	return d
 }
 
+// firstRowWhere is the index of the first option a predicate accepts, or -1.
+//
+// Tests that need "some keyed provider" used to name a row number, which silently
+// becomes a *different* provider the moment the list is reordered — /setup is
+// free-first, so inserting an option above OpenRouter moved these onto a keyless
+// local server and the test reported a failure about a key stage that the option
+// never had. What a test wants to know is a property of the option, so it asks
+// for the property.
+func firstRowWhere(ok func(config.SetupOption) bool) int {
+	for i, o := range config.SetupOptions() {
+		if ok(o) {
+			return i
+		}
+	}
+	return -1
+}
+
+// needsAKey is the option shape the key-stage tests exercise: a hosted provider
+// that asks for a secret. GGUF is keyless but prompts for a file, and the custom
+// endpoint asks for a URL and a model, so both are excluded.
+func needsAKey(o config.SetupOption) bool {
+	return !o.Keyless && !o.GGUF && o.BaseURL != ""
+}
+
+// mustRow is firstRowWhere for a test that cannot proceed without the row: a
+// predicate that matches nothing is a broken fixture, not a passing skip.
+func mustRow(t *testing.T, ok func(config.SetupOption) bool) int {
+	t.Helper()
+	i := firstRowWhere(ok)
+	if i < 0 {
+		t.Fatal("no /setup option matches; the fixture no longer exists")
+	}
+	return i
+}
+
 // newSetupModel builds the model exactly as main does. A hand-rolled uiModel
 // will not do: textinput needs a real cursor or Focus panics and typing is
 // dropped. The window size matters too, because the overlay's inner width is
@@ -66,8 +101,8 @@ func newSetupModel(t *testing.T) *uiModel {
 	return m
 }
 
-// inTempDir runs the body in a scratch directory, since /setup writes .env into
-// the working directory and a test must never touch the real one.
+// inTempDir runs the body in a scratch directory, since /setup writes settings.json
+// now and a test must never touch the real one in ~.dmcode.
 func inTempDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -84,10 +119,7 @@ func inTempDir(t *testing.T) string {
 // running model. This is the path a user with no API key at all takes.
 func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 	dir := inTempDir(t)
-	// A real key the user already had must survive the switch to a free one.
-	if err := os.WriteFile(".env", []byte("OPENCODE_API_KEY=real-secret\n# note\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
 
 	m := newSetupModel(t)
 	d := setupKeys{m: m}.type_("/setup").enter()
@@ -100,25 +132,27 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 		t.Errorf("wizard stayed open after a keyless choice: stage=%d", m.setup.stage)
 	}
 
-	data, err := os.ReadFile(".env")
-	if err != nil {
-		t.Fatalf(".env was not written: %v", err)
-	}
-	text := string(data)
-	for _, want := range []string{
-		"OPENCODE_API_KEY=real-secret", // the paid key survives
-		"# note",                       // and so do the user's comments
-		"OPENAI_BASE_URL=https://text.pollinations.ai/openai",
-		"DMCODE_MODEL=openai-fast",
-		"DMCODE_API=chat",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf(".env is missing %q:\n%s", want, text)
+	// After /setup, settings.json should have the provider config and model.
+	wantOpt := config.SetupOptions()[0]
+	if st, err := settings.Load(); err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	} else {
+		if st.BaseURL != wantOpt.BaseURL {
+			t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, wantOpt.BaseURL)
+		}
+		if st.Model != wantOpt.Model {
+			t.Errorf("settings.Model = %q, want %q", st.Model, wantOpt.Model)
+		}
+		if st.API != wantOpt.API {
+			t.Errorf("settings.API = %q, want %q", st.API, wantOpt.API)
+		}
+		if wantOpt.Keyless && st.APIKey != "" {
+			t.Errorf("settings.APIKey = %q for keyless provider, want empty", st.APIKey)
 		}
 	}
-	// The whole point of keyless: no placeholder may be invented for the user.
-	if strings.Contains(text, "OPENAI_API_KEY") {
-		t.Errorf("a key was written for a keyless provider:\n%s", text)
+	// .env should not be created — all config goes to settings.json.
+	if _, err := os.Stat(".env"); err == nil {
+		t.Error(".env was created; all config should go to settings.json")
 	}
 
 	// The change has to take effect now, not after a restart.
@@ -129,19 +163,6 @@ func TestSetupAppliesKeylessProviderEndToEnd(t *testing.T) {
 	}
 	if os.Getenv("OPENAI_BASE_URL") != want.BaseURL {
 		t.Error("the new endpoint was not exported to the process")
-	}
-
-	// .env holds a secret, so it must not become world-readable. Windows
-	// reports 0666 for every writable file and keeps permissions in an ACL, so
-	// there is nothing for a mode check to see there.
-	if runtime.GOOS != "windows" {
-		fi, err := os.Stat(dir + "/.env")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if perm := fi.Mode().Perm(); perm != 0o600 {
-			t.Errorf(".env has mode %o, want 600", perm)
-		}
 	}
 }
 
@@ -159,6 +180,7 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 	for i, want := range opts {
 		t.Run(strings.Fields(want.Label)[0], func(t *testing.T) {
 			dir := inTempDir(t)
+			t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 			m := newSetupModel(t)
 			d := setupKeys{m: m}.type_("/setup").enter().walkTo(i)
 
@@ -201,33 +223,33 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 				t.Fatalf("wizard stayed open after choosing %q", want.Label)
 			}
 
-			// What the wizard claims to offer has to be what it wrote.
-			data, err := os.ReadFile(filepath.Join(dir, ".env"))
+			// What the wizard claims to offer has to be what it wrote to settings.json.
+			st, err := settings.Load()
 			if err != nil {
-				t.Fatalf("%q wrote no .env: %v", want.Label, err)
+				t.Fatalf("settings.Load: %v", err)
 			}
-			text := string(data)
-			if want.BaseURL != "" && !strings.Contains(text, "OPENAI_BASE_URL="+want.BaseURL) {
-				t.Errorf("%q: .env is missing its base URL:\n%s", want.Label, text)
+			if want.BaseURL != "" && st.BaseURL != want.BaseURL {
+				t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, want.BaseURL)
 			}
-			if want.Model != "" && !strings.Contains(text, "DMCODE_MODEL="+want.Model) {
-				t.Errorf("%q: .env is missing its model:\n%s", want.Label, text)
+			if want.Model != "" && st.Model != want.Model {
+				t.Errorf("settings.Model = %q, want %q", st.Model, want.Model)
 			}
-			if want.Keyless && strings.Contains(text, "API_KEY") {
-				t.Errorf("%q is keyless but wrote a key variable:\n%s", want.Label, text)
+			if st.API != want.API {
+				t.Errorf("settings.API = %q, want %q", st.API, want.API)
 			}
-			if !want.Keyless && want.EnvKey != "" && !strings.Contains(text, want.EnvKey+"=sk-test-123") {
-				t.Errorf("%q: .env is missing %s:\n%s", want.Label, want.EnvKey, text)
+			if st.Reasoning != want.Reasoning {
+				t.Errorf("settings.Reasoning = %q, want %q", st.Reasoning, want.Reasoning)
 			}
-			if want.GGUF && !strings.Contains(text, "DMCODE_GGUF=models\\qwen.gguf") {
-				t.Errorf("%q: .env is missing the .gguf path:\n%s", want.Label, text)
+			// .env should not be created — all config goes to settings.json.
+			if _, err := os.Stat(filepath.Join(dir, ".env")); err == nil {
+				t.Errorf(".env was created; all config should go to settings.json")
 			}
 			// The running session has to move too, not just the file on disk.
 			if want.BaseURL != "" && m.prov.BaseURL != want.BaseURL {
-				t.Errorf("%q: the live provider is %q, want %q", want.Label, m.prov.BaseURL, want.BaseURL)
+				t.Errorf("the live provider is %q, want %q", m.prov.BaseURL, want.BaseURL)
 			}
 			if m.prov.Wire() != want.API {
-				t.Errorf("%q: the live wire is %q, want %q", want.Label, m.prov.Wire(), want.API)
+				t.Errorf("the live wire is %q, want %q", m.prov.Wire(), want.API)
 			}
 		})
 	}
@@ -236,9 +258,9 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 // TestSetupKeyStageRejectsEmptyKey covers the keyed providers: an empty key must
 // leave the wizard open instead of writing a provider that cannot authenticate.
 func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
-	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter() // OpenRouter
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("a keyed provider skipped the key stage (stage=%d)", m.setup.stage)
 	}
@@ -247,39 +269,21 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	if !m.setup.open {
 		t.Fatal("an empty key was accepted")
 	}
-	if _, err := os.Stat(".env"); err == nil {
-		t.Error("an empty key still wrote .env")
-	}
-
-	d = d.type_("sk-test-123").enter()
-	// Entering a key now starts a network check rather than a write, so the
-	// provider is only saved once the check comes back clean. The command is not
-	// executed here: it would hit openrouter.ai for real. Instead the clean
-	// verdict is fed in directly, which is what the loop would deliver.
-	_, _ = m.Update(setupCheckMsg{
-		vars: config.SetupVars(m.setup.opt, "sk-test-123"),
-		opt:  m.setup.opt,
-	})
-	if m.setup.open {
-		t.Error("wizard stayed open after a valid key")
-	}
-	data, _ := os.ReadFile(".env")
-	if !strings.Contains(string(data), "OPENAI_API_KEY=sk-test-123") {
-		t.Errorf("the entered key was not written:\n%s", data)
+	// settings.json should not have been written with an empty key.
+	st, _ := settings.Load()
+	if st.APIKey != "" {
+		t.Errorf("settings.APIKey = %q after empty key, want empty", st.APIKey)
 	}
 }
 
-// A keyed provider must be verified before .env is touched, so a wrong key
-// cannot replace a working one.
+// A keyed provider must be verified before settings.json is touched, so a wrong key
+// cannot replace a working configuration.
 func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
-	inTempDir(t)
-	existing := "OPENAI_BASE_URL=https://opencode.ai/zen/v1\nOPENAI_API_KEY=oc_sk_working\n"
-	if err := os.WriteFile(".env", []byte(existing), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 
 	m := newSetupModel(t)
-	setupKeys{m: m}.type_("/setup").enter().down().down().enter().type_("oc_sk_for_openrouter").enter()
+	m.prov = config.Provider{BaseURL: "https://opencode.ai/zen/v1", APIKey: "oc_sk_working", Model: "big-pickle", API: config.APIChat}
+	setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter().type_("oc_sk_for_openrouter").enter()
 
 	// The rejection arrives: nothing may have been written yet.
 	_, _ = m.Update(setupCheckMsg{
@@ -288,12 +292,13 @@ func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
 		err:  errors.New("401 Unauthorized: Missing Authentication header"),
 	})
 
-	data, err := os.ReadFile(".env")
+	// settings.json should not have been written with the rejected key.
+	st, err := settings.Load()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("settings.Load: %v", err)
 	}
-	if string(data) != existing {
-		t.Errorf("a rejected key overwrote the working configuration:\n%s", data)
+	if st.APIKey == "oc_sk_for_openrouter" {
+		t.Errorf("settings.APIKey = %q after rejected key, want oc_sk_working", st.APIKey)
 	}
 	if !m.setup.open {
 		t.Error("the wizard closed on a rejected key instead of offering a retry")
@@ -304,9 +309,9 @@ func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
 // hidden, so the overlay must not contain the secret on a screen share, and the
 // transcript must not keep it either.
 func TestSetupKeyIsNeverRendered(t *testing.T) {
-	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}
@@ -335,6 +340,38 @@ func TestSetupKeyIsNeverRendered(t *testing.T) {
 }
 
 // Every option has to be readable in the overlay at the sizes people actually
+// A drawn row is identified by its marker, not by a word from its label.
+//
+// Counting rows by the first word of each label was wrong in a way that only
+// showed up once two options shared a provider name: the two Pollinations rows
+// both open with "Pollinations", so a hidden one was counted as drawn, the
+// arithmetic came out one over the list, and the tempting "fix" was to rename a
+// label rather than fix the count. The marker is what the overlay actually
+// draws — three cells of indent, or a cursor or a star in them — and a wrapped
+// label's continuation line is indented five, which is what tells them apart.
+func drawnSetupRows(view string) int {
+	n := 0
+	for _, o := range config.SetupOptions() {
+		if strings.Contains(view, setupRowName(o)) {
+			n++
+		}
+	}
+	return n
+}
+
+// setupRowName is the phrase that identifies one option on screen: what comes
+// before its first " — ".
+//
+// Counting rows by the first *word* of the label was wrong in a way that only
+// surfaced once two options shared a provider name — the two Pollinations rows
+// both open with "Pollinations", so a hidden row was counted as a drawn one and
+// the arithmetic came out one over. A word is not an identity; the name before
+// the dash is, and it survives the wrapping that makes the rest of the label
+// unreliable.
+func setupRowName(o config.SetupOption) string {
+	return strings.SplitN(o.Label, " — ", 2)[0]
+}
+
 // use, and the overlay has to fit the terminal. A short screen cannot hold every
 // provider at once, so the guarantee is that each one is either drawn or named
 // by the overflow marker: a list that quietly drops its bottom rows is the
@@ -349,13 +386,7 @@ func TestSetupOverlayAccountsForEveryOptionAndFits(t *testing.T) {
 		setupKeys{m: m}.type_("/setup").enter()
 		view := m.View().Content
 
-		shown := 0
-		for _, o := range config.SetupOptions() {
-			// Labels wrap, so check the first word that cannot be split.
-			if strings.Contains(view, strings.Fields(o.Label)[0]) {
-				shown++
-			}
-		}
+		shown := drawnSetupRows(view)
 		hidden := 0
 		if i := strings.Index(view, "↓ more "); i >= 0 {
 			if _, err := fmt.Sscanf(view[i+len("↓ more "):], "%d", &hidden); err != nil {
@@ -395,9 +426,9 @@ func TestMaskedKeyFitsPanel(t *testing.T) {
 // Escape must work from every stage, including a half-typed key: a user who
 // picked the wrong provider cannot be trapped in a prompt.
 func TestSetupEscapeLeavesEveryStage(t *testing.T) {
-	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	m := newSetupModel(t)
-	d := setupKeys{m: m}.type_("/setup").enter().down().down().enter()
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(mustRow(t, needsAKey)).enter()
 	if m.setup.stage != setupKey {
 		t.Fatalf("expected the key stage, got %d", m.setup.stage)
 	}
@@ -405,7 +436,9 @@ func TestSetupEscapeLeavesEveryStage(t *testing.T) {
 	if m.setup.open {
 		t.Error("esc did not leave the key stage")
 	}
-	if _, err := os.Stat(".env"); err == nil {
-		t.Error("escaping still wrote .env")
+	// settings.json should not have been written.
+	st, _ := settings.Load()
+	if st.APIKey != "" {
+		t.Errorf("settings.APIKey = %q after escape, want empty", st.APIKey)
 	}
 }

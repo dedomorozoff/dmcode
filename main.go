@@ -173,6 +173,10 @@ func run(dir string, want resumeFlag) error {
 		fmt.Fprintln(os.Stderr, "dmcode: "+err.Error())
 	}
 	config.LoadDotEnv()
+	// Apply global user preferences (proxy, model) from ~/.dmcode/settings.json.
+	// This runs after LoadDotEnv so that settings.json wins over any stale
+	// DMCODE_MODEL or proxy variables left in a project's .env.
+	config.LoadSettings()
 	// The sidebar's brand block shows the version; it lives in config because
 	// the UI cannot reach into package main, and main is the only place the
 	// linker-stamped value exists.

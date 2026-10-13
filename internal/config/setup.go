@@ -46,23 +46,53 @@ type SetupOption struct {
 // A keyless option deliberately names no key variable. Writing a placeholder
 // into OPENAI_API_KEY would destroy a real key the user already had, and dmcode
 // talks to keyless hosts without any key anyway.
+//
+// The first word of a label is the provider's own name, because that is what the
+// list is a list of. What tells the two Pollinations apart is the host, which is
+// the part that actually differs between them — the anonymous text host serves
+// tool calls, gen.pollinations.ai needs a key before it will.
+//
+// The order is free-first and that is a promise, not a habit: dmcode's claim is
+// that it runs for nothing, and the wizard is the first screen a new user reads.
+// Every option whose whole cost is zero comes before every option that can bill
+// them, and TestNoFreeOptionIsRankedBelowAPaidOne fails the build if a provider
+// is added to the wrong side — nothing else in the code would notice.
+//
+// The list opens with Pollinations' anonymous host because it is the only
+// endpoint that answers with tools and no key at all, and it survives the move
+// to gen.pollinations.ai: that newer host needs a key the moment a request
+// carries `tools`, so it appears further down as an ordinary keyed provider.
 func SetupOptions() []SetupOption {
 	return []SetupOption{
-		{Label: i18n.T("No key — Pollinations (OpenAI-compatible, anonymous)"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low", Free: true},
+		// Free with nothing configured: a keyless host and two local servers.
+		{Label: i18n.T("Pollinations text — no key, tools work"), BaseURL: "https://text.pollinations.ai/openai", Model: "openai-fast", API: APIChat, Keyless: true, Reasoning: "low", Free: true},
 		{Label: i18n.T("Local — Ollama (http://127.0.0.1:11434/v1)"), BaseURL: "http://127.0.0.1:11434/v1", Model: "qwen2.5-coder:7b", API: APIChat, Keyless: true, Free: true},
-		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Local GGUF — llama.cpp runs a .gguf file (llama-server)"), Keyless: true, API: APIChat, GGUF: true, Free: true},
+
+		// Free with a key: a free tier that never bills, so the signup is the
+		// only cost. OpenRouter and Kilo are here rather than below because the
+		// model they default to names itself free — the mixed catalogue is the
+		// provider's, not the option's.
 		{Label: i18n.T("OpenRouter — free models (deepseek and others)"), Signup: "https://openrouter.ai/keys", BaseURL: "https://openrouter.ai/api/v1", Model: "deepseek/deepseek-chat-v3.1:free", EnvKey: "OPENAI_API_KEY", API: APIChat},
 		{Label: i18n.T("Kilo — gateway with free models (kilo-auto/free, account key)"), Signup: "https://app.kilo.ai/profile", BaseURL: "https://api.kilo.ai/api/gateway", Model: "kilo-auto/free", EnvKey: "KILO_API_KEY", API: APIChat},
 		{Label: i18n.T("OpenCode Zen — free models (nemotron, mimo, big-pickle)"), Signup: "https://opencode.ai/auth", BaseURL: "https://opencode.ai/zen/v1", Model: "big-pickle", EnvKey: "OPENCODE_API_KEY", API: APIResponses, Free: true},
-		{Label: i18n.T("Cline — gateway to Anthropic, OpenAI and Google models"), Signup: "https://app.cline.bot/settings/api-keys", BaseURL: "https://api.cline.bot/api/v1", Model: "anthropic/claude-sonnet-4-6", EnvKey: "CLINE_API_KEY", API: APIChat},
 		{Label: i18n.T("Groq — free, fast, tool calling works"), Signup: "https://console.groq.com/keys", BaseURL: "https://api.groq.com/openai/v1", Model: "qwen/qwen3-32b", EnvKey: "GROQ_API_KEY", API: APIResponses, Free: true},
 		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIResponses, Free: true},
-		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
 		{Label: i18n.T("Cerebras — free tier, no card, very fast"), Signup: "https://inference.cerebras.ai", BaseURL: "https://api.cerebras.ai/v1", Model: "qwen-3.8-27b", EnvKey: "CEREBRAS_API_KEY", API: APIChat, Free: true},
-		{Label: i18n.T("NVIDIA NIM — free credits, many coding models"), Signup: "https://build.nvidia.com", BaseURL: "https://integrate.api.nvidia.com/v1", Model: "z-ai/glm-5.3", EnvKey: "NVIDIA_API_KEY", API: APIChat},
 		{Label: i18n.T("SambaNova — free key, fast OpenAI-compatible"), Signup: "https://cloud.sambanova.ai", BaseURL: "https://api.sambanova.ai/v1", Model: "Meta-Llama-3.3-70B-Instruct", EnvKey: "SAMBANOVA_API_KEY", API: APIChat, Free: true},
+		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
+
+		// Below the line: something here can bill. It is all still offered, and
+		// it is all still picked up automatically once its key is exported — the
+		// rule is about what the wizard recommends first, not about what may
+		// exist. Credits (NVIDIA, Hugging Face) sit here rather than above
+		// because a credit that runs out stops being free.
+		{Label: i18n.T("NVIDIA NIM — free credits, many coding models"), Signup: "https://build.nvidia.com", BaseURL: "https://integrate.api.nvidia.com/v1", Model: "z-ai/glm-5.3", EnvKey: "NVIDIA_API_KEY", API: APIChat},
 		{Label: i18n.T("Hugging Face — free credits, OpenAI-compatible router"), Signup: "https://huggingface.co/settings/tokens", BaseURL: "https://router.huggingface.co/v1", Model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", EnvKey: "HF_TOKEN", API: APIChat},
+		{Label: i18n.T("Pollinations gen — key required, meters pollen"), Signup: "https://enter.pollinations.ai/keys", BaseURL: "https://gen.pollinations.ai/v1", Model: "openai/gpt-5.4-nano", EnvKey: "POLLINATIONS_API_KEY", API: APIChat},
+		{Label: i18n.T("Cline — gateway to Anthropic, OpenAI and Google models"), Signup: "https://app.cline.bot/settings/api-keys", BaseURL: "https://api.cline.bot/api/v1", Model: "anthropic/claude-sonnet-4-6", EnvKey: "CLINE_API_KEY", API: APIChat},
+		{Label: i18n.T("Mistral — codestral, paid tier has a free slice"), Signup: "https://console.mistral.ai/api-keys", BaseURL: "https://api.mistral.ai/v1", Model: "codestral-latest", EnvKey: "MISTRAL_API_KEY", API: APIResponses},
+
 		{Label: i18n.T("Your own OpenAI-compatible endpoint"), EnvKey: "OPENAI_API_KEY", API: APIChat},
 	}
 }
@@ -167,6 +197,10 @@ func isLoopback(baseURL string) bool {
 // SetupVars is the .env content a chosen option produces. It is shared by the
 // stdin wizard and /setup so the two cannot write different things.
 //
+// DMCODE_MODEL is intentionally absent: the model preference is a user choice
+// that belongs in ~/.dmcode/settings.json, not in the project's .env. Callers
+// that need the default model for a chosen option read opt.Model directly.
+//
 // The GGUF option persists only what is already known: the path arrives from
 // the wizard's prompt and lands in the map through opt.GGUFPath. Everything
 // else — the port, the model id — is decided when the server actually starts.
@@ -180,7 +214,6 @@ func SetupVars(opt SetupOption, key string) map[string]string {
 	}
 	if opt.BaseURL != "" {
 		vars["OPENAI_BASE_URL"] = opt.BaseURL
-		vars["DMCODE_MODEL"] = opt.Model
 	}
 	if opt.Reasoning != "" {
 		vars["DMCODE_REASONING_EFFORT"] = opt.Reasoning
@@ -191,15 +224,23 @@ func SetupVars(opt SetupOption, key string) map[string]string {
 	return vars
 }
 
-func SetupWizard() error {
+// SetupWizard asks for a provider on the terminal and returns it.
+//
+// It returns the provider rather than only an error because the caller needs
+// one to start on. Reconstructing it from the environment afterwards — which is
+// what used to happen — loses everything the environment cannot carry: a keyless
+// option writes no OPENAI_API_KEY and so read back as "no provider configured",
+// and DMCODE_MODEL is deliberately absent from .env, so the chosen model came
+// back as the qwen default and was sent to a Pollinations endpoint.
+func SetupWizard() (Provider, error) {
 	return SetupWizardWith(os.Stdin, os.Stdout)
 }
 
-// setupWizardWith is the wizard with its input and output injected, so the
+// SetupWizardWith is the wizard with its input and output injected, so the
 // prompt sequence can be tested without a terminal. The validation below is the
 // only guard against writing a half-filled custom endpoint, so it has to be
 // reachable from a test.
-func SetupWizardWith(r io.Reader, w io.Writer) error {
+func SetupWizardWith(r io.Reader, w io.Writer) (Provider, error) {
 	opts := SetupOptions()
 	fmt.Fprintf(w, "%s", i18n.T("\nNo free provider is configured. Pick one:\n"))
 	for i, o := range opts {
@@ -209,7 +250,7 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	reader := bufio.NewReader(r)
 	line, err := reader.ReadString('\n')
 	if err != nil && line == "" {
-		return fmt.Errorf("%s: %s", i18n.T("could not read the choice (stdin not a terminal?)"), FreeProviderHint())
+		return Provider{}, fmt.Errorf("%s: %s", i18n.T("could not read the choice (stdin not a terminal?)"), FreeProviderHint())
 	}
 	line = strings.TrimSpace(line)
 	idx := 1
@@ -228,11 +269,11 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 		fmt.Fprint(w, i18n.T("key: "))
 		keyLine, err := reader.ReadString('\n')
 		if err != nil && strings.TrimSpace(keyLine) == "" {
-			return fmt.Errorf("%s", i18n.T("no key entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no key entered"))
 		}
 		key = strings.TrimSpace(keyLine)
 		if key == "" {
-			return fmt.Errorf("%s", i18n.T("no key entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no key entered"))
 		}
 	}
 
@@ -245,11 +286,11 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 		fmt.Fprint(w, i18n.T("path to the .gguf file: "))
 		pathLine, err := reader.ReadString('\n')
 		if err != nil && strings.TrimSpace(pathLine) == "" {
-			return fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
 		}
 		opt.GGUFPath = strings.TrimSpace(pathLine)
 		if opt.GGUFPath == "" {
-			return fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no path to the .gguf file entered"))
 		}
 		fmt.Fprint(w, i18n.T("llama-server binary (enter = llama-server on PATH): "))
 		binLine, _ := reader.ReadString('\n')
@@ -262,13 +303,13 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 		urlLine, _ := reader.ReadString('\n')
 		opt.BaseURL = strings.TrimSpace(urlLine)
 		if opt.BaseURL == "" {
-			return fmt.Errorf("%s", i18n.T("no base URL entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no base URL entered"))
 		}
 		fmt.Fprint(w, i18n.T("model: "))
 		mLine, _ := reader.ReadString('\n')
 		opt.Model = strings.TrimSpace(mLine)
 		if opt.Model == "" {
-			return fmt.Errorf("%s", i18n.T("no model entered"))
+			return Provider{}, fmt.Errorf("%s", i18n.T("no model entered"))
 		}
 	}
 
@@ -276,24 +317,38 @@ func SetupWizardWith(r io.Reader, w io.Writer) error {
 	for k, v := range extras {
 		vars[k] = v
 	}
-	// Merge rather than truncate: picking a free provider must not delete a real
-	// key the user already had for a paid one.
-	existing, err := ReadDotEnv()
-	if err != nil {
-		return err
-	}
-	merged, _ := MergeDotEnv(existing, vars)
-
-	var sb strings.Builder
-	for _, l := range merged {
-		sb.WriteString(l + "\n")
-	}
+	// Export to environment for this session.
 	for _, k := range SortedKeys(vars) {
 		if err := os.Setenv(k, vars[k]); err != nil {
-			return err
+			return Provider{}, err
 		}
 	}
-	return os.WriteFile(".env", []byte(sb.String()), 0o600)
+	// Save everything to settings.json for persistence.
+	apiKeyVar := ""
+	if !opt.Keyless && opt.EnvKey != "" {
+		apiKeyVar = opt.EnvKey
+	}
+	if serr := SaveSettings(opt.BaseURL, apiKeyVar, key, opt.API, opt.Model, opt.Reasoning, opt.GGUFPath, vars["DMCODE_LLAMA_SERVER"], vars["DMCODE_LLAMA_ARGS"]); serr != nil {
+		return Provider{}, serr
+	}
+
+	// What the answers describe, which is the caller's to run on. A keyless
+	// option has an empty APIKey and that is correct rather than missing: the
+	// chat adapter sends a placeholder bearer token and the endpoint either
+	// ignores it or requires that the header be present at all.
+	//
+	// A GGUF answer has no endpoint yet — the model id is chosen when
+	// llama-server starts and reports what it loaded — so this carries the path
+	// and leaves BaseURL empty for the caller to resolve.
+	return Provider{
+		BaseURL:   opt.BaseURL,
+		APIKey:    key,
+		APIKeyVar: apiKeyVar,
+		Model:     opt.Model,
+		API:       opt.API,
+		Label:     opt.Label,
+		Reasoning: opt.Reasoning,
+	}, nil
 }
 
 // FreeProviderHint is the advice shown when no endpoint is reachable. It is a

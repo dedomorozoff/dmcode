@@ -21,6 +21,41 @@ func clearProxyEnv(t *testing.T) {
 	}
 }
 
+// A dead proxy is the one failure that makes every endpoint look dead at once,
+// and the complaint it produces is about providers. Naming it is the difference
+// between a person reading /setup and a person reading their own settings file.
+func TestProxyWarningNamesTheProxyAndIsSilentWithoutOne(t *testing.T) {
+	clearProxyEnv(t)
+	if w := ProxyWarning(); w != "" {
+		t.Errorf("no proxy is configured, but the warning says %q", w)
+	}
+
+	if err := SetProxy("127.0.0.1:8080"); err != nil {
+		t.Fatal(err)
+	}
+	w := ProxyWarning()
+	if w == "" {
+		t.Fatal("a proxy is configured and the warning is silent")
+	}
+	if !strings.Contains(w, "127.0.0.1:8080") {
+		t.Errorf("the warning does not name the proxy: %q", w)
+	}
+
+	// https is the one provider calls use, so it is the one named when both are
+	// set — naming the other would send the reader to the wrong address.
+	t.Setenv(EnvHTTPProxy, "http://127.0.0.1:3128")
+	if w := ProxyWarning(); !strings.Contains(w, "8080") || strings.Contains(w, "3128") {
+		t.Errorf("with both set the warning should name the https proxy: %q", w)
+	}
+
+	if err := SetProxy("off"); err != nil {
+		t.Fatal(err)
+	}
+	if w := ProxyWarning(); w != "" {
+		t.Errorf("after /proxy off the warning still says %q", w)
+	}
+}
+
 func TestSetProxyAcceptsABareHostAndPort(t *testing.T) {
 	clearProxyEnv(t)
 	// "host:port" is what everyone actually types, and refusing it as a URL would
