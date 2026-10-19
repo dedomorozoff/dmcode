@@ -36,6 +36,25 @@ func TestProjectMapIsNotRenderedAsAFileList(t *testing.T) {
 	}
 }
 
+// A page of a long file has to say which part of it this is. The tool hands the
+// model the line the page begins at and the offset of the next one; the user
+// reading the same page in the transcript is asking the same question.
+func TestAPageOfAFileSaysWhichLinesItIs(t *testing.T) {
+	got := renderToolResult(map[string]any{
+		"content":     "b\nc",
+		"total_lines": float64(900),
+		"truncated":   true,
+		"start_line":  float64(300),
+		"next_offset": float64(302),
+	})
+	if !strings.Contains(got, "300–301") {
+		t.Errorf("the page does not name its lines:\n%s", got)
+	}
+	if !strings.Contains(got, "900") {
+		t.Errorf("the page does not say how long the file is:\n%s", got)
+	}
+}
+
 // plural already carries the number, so prefixing one counted twice.
 func TestSubAgentDoesNotCountItsFilesTwice(t *testing.T) {
 	got := renderToolResult(map[string]any{

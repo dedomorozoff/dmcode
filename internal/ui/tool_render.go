@@ -173,11 +173,14 @@ func paged(resp map[string]any, key, empty string) string {
 
 // readFile shows the file, because the file is the result. The line count is
 // there so a truncated read is visible as truncated rather than mistaken for the
-// whole file.
+// whole file, and the range is there so a page of a long file says which part
+// of it this is — the same fact the tool hands the model, shown to the user
+// who is reading the page.
 func readFile(resp map[string]any) string {
 	content, _ := resp["content"].(string)
 	total := intOf(resp, "total_lines")
 	trunc, _ := resp["truncated"].(bool)
+	start := intOf(resp, "start_line")
 	switch {
 	case strings.TrimSpace(content) == "":
 		if total == 0 {
@@ -185,7 +188,19 @@ func readFile(resp map[string]any) string {
 		}
 		return lines("nothing at that offset", fmt.Sprintf("the file has %s", pluralLines(total)))
 	case trunc:
-		return block(fmt.Sprintf("showing part of %s", pluralLines(total)), content)
+		head := fmt.Sprintf("showing part of %s", pluralLines(total))
+		if start > 1 {
+			// next_offset is the line after the page, so it names the page's
+			// last line one short of itself. A page that ended on the cap has
+			// no next line to name, and then the last line is the one it began
+			// on.
+			last := intOf(resp, "next_offset") - 1
+			if last < start {
+				last = start
+			}
+			head = fmt.Sprintf("lines %d–%d of %d", start, last, total)
+		}
+		return block(head, content)
 	default:
 		return block(pluralLines(total), content)
 	}

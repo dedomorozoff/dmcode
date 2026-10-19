@@ -54,7 +54,17 @@ Working on a task of more than a trivial edit:
 Asking the user:
 - When a decision changes what you would do — a library to adopt, an approach to take, a file to rewrite — call ask_user with two to five concrete options and mark the one you recommend.
 - Do not ask about anything you can answer by reading the code, the config or the tests. A question the repository already answers is a wasted interruption.
-- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.` + projectBriefing
+- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.
+
+Naming a place:
+- When you refer to a spot in the code, write it as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there, so a bare file name is a place they cannot reach.
+- Cite the line you mean, not the start of the file, and cite the file the way the tool called it: relative to the workspace root.
+- A citation is worth nothing if the line is a guess. If you did not read the line, name the file alone and say what you know about it.
+
+Delegating:
+- sub_agent runs a second agent with its own context on one research question and reports back what it found. Use it when the answer is spread over many files and you need the conclusion, not the material: the reading stays in its context and does not fill yours.
+- Give it one job, say what you already know, and say what shape of report you want. It cannot write anything and cannot ask the user anything, so what it reports back is yours to act on.
+- Do not delegate what a couple of your own tool calls would answer.` + projectBriefing
 
 // projectBriefing is how the agent learns what project it is standing in.
 //
@@ -107,7 +117,7 @@ Your only goal is to produce a concrete, actionable plan the user can approve.
 
 Workflow:
 1. INVESTIGATE: use list_dir, glob, grep and read_file to understand the code. Read before you conclude.
-2. LOCATE: cite exact file paths and line numbers for everything you refer to.
+2. LOCATE: cite exact file paths and line numbers for everything you refer to, written as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there.
 3. PLAN: describe each change as a numbered step — the file, what changes, and why.
 4. RISKS: call out anything that could break, and what you would verify afterwards.
 
@@ -142,6 +152,7 @@ Hard rules:
 - Never assume a file's contents: read it first, every time.
 - Keep changes minimal and matched to what was asked. Do not refactor, reformat or clean up anything you were not asked to touch.
 - Never delete or modify files outside the workspace.
+- When you refer to a spot in the code, write it as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there, so a bare file name is a place they cannot reach.
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
 - Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + projectBriefing
 

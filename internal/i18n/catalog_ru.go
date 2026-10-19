@@ -20,6 +20,7 @@ var catalog = map[Lang]map[string]string{
 		"interface language":                                 "язык интерфейса",
 		"open the code editor: tree, git, terminal (ctrl+e)": "редактор кода: дерево, git, терминал (ctrl+e)",
 		"open the next change in the editor":                 "открыть следующее изменение в редакторе",
+		"open the file and line a reply names":               "открыть файл и строку, названные в ответе",
 		"editor closed — back to the chat":                   "редактор закрыт — возврат в чат",
 		"quit":                                               "выход",
 
@@ -28,7 +29,7 @@ var catalog = map[Lang]map[string]string{
 		"ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session · ctrl+q — quit": "ctrl+p — команды · ctrl+b — панель · ctrl+y — копировать ответ · ctrl+l — очистить · ctrl+n — новая сессия · ctrl+q — выход",
 		"esc — stop the current turn · up/down — prompt history · pgup/pgdown — scroll":                                    "esc — прервать текущий ход · ↑/↓ — история промптов · pgup/pgdown — скролл",
 		"mouse — select and copy text right in the terminal":                                                               "мышь — выделение и копирование текста прямо в терминале",
-		"click a change in the transcript, or %s, to open the file at that line":                                           "клик по изменению в чате, или %s — открыть файл на этой строке",
+		"click a change or a path:line in the transcript, or %s, to open the file at that line":                            "клик по изменению или по path:line в чате, или %s — открыть файл на этой строке",
 		"ctrl+e editor · ctrl+p commands · ctrl+b panel · ctrl+y copy · ctrl+q quit · up/down history · esc stop":          "ctrl+e редактор · ctrl+p команды · ctrl+b панель · ctrl+y копировать · ctrl+q выход · ↑/↓ история · esc отмена",
 		"describe the task… (/help for commands, esc to cancel)":                                                           "опиши задачу… (/help — команды, esc — отмена)",
 

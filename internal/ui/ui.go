@@ -1272,7 +1272,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
 				// The key is asked of the binding rather than written into the text,
 				// so the line cannot advertise a key the handler no longer answers.
-				line{kindSys, fmt.Sprintf(i18n.T("click a change in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
+				line{kindSys, fmt.Sprintf(i18n.T("click a change or a path:line in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
 				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
@@ -3117,7 +3117,10 @@ func rowRows(text string, width int, row transcriptRow) renderedRows {
 		for i, r := range rows {
 			rows[i] = row.first + r
 		}
-		return renderedRows{rows: rows}
+		// A citation in the reply is a place the user can click. The rows are
+		// read as they are drawn, so a place the markdown renderer rearranged
+		// is still found — see citeRows for what that costs.
+		return renderedRows{rows: rows, refs: citeRows(rows)}
 	}
 	if row.diff {
 		return diffRows(text, width, row)

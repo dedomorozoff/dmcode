@@ -217,7 +217,9 @@ func mdInline(s string, base lipgloss.Style) string {
 
 	flush := func() {
 		if plain.Len() > 0 {
-			b.WriteString(base.Render(plain.String()))
+			// The run is rendered with its citations marked, so that a place
+			// the agent named looks like something the user can act on.
+			b.WriteString(renderCites(plain.String(), base))
 			plain.Reset()
 		}
 	}

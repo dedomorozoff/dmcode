@@ -300,10 +300,25 @@ type readFileArgs struct {
 	Offset int    `json:"offset_line,omitempty"`
 	Limit  int    `json:"limit_lines,omitempty"`
 }
+
+// readFileResult is what the model gets back.
+//
+// StartLine and NextOffset are there so that the model never has to count.
+// The line a page begins at is a fact the tool knows and the model does not,
+// and a page that did not say so left the model unable to say what line number
+// it was looking at — which is a citation without a line, and a citation
+// without a line is not a place the user can open.
 type readFileResult struct {
 	Content    string `json:"content"`
 	TotalLines int    `json:"total_lines"`
 	Truncated  bool   `json:"truncated"`
+	// StartLine is the number of the first line in Content, counted the way
+	// a line is counted everywhere else: from one.
+	StartLine int `json:"start_line"`
+	// NextOffset is the offset_line to pass for the page after this one. It
+	// is absent when there is no next page, and it is a value the model can
+	// hand straight back rather than one it has to work out from a line count.
+	NextOffset int `json:"next_offset,omitempty"`
 }
 
 func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
@@ -325,30 +340,79 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 	// "large file" the tool's own description points offset_line at.
 	lines := strings.Split(string(data), "\n")
 	total := len(lines)
-	start := max(in.Offset, 0)
-	if start >= total {
-		return readFileResult{Content: "", TotalLines: total}, nil
+
+	// offset_line is the number of the first line to return, which is how a
+	// model reads a line number. Zero and one both mean the beginning: a
+	// model that has not been told the convention should not have to guess
+	// which of the two the tool wants.
+	start := 0
+	if in.Offset > 1 {
+		start = in.Offset - 1
 	}
+	if start >= total {
+		return readFileResult{Content: "", TotalLines: total, StartLine: total + 1}, nil
+	}
+
 	end := total
-	trunc := false
+	limitHit := false
 	if in.Limit > 0 && start+in.Limit < total {
 		end = start + in.Limit
-		trunc = true
+		limitHit = true
 	}
-	content := strings.Join(lines[start:end], "\n")
-	if len(content) > maxReadBytes {
-		// A single page can still be enormous when the model asks for a wide
-		// window; the cap keeps one response from becoming the whole context
-		// window. It cuts the page, not the file: the next offset_line still
-		// reaches what came after it.
-		content = content[:maxReadBytes]
-		trunc = true
+
+	// The page is put together a line at a time rather than joined and cut
+	// afterwards. Joining first and cutting the string is what left the tool
+	// unable to say how many lines it had actually returned, and it cut a rune
+	// in half when the cap landed inside a multi-byte character.
+	var b strings.Builder
+	returned := 0
+	cut := false
+	for i := start; i < end; i++ {
+		line := lines[i]
+		need := len(line)
+		if returned > 0 {
+			need++ // the newline in front of it
+		}
+		if b.Len()+need > maxReadBytes {
+			cut = true
+			break
+		}
+		if returned > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(line)
+		returned++
 	}
-	return readFileResult{
+	content := b.String()
+	if returned == 0 && start < total {
+		// A single line longer than the cap. What fits is handed over and the
+		// page says it is truncated: there is no way to continue inside a
+		// line, so the next page starts after it.
+		content = cutRunes(lines[start], maxReadBytes)
+		returned = 1
+		cut = true
+	}
+
+	res := readFileResult{
 		Content:    content,
 		TotalLines: total,
-		Truncated:  trunc,
-	}, nil
+		Truncated:  limitHit || cut,
+		StartLine:  start + 1,
+	}
+	if res.Truncated && returned > 0 {
+		res.NextOffset = start + returned + 1
+	}
+	return res, nil
+}
+
+// cutRunes shortens s to at most n bytes without leaving half a character at
+// the end. A rune cut in half is a replacement character in the model's
+// context, and it is the one byte the model cannot read past.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
 }
 
 type writeFileArgs struct {
@@ -1369,7 +1433,7 @@ const pagingNote = "Results are paginated: pass offset to continue where next_of
 func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Reads a file. offset_line and limit_lines page through large files; when truncated is true, continue from the next line with offset_line. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
+		Description: "Reads a file. offset_line is the number of the first line to return (counting from one) and limit_lines caps how many lines come back. The result carries start_line — the number of the first line you got — and next_offset, the offset_line to pass for the page after this one, so you never have to count lines yourself. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
 	}, readFile)
 	if err != nil {
 		return nil, err
