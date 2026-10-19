@@ -296,9 +296,9 @@ func checkPatternRoot(pattern string) error {
 // call. The zero value is the documented default for each of these.
 
 type readFileArgs struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset_line,omitempty"`
-	Limit  int    `json:"limit_lines,omitempty"`
+	Path   string `json:"path" jsonschema:"The file to read, relative to the workspace root."`
+	Offset int    `json:"offset_line,omitempty" jsonschema:"The number of the first line to return, counting from one. Leave it out to start at the beginning; to carry on, pass the next_offset the last answer gave you."`
+	Limit  int    `json:"limit_lines,omitempty" jsonschema:"How many lines to return at most. Leave it out and the whole file comes back, or as much of it as fits in one page."`
 }
 
 // readFileResult is what the model gets back.
@@ -416,8 +416,8 @@ func cutRunes(s string, n int) string {
 }
 
 type writeFileArgs struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path    string `json:"path" jsonschema:"The file to write, relative to the workspace root. Parent directories are created if they are missing."`
+	Content string `json:"content" jsonschema:"The whole new content of the file."`
 }
 type writeFileResult struct {
 	BytesWritten int    `json:"bytes_written"`
@@ -513,21 +513,21 @@ func writeFileAtomic(path string, data []byte) (string, error) {
 // a single edit_file call's old_string/new_string pair, so a model that has
 // learned the simple form already knows the batch form.
 type editItem struct {
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all,omitempty"`
+	OldString  string `json:"old_string" jsonschema:"The text to replace. It must be unique in the file unless replace_all is true."`
+	NewString  string `json:"new_string" jsonschema:"The text to put in its place."`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"Replace every occurrence instead of insisting the old text is unique."`
 }
 
 type editFileArgs struct {
-	Path       string `json:"path"`
-	OldString  string `json:"old_string,omitempty"`
-	NewString  string `json:"new_string,omitempty"`
-	ReplaceAll bool   `json:"replace_all,omitempty"`
+	Path       string `json:"path" jsonschema:"The file to edit, relative to the workspace root."`
+	OldString  string `json:"old_string,omitempty" jsonschema:"The text to replace. It must be unique in the file unless replace_all is true; if it is not there at all, a whitespace-tolerant match is tried."`
+	NewString  string `json:"new_string,omitempty" jsonschema:"The text to put in its place."`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"Replace every occurrence instead of insisting the old text is unique."`
 	// Edits applies several replacements to the file in one call, in order,
 	// and writes once. A model editing five lines of one file spends one round
 	// trip instead of five, and the transcript shows one diff block instead of
 	// five rewrites. When it is set, old_string/new_string are ignored.
-	Edits []editItem `json:"edits,omitempty"`
+	Edits []editItem `json:"edits,omitempty" jsonschema:"Several replacements in one call, applied in order and written once. Use it instead of old_string/new_string when a file needs more than one change; the two are ignored when this is set."`
 }
 type editFileResult struct {
 	Replacements int    `json:"replacements"`
@@ -827,10 +827,10 @@ func pageWindow(n, offset, limit int) (start, end int, p page) {
 }
 
 type listDirArgs struct {
-	Path      string `json:"path,omitempty"`
-	Recursive bool   `json:"recursive,omitempty"`
-	Offset    int    `json:"offset,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Path      string `json:"path,omitempty" jsonschema:"The directory to list, relative to the workspace root. Leave it out for the root itself."`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"Walk the whole tree and return file paths instead of one directory's entries."`
+	Offset    int    `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit     int    `json:"limit,omitempty" jsonschema:"How many entries to return at most. Default 200."`
 }
 type listDirResult struct {
 	Entries string `json:"entries"`
@@ -901,16 +901,16 @@ func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
 }
 
 type grepArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path,omitempty"`
-	Glob    string `json:"glob,omitempty"`
+	Pattern string `json:"pattern" jsonschema:"The regular expression to search for."`
+	Path    string `json:"path,omitempty" jsonschema:"Where to search, relative to the workspace root. Leave it out for the whole workspace."`
+	Glob    string `json:"glob,omitempty" jsonschema:"Only search files whose name matches this pattern, like '*.go'."`
 	// ContextLines asks for that many lines either side of each match. It is
 	// what makes grep an answer rather than a list of line numbers: reading
 	// what surrounds a hit is the whole point, and doing it one read_file per
 	// hit is a round trip per line.
-	ContextLines int `json:"context_lines,omitempty"`
-	Offset       int `json:"offset,omitempty"`
-	Limit        int `json:"limit,omitempty"`
+	ContextLines int `json:"context_lines,omitempty" jsonschema:"How many lines to show either side of each match. Ask for it — the lines around a hit are usually the answer, and a bare line number is not."`
+	Offset       int `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit        int `json:"limit,omitempty" jsonschema:"How many matches to return at most. Default 200."`
 }
 type grepResult struct {
 	Matches string `json:"matches"`
@@ -1112,9 +1112,9 @@ func globToRegex(g string) string {
 }
 
 type globArgs struct {
-	Pattern string `json:"pattern"`
-	Offset  int    `json:"offset,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Pattern string `json:"pattern" jsonschema:"The glob to match, like 'src/*.go' or '**/*.md'."`
+	Offset  int    `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit   int    `json:"limit,omitempty" jsonschema:"How many files to return at most. Default 200."`
 }
 type globResult struct {
 	Files string `json:"files"`
@@ -1221,9 +1221,9 @@ func detectShell() (string, []string) {
 }
 
 type runCommandArgs struct {
-	Command  string `json:"command"`
-	WorkDir  string `json:"work_dir,omitempty"`
-	TimeoutS int    `json:"timeout_seconds,omitempty"`
+	Command  string `json:"command" jsonschema:"The command line to run in the workspace's shell."`
+	WorkDir  string `json:"work_dir,omitempty" jsonschema:"A subdirectory of the workspace to run it in. Leave it out for the root."`
+	TimeoutS int    `json:"timeout_seconds,omitempty" jsonschema:"How long to let it run, in seconds. Default 60, at most 600."`
 }
 type runCommandResult struct {
 	Output string `json:"output"`
@@ -1281,8 +1281,8 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 }
 
 type moveFileArgs struct {
-	Source      string `json:"source"`
-	Destination string `json:"destination"`
+	Source      string `json:"source" jsonschema:"The file to move, relative to the workspace root."`
+	Destination string `json:"destination" jsonschema:"Where it should end up, relative to the workspace root. It must not already exist — to replace a file, delete it first."`
 }
 type moveFileResult struct {
 	From string `json:"from"`
@@ -1381,7 +1381,7 @@ func copyFile(src, dst string) error {
 }
 
 type deleteFileArgs struct {
-	Path string `json:"path"`
+	Path string `json:"path" jsonschema:"The file to delete, relative to the workspace root. One file, not a folder."`
 }
 type deleteFileResult struct {
 	Removed string `json:"removed"`
