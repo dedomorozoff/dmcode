@@ -178,6 +178,12 @@ before it starts guessing at filenames. Its language share and file counts cover
 the whole tree however shallow the tree it shows, and it says so when a bound
 stopped it early.
 
+`read_file` pages through a large file and says where it is: the answer carries
+`start_line`, the number of the first line you got, and `next_offset`, the
+offset to pass for the page after this one. The agent never counts lines
+itself, which is what lets it name a place — `internal/ui/ui.go:412` — that you
+can then click.
+
 `edit_file` takes one replacement or a list of them. The batch form applies
 every replacement in order and writes the file **once** — so five edits to one
 file cost one round trip and produce one diff block in the transcript rather
@@ -488,13 +494,13 @@ the agent is not going to ask before they stop watching.
 | `pgup` `pgdn` | scroll · `home` `end` — top and bottom |
 | `wheel` | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
-| click | open the file at the line of the change you clicked |
+| click | open the file at the line you clicked — a change, or a `path:line` the reply named |
 
 Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
 PTY, LSP completions, splits and bookmarks, which is too much for a table here.
 In the chat, `F1` opens the reference above, scrolled with `pgup`/`pgdn`.
 
-## Going to a change
+## Going to a change, or to a place
 
 When a write lands, the transcript draws what changed: the file's name, the real
 line numbers in the gutter, and the code itself. **Click any line of that block
@@ -506,9 +512,20 @@ the one a reader is looking for.
 below where you are, and pressing it again steps through the rest of the
 session's edits and comes back round to the first.
 
-A click that is not on a change row still does nothing, which is the rule that
-keeps the selection below usable: without it, every click in the transcript would
-be a jump.
+### A place the reply named
+
+The agent is asked to write a place as `path:line` — `internal/ui/ui.go:412` —
+and **clicking that line opens the file at that line**, the same way a click on
+a change block does. The citation is drawn in the tool colour, because a thing
+that can be clicked and does not look like it is a thing nobody clicks.
+
+The number is not decoration: it is read out of the drawn row and carried
+beside it, so a line that wrapped, was styled by the markdown renderer or came
+out of the render cache still opens the place it names.
+
+A click that is not on a change row or a citation still does nothing, which is
+the rule that keeps the selection below usable: without it, every click in the
+transcript would be a jump.
 
 ## The editor
 

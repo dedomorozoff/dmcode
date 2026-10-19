@@ -25,6 +25,14 @@
 > puts on the wire, or that the model then answers about the picture.
 >
 > Still unverified, and worth testing first:
+> - a **citation** — a `path:line` in the agent's reply that a click opens in the
+>   editor. The click is driven end to end by a test that builds a real frame and
+>   clicks the row, but no live session has done it, and the model has never been
+>   asked for a citation against a real endpoint: whether it writes `path:line`
+>   when asked is a claim about the model, not about dmcode;
+> - `read_file`'s new paging contract — `offset_line` counts from one, and the
+>   result carries `start_line` and `next_offset`. Whether a live model learns
+>   the new numbering in one session is unmeasured;
 > - `sub_agent`'s nested turn — a second agent with its own session, run from
 >   inside a tool call. Unit-tested in isolation; not driven against a live
 >   endpoint end to end, and not yet checked for its report fitting the parent's
@@ -164,6 +172,34 @@ that reads fine until it is wrong:
 A `-` row carries the old file's number and lands on the replacement: the block
 trims a shared prefix and suffix off both texts and numbers both sides from the
 same place, so the line a removal used to be on is the line its replacement is on.
+
+### A place the reply named
+
+A `path:line` in the agent's own prose is a place too, and it is clicked the
+same way (`internal/ui/cite.go`). Three things about it are worth keeping:
+
+- **The citation is read out of the drawn row, not out of the model's text.**
+  The markdown renderer may have styled part of it — `**internal/ui/ui.go**:412`
+  arrives as `internal/ui/ui.go:412` on screen — and a styled run still says the
+  same thing as an unstyled one. The row is stripped of its escapes and read
+  from there, so what is found is what the user is looking at.
+- **The extension is the whole of the "is this a place" decision.** There is no
+  rule that separates `internal/ui/ui.go:412` from `example.com:8080`: both are
+  a path, a colon and digits. The list of extensions a citation may name is
+  what tells a file from a domain, and a URL is skipped whole so an address
+  ending in `.go:12` stays an address.
+- **A row may name several places, and the first one wins.** The first is the
+  one the sentence is about. The alternative — a list per row, cycled by
+  repeated clicks — buys a keypress on a row that almost never has two
+  citations, and costs the click its meaning.
+
+The citation is *marked* — the tool colour and a weight — because a thing that
+can be clicked and does not look like it is a thing nobody clicks. An underline
+was tried and dropped: lipgloss paints it a character at a time, so one citation
+became a hundred escape sequences. The marking happens in `mdInline`'s plain
+run, cut into pieces and rendered side by side, because a style applied around
+an already-rendered string nests two escape sequences and the inner reset
+cancels the outer one for everything after it.
 
 ### The editor's empty buffer
 
