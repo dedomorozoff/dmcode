@@ -1230,6 +1230,13 @@ type runCommandResult struct {
 }
 
 func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) {
+	// The gate, before the shell starts. A command that is refused is a
+	// refusal, not a failure, and the answer says what to do instead — a
+	// refusal that only says "no" leaves the model to invent a workaround, and
+	// the workaround is usually worse than the thing that was refused.
+	if r, ok := refuseCommand(in.Command); ok {
+		return runCommandResult{}, fmt.Errorf("dmcode will not run this: %s — %s", r.what, r.instead)
+	}
 	timeout := time.Duration(in.TimeoutS) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -1474,8 +1481,9 @@ func MakeTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 	runCommandTool, err := functiontool.New(functiontool.Config{
-		Name:        "run_command",
-		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root.",
+		Name: "run_command",
+		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root. " +
+			"The shell is not a sandbox: it can reach anything the user can, so a short list of catastrophic commands is refused outright — a recursive delete of a root directory, a format, a raw write to a device, a force push, a forced clean, a hard reset. A refusal says what to use instead.",
 	}, runCommand)
 	if err != nil {
 		return nil, err
