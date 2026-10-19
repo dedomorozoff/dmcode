@@ -194,6 +194,11 @@ func run(dir string, want resumeFlag) error {
 	// deferred call covers quitting during the load as well as after it, which is
 	// the case that used to leave an orphan holding a large model in memory.
 	defer discover.StopGGUF()
+	// A command the agent started in the background must not outlive the
+	// session that started it: a build nobody is waiting for is a process
+	// holding a machine's worth of CPU, and on Windows a child does not die
+	// with its parent.
+	defer tools.StopBackground()
 
 	agentTools, err := tools.MakeTools()
 	if err != nil {

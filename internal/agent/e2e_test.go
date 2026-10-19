@@ -384,6 +384,10 @@ var requiredArgs = map[string][]string{
 	"ask_user":    {"options", "question"},
 	"sub_agent":   {"task"},
 	"switch_mode": {"mode"},
+	// The background command's handle: there is nothing to ask about without
+	// it, so it is required — and it is the only thing that is, which is what
+	// makes a question about a command one field.
+	"command_output": {"handle"},
 }
 
 // TestTheRequiredArgumentsAreTheOnesThatWereDecided pins the table above
@@ -533,8 +537,8 @@ func TestTheToolsReachTheWireDescribed(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob",
-		"run_command", "move_file", "delete_file", "web_search", "fetch_url", "project_map",
-		"todo_write", "todo_set", "todo_read", "ask_user", "sub_agent"} {
+		"run_command", "command_output", "move_file", "delete_file", "web_search", "fetch_url",
+		"project_map", "todo_write", "todo_set", "todo_read", "ask_user", "sub_agent"} {
 		if !seen[want] {
 			t.Errorf("the request carries no %q", want)
 		}

@@ -125,6 +125,9 @@ func renderToolResult(resp map[string]any) string {
 	case hasAny(resp, "plan"):
 		return todoResult(resp)
 
+	case hasAny(resp, "handle"):
+		return backgroundCommand(resp)
+
 	case hasAny(resp, "result"):
 		// ask_user is the one tool whose result is a bare string.
 		return lines("answered", str(resp, "result"))
@@ -324,6 +327,31 @@ func todoResult(resp map[string]any) string {
 		return cappedBlock(fmt.Sprintf("%d of %d done", done, total), plan, toolResMaxCells, toolResMaxLines)
 	}
 	return block("", plan)
+}
+
+// backgroundCommand renders a command that was started in the background, and
+// the answer to a later question about it.
+//
+// They are one case because they are one shape: a handle, a status, and
+// sometimes an output. The output is the tail of what the command printed,
+// because a build prints thousands of lines and the failure is at the end.
+func backgroundCommand(resp map[string]any) string {
+	handle := str(resp, "handle")
+	status := str(resp, "status")
+	body, _ := resp["output"].(string)
+	switch status {
+	case "running":
+		return block(fmt.Sprintf("%s — still running", handle), body)
+	case "done", "failed", "timed out":
+		head := fmt.Sprintf("%s — %s", handle, status)
+		if code := intOf(resp, "exit_code"); code != 0 && status == "failed" {
+			head = fmt.Sprintf("%s — failed (exit %d)", handle, code)
+		}
+		return block(head, body)
+	default:
+		// The launch itself: a handle and the line it stands for.
+		return lines("started", strings.TrimSpace(handle+" "+str(resp, "command")))
+	}
 }
 
 // outputKey covers run_command and every MCP tool: both answer under "output",

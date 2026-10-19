@@ -1224,9 +1224,26 @@ type runCommandArgs struct {
 	Command  string `json:"command" jsonschema:"The command line to run in the workspace's shell."`
 	WorkDir  string `json:"work_dir,omitempty" jsonschema:"A subdirectory of the workspace to run it in. Leave it out for the root."`
 	TimeoutS int    `json:"timeout_seconds,omitempty" jsonschema:"How long to let it run, in seconds. Default 60, at most 600."`
+	// Background starts the command and returns at once, with a handle to ask
+	// about it later.
+	Background bool `json:"background,omitempty" jsonschema:"Start the command and return at once instead of waiting for it. Use it for a build or a test suite that takes longer than a minute: the answer is a handle, and command_output tells you what it has printed and whether it has finished. A command that is killed at the timeout teaches you nothing."`
 }
+
+// runCommandResult is what the model gets back.
+//
+// A backgrounded command answers under a different shape — a handle and a
+// status instead of an output — and both are the same struct so that the
+// tool has one result type. The fields that do not apply are absent.
 type runCommandResult struct {
-	Output string `json:"output"`
+	Output string `json:"output,omitempty"`
+	// Handle is the name of a command running in the background.
+	Handle string `json:"handle,omitempty"`
+	// Status is "running" for a backgrounded command.
+	Status string `json:"status,omitempty"`
+	// Command is the line that was started, so the handle means something.
+	Command string `json:"command,omitempty"`
+	// Seconds is the ceiling the command runs under.
+	Seconds int `json:"seconds,omitempty"`
 }
 
 func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) {
@@ -1253,6 +1270,22 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 		return runCommandResult{}, err
 	}
 	shell, flags := detectShell()
+
+	// A backgrounded command returns at once. It is not tied to the turn's
+	// context — that is the whole point of it — and it is tied to dmcode, which
+	// kills what it started on the way out.
+	if in.Background {
+		start, err := startBackground(in.Command, dir, backgroundTimeout(in.TimeoutS))
+		if err != nil {
+			return runCommandResult{}, err
+		}
+		return runCommandResult{
+			Handle:  start.Handle,
+			Status:  start.Status,
+			Command: start.Command,
+			Seconds: start.Seconds,
+		}, nil
+	}
 
 	parentCtx := context.Background()
 	if ctx != nil {
@@ -1483,8 +1516,16 @@ func MakeTools() ([]tool.Tool, error) {
 	runCommandTool, err := functiontool.New(functiontool.Config{
 		Name: "run_command",
 		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root. " +
+			"Set background=true to start it and return at once with a handle instead of waiting — that is what to do for a build or a test suite that takes longer than a minute, and command_output then tells you what it printed and whether it has finished. " +
 			"The shell is not a sandbox: it can reach anything the user can, so a short list of catastrophic commands is refused outright — a recursive delete of a root directory, a format, a raw write to a device, a force push, a forced clean, a hard reset. A refusal says what to use instead.",
 	}, runCommand)
+	if err != nil {
+		return nil, err
+	}
+	commandOutputTool, err := functiontool.New(functiontool.Config{
+		Name:        "command_output",
+		Description: "Asks about a command that run_command started in the background. Pass the handle it gave you, like \"cmd-1\". The answer says whether the command is still running or has finished, and what it has printed — which is where a build's failure is. The output is the tail: a long build prints thousands of lines, and the end is the part worth reading.",
+	}, commandOutput)
 	if err != nil {
 		return nil, err
 	}
@@ -1523,7 +1564,7 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	out := []tool.Tool{
 		readFileTool, writeFileTool, editFileTool, listDirTool,
-		grepTool, globTool2, runCommandTool, moveFileTool, deleteFileTool,
+		grepTool, globTool2, runCommandTool, commandOutputTool, moveFileTool, deleteFileTool,
 		webSearchTool, fetchURLTool, projectMapTool,
 	}
 	return append(out, todoTools...), nil

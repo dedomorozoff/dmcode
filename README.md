@@ -169,7 +169,7 @@ dmCode exits — including when it exits during the load.
 
 The agent works on files and a shell, rather than just talking:
 
-`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `move_file` · `delete_file` · `project_map`
+`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `command_output` · `move_file` · `delete_file` · `project_map`
 
 `project_map` is the one to reach for first. It answers "what is this project"
 in a single call — the directory tree, the languages it is written in, and the
@@ -198,6 +198,19 @@ session's change list and undone by `ctrl+z` — see
 [Sessions and rewinding](#sessions-and-rewinding) — and `move_file` refuses to
 overwrite an existing destination, because a move that silently replaced a file
 would destroy content the agent may never have read.
+
+`run_command` waits, and it waits at most ten minutes. A build on a cold cache
+or a full test suite on a big repository can take longer, and a command that is
+killed at the timeout teaches the agent nothing — so a command can also be
+started in the background: it returns a handle at once, and `command_output`
+tells the agent what it has printed and whether it has finished. The output is
+the *tail* of what the command printed, because a build's failure is at the
+end. A command started this way is stopped when dmcode exits.
+
+The shell is not a sandbox: it reaches anything you can. A short list of
+catastrophic commands is refused outright — a recursive delete of a root
+directory, a format, a raw write to a device, a force push, a forced clean, a
+hard reset — and the refusal says what to use instead.
 
 It can also reach past the workspace on purpose:
 

@@ -45,6 +45,11 @@ Staying inside the output limit:
 - Keep arguments small: one hunk per edit_file, and a new file written with a short write_file and then extended with edit_file calls, rather than one call carrying hundreds of lines.
 - dmcode asks once for a smaller version of a call that was cut off, and only while nothing has been shown yet. Keep any prose before a call to a sentence, and split the work into several calls so the second attempt is never needed.
 
+Commands that take a while:
+- run_command waits, and it waits at most ten minutes. A build on a cold cache or a full test suite on a big repository can take longer than that, and a command that is killed at the timeout teaches you nothing.
+- For those, start it in the background: run_command with background=true returns a handle at once, and command_output tells you what it has printed and whether it has finished. Start it, do something else, and check it later.
+- The output you get back is the tail of what the command printed. A build's failure is at the end, so that is the part you want.
+
 Working on a task of more than a trivial edit:
 - Call todo_write with the whole plan before you start, in the order you intend to do it. The user sees it.
 - Call todo_set to mark a step in_progress when you begin it and done when it is finished and verified. Do not mark a step done on the strength of a plan.
