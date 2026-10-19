@@ -177,6 +177,53 @@ func toolSet(t *testing.T) []tool.Tool {
 	return append(tools, subTool)
 }
 
+// planToolSet is the instrument set a planning turn runs on: the read-only
+// tools, the question tool, the delegation tool, and the one tool that only
+// plan mode has.
+//
+// It is here because a tool that exists only in plan mode is a tool nobody
+// looks at. `switch_mode` was the last one without a described argument, and
+// nothing about it is on the wire in an act session — so the act set alone
+// would never have found it.
+func planToolSet(t *testing.T) []tool.Tool {
+	t.Helper()
+	tools, err := dmtools.MakeReadOnlyTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker := ask.NewBroker(0)
+	askTool, err := broker.MakeTool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = append(tools, askTool)
+	subTool, err := dmagent.SubAgentTool(nil, tools, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = append(tools, subTool)
+	switchTool, err := dmagent.SwitchModeTool(dmagent.ModePlan, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(tools, switchTool)
+}
+
+// everyTool is the union of both sets, one entry per tool.
+func everyTool(t *testing.T) []tool.Tool {
+	t.Helper()
+	seen := map[string]bool{}
+	var out []tool.Tool
+	for _, tl := range append(toolSet(t), planToolSet(t)...) {
+		if seen[tl.Name()] {
+			continue
+		}
+		seen[tl.Name()] = true
+		out = append(out, tl)
+	}
+	return out
+}
+
 // runTurn drives one turn against the endpoint and returns what the model
 // finally said.
 func runTurn(t *testing.T, ep *endpoint, prompt string) string {
@@ -276,7 +323,7 @@ func TestATurnReachesTheWireAndTheToolComesBack(t *testing.T) {
 // tells the model nothing about what belongs there, and a model that guesses
 // wrong is refused before the tool body runs.
 func TestTheDeclarationsReachTheWire(t *testing.T) {
-	for _, tl := range toolSet(t) {
+	for _, tl := range everyTool(t) {
 		name := tl.Name()
 		schema := declarationSchema(t, tl)
 		if kind, _ := schema["type"].(string); kind != "object" {
@@ -336,13 +383,14 @@ var requiredArgs = map[string][]string{
 	"todo_read":   {},
 	"ask_user":    {"options", "question"},
 	"sub_agent":   {"task"},
+	"switch_mode": {"mode"},
 }
 
 // TestTheRequiredArgumentsAreTheOnesThatWereDecided pins the table above
 // against the schemas that go on the wire.
 func TestTheRequiredArgumentsAreTheOnesThatWereDecided(t *testing.T) {
 	seen := map[string]bool{}
-	for _, tl := range toolSet(t) {
+	for _, tl := range everyTool(t) {
 		name := tl.Name()
 		seen[name] = true
 		schema := declarationSchema(t, tl)
@@ -429,6 +477,67 @@ func TestTheQuestionToolAcceptsThePayloadAModelNaturallySends(t *testing.T) {
 	result := toolMessage(t, ep.request(t, 1))
 	if !strings.Contains(strings.ToLower(result), "skip") {
 		t.Errorf("the tool result on the wire is %q, want it to say nobody answered", result)
+	}
+}
+
+// TestTheToolsReachTheWireDescribed checks the request the endpoint actually
+// received.
+//
+// The declaration is what dmcode packs; the wire is what the model reads, and
+// the two are not the same object — the chat format has its own shape, and
+// the conversion between them is code too. A description that did not survive
+// that conversion would be a description the model never saw, and the test
+// above, which reads the declaration, would not know.
+func TestTheToolsReachTheWireDescribed(t *testing.T) {
+	if err := dmtools.SetRoot(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	ep := newEndpoint(t, prose("done"))
+	runTurn(t, ep, "hello")
+
+	body := ep.request(t, 0)
+	tools, _ := body["tools"].([]any)
+	if len(tools) == 0 {
+		t.Fatal("the request carries no tools, so the model was told nothing about what it can reach")
+	}
+	seen := map[string]bool{}
+	for _, raw := range tools {
+		tl, _ := raw.(map[string]any)
+		if tl == nil {
+			continue
+		}
+		fn, _ := tl["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		seen[name] = true
+		if desc, _ := fn["description"].(string); strings.TrimSpace(desc) == "" {
+			t.Errorf("%s reached the wire with no description", name)
+		}
+		params, _ := fn["parameters"].(map[string]any)
+		if params == nil {
+			t.Errorf("%s reached the wire with no argument schema", name)
+			continue
+		}
+		props, _ := params["properties"].(map[string]any)
+		for field, praw := range props {
+			p, _ := praw.(map[string]any)
+			if p == nil {
+				t.Errorf("%s: argument %q reached the wire with no schema", name, field)
+				continue
+			}
+			if desc, _ := p["description"].(string); strings.TrimSpace(desc) == "" {
+				t.Errorf("%s: argument %q reached the wire with no description", name, field)
+			}
+		}
+	}
+	for _, want := range []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "glob",
+		"run_command", "move_file", "delete_file", "web_search", "fetch_url", "project_map",
+		"todo_write", "todo_set", "todo_read", "ask_user", "sub_agent"} {
+		if !seen[want] {
+			t.Errorf("the request carries no %q", want)
+		}
 	}
 }
 
