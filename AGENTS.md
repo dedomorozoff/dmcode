@@ -703,6 +703,20 @@ If you are asked to fix or improve `dmcode`, be aware of these known architectur
   the shape regresses. Note that the rejection came from the *endpoint* validating
   the schema dmcode put on the wire, not from the ADK's own argument conversion,
   which is lenient — so a lenient Go unmarshaller would not have helped.
+- **The wire is where a tool's shape is decided, and there is a harness for it.**
+  `internal/agent/e2e_test.go` drives whole turns against an `httptest` server
+  that speaks the OpenAI chat protocol: the real chat client, the real agent, the
+  real tool set, the real session store. It is where a tool's arguments are
+  read the way an endpoint reads them, and it pins three things — every
+  argument is described, no argument is a nested object, and the *required* set
+  of every tool is the one in a table somebody decided on. That table is the
+  guard against the class of bug above: a field that becomes required is a
+  contract with the endpoint, and it arrives by accident, one lost `omitempty`
+  at a time.
+  Two of its turns replay the payloads that actually broke — a list of plan
+  steps with nothing but their text, and a list of options as plain strings.
+  **When you add or change a tool's arguments, this is the file that will tell
+  you the model cannot use them.**
 - **Workspace boundary is lexical at resolve time:** `tools.resolve` must decide before the file is touched, so a path that does not exist yet cannot be dereferenced. Tools that actually open something close the gap themselves: `read_file`, `edit_file` and `write_file` re-check the path after following symlinks (`withinRootAfterLinks`), `write_file` checks the deepest existing ancestor of the target directory, and `grep` skips entries that are symlinks rather than reading through them. See `internal/tools/tools.go` and `internal/tools/symlink_test.go`.
 - **Cancellation reaches the context, not the process:** `startTurn` runs the turn
   on a cancellable context and `Esc`/`Ctrl+C` cancel it, but a tool that ignores
