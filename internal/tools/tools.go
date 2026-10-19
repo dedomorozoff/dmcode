@@ -1583,17 +1583,23 @@ func MakeTools() ([]tool.Tool, error) {
 // web_search and fetch_url are the two instruments that reach past the
 // workspace boundary on purpose — a search engine, a page it found — and both
 // only ever read, so they belong in a planning turn too.
+//
+// command_output is here for the same reason: it reads what a command printed
+// and starts nothing. A build that was started in act mode can still be
+// asked about in plan mode, which is the moment the plan is written from
+// what the build said.
 var readOnlyNames = map[string]bool{
-	"read_file":   true,
-	"list_dir":    true,
-	"project_map": true,
-	"grep":        true,
-	"glob":        true,
-	"web_search":  true,
-	"fetch_url":   true,
-	"todo_write":  true,
-	"todo_set":    true,
-	"todo_read":   true,
+	"read_file":      true,
+	"list_dir":       true,
+	"project_map":    true,
+	"grep":           true,
+	"glob":           true,
+	"web_search":     true,
+	"fetch_url":      true,
+	"todo_write":     true,
+	"todo_set":       true,
+	"todo_read":      true,
+	"command_output": true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the
