@@ -214,7 +214,13 @@ func spawnGGUF() (*Launch, error) {
 	// DMCODE_LLAMA_ARGS carries llama-server's own flags (context size, GPU
 	// layers, …) verbatim, split on spaces — the same convention run_command
 	// tools use for simple invocations.
-	args = append(args, strings.Fields(os.Getenv("DMCODE_LLAMA_ARGS"))...)
+	//
+	// An absent context size is supplied rather than left to llama-server's
+	// own default: 4096 is smaller than one agent turn reaches, and the
+	// endpoint answers the overflow with a bare 400 that reads as dmcode being
+	// broken. An explicit -c/--ctx-size in the env args is the user's figure
+	// and is never overridden.
+	args = append(args, ggufArgs(os.Getenv("DMCODE_LLAMA_ARGS"))...)
 
 	logPath := ggufLogPath()
 	var logFile io.WriteCloser
@@ -300,6 +306,79 @@ func ggufProvider(base, model string, context int) config.Provider {
 		API:     config.APIChat,
 		Label:   i18n.T("llama.cpp GGUF"),
 	}
+}
+
+// IsGGUF reports whether a provider is one this package launched around a
+// .gguf file. The label is produced here and nowhere else, so the comparison
+// is how the UI learns that the provider a turn failed against has a
+// llama-server behind it that could be restarted with a larger context.
+func IsGGUF(p config.Provider) bool {
+	return p.Label == i18n.T("llama.cpp GGUF")
+}
+
+// DefaultContext is the context window llama-server is started with when
+// DMCODE_LLAMA_ARGS does not name one. It is a working floor for an agent
+// conversation — a turn with tool results reaches well past llama-server's
+// own 4096 — while staying modest enough to load beside a model on ordinary
+// hardware. The figure the server actually started with travels back through
+// /v1/models regardless, so the meter and compaction never guess from this.
+const DefaultContext = 16384
+
+// ggufArgs renders the DMCODE_LLAMA_ARGS half of llama-server's command line,
+// adding the default context window when the user's own args do not name one.
+func ggufArgs(extra string) []string {
+	fields := strings.Fields(extra)
+	if !hasContextFlag(fields) {
+		fields = append(fields, "-c", strconv.Itoa(DefaultContext))
+	}
+	return fields
+}
+
+// hasContextFlag reports whether the args already say how large the context
+// window should be. The user's own -c, in any spelling, is never overridden.
+func hasContextFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-c" || a == "--ctx-size" || contextSizedFlag(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// contextSizedFlag matches the one-token spellings of a context size: -c8192,
+// -c=8192, --ctx-size=8192. The third character decides — a digit or a sign
+// that a value rides along in the same token, while any other flag that
+// happens to start with "-c" passes through untouched.
+func contextSizedFlag(a string) bool {
+	if strings.HasPrefix(a, "--ctx-size=") {
+		return true
+	}
+	if !strings.HasPrefix(a, "-c") || len(a) < 3 {
+		return false
+	}
+	return a[2] == '=' || (a[2] >= '0' && a[2] <= '9')
+}
+
+// SetContextSize returns llama args with the context size forced to n,
+// replacing any size the string already named and leaving every unrelated
+// flag standing. It is how a restart with a larger window composes with
+// whatever else the user keeps in DMCODE_LLAMA_ARGS.
+func SetContextSize(args string, n int) string {
+	fields := strings.Fields(args)
+	out := make([]string, 0, len(fields)+2)
+	// -c/--ctx-size with the size in the following token: the token is
+	// dropped with the flag, so the old 4096 is gone entirely.
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "-c" || fields[i] == "--ctx-size" {
+			i++
+			continue
+		}
+		if contextSizedFlag(fields[i]) {
+			continue
+		}
+		out = append(out, fields[i])
+	}
+	return strings.Join(append(out, "-c", strconv.Itoa(n)), " ")
 }
 
 func ggufBaseURL(port int) string {

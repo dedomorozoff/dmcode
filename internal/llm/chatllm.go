@@ -692,11 +692,16 @@ func httpError(op string, resp *http.Response) error {
 		if json.Unmarshal(snippet, &e) == nil && e.Error != nil && e.Error.Message != "" {
 			msg = e.Error.Message
 		}
-		return &providerError{
+		base := &providerError{
 			err:    fmt.Errorf("%s: %s: %s", op, resp.Status, truncate(msg, 200)),
 			status: resp.StatusCode,
 			reason: failHTTP,
 		}
+		// A body that says the request outgrew the context window is typed
+		// apart here, while the body is in hand: the diagnosis is in what the
+		// server said, not in the status, and the restart a local model can
+		// offer is only reachable through the type.
+		return describeAsContextExceeded(base, msg)
 	}
 	return &providerError{
 		err:    fmt.Errorf("%s: %s", op, resp.Status),

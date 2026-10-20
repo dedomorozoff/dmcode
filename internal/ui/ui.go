@@ -500,6 +500,9 @@ type uiModel struct {
 	// dirPick is the /cd folder browser, open while the user navigates to the
 	// folder the next turn should work in.
 	dirPick dirPickState
+	// ctxPick is the restart offer, open when a turn outgrew a local model's
+	// context window and a llama-server restart with a larger one is possible.
+	ctxPick ctxPickState
 	// help is the F1 reference: the keybindings and the slash commands in one
 	// scrollable box. Its content is static, so the state is only where the
 	// user is looking, not a filter or a draft.
@@ -1790,6 +1793,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.dirPickKey(msg)
 			return model, cmd
 		}
+		if m.ctxPick.open {
+			model, cmd := m.ctxPickKey(msg)
+			return model, cmd
+		}
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
 			return model, cmd
@@ -2419,6 +2426,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusText = i18n.T("error")
 				m.history = append(m.history, line{kindErr, "error: " + msg.err.Error()})
+				// A turn that did not fit a local model's context window is an
+				// action away from working, so the offer to act opens beside
+				// the error line: the restart dialog lives in m.ctxPick and
+				// takes the next keystrokes itself.
+				m.offerCtxRestart(msg.err)
 			}
 		} else {
 			m.statusText = i18n.T("ready")
@@ -6215,7 +6227,7 @@ func (m *uiModel) View() tea.View {
 func (m *uiModel) modalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
 		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
-		m.help.open
+		m.help.open || m.ctxPick.open
 }
 
 // chatOverlayUp reports whether anything is drawn over the transcript, so that
@@ -6248,6 +6260,8 @@ func (m *uiModel) buildFrame() string {
 			box = m.sessionsBox()
 		case m.dirPick.open:
 			box = m.dirPickBox()
+		case m.ctxPick.open:
+			box = m.ctxPickBox()
 		case m.ask.open:
 			box = m.askBox()
 		case m.help.open:
