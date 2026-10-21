@@ -35,7 +35,6 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
-	"github.com/dedomorozoff/dmcode/internal/tools"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -586,9 +585,9 @@ type uiModel struct {
 	// direct flip of m.ed — so the flip is deferred until the copy lands.
 	pendingEditor bool
 	// pendingJump is the place in a file the chat asked the editor to go to, by
-	// a click on a change row or by the jump key. It is applied by enterEditor,
-	// because OpenChangedTabs runs first and would otherwise focus a tab for the
-	// same file and leave the cursor somewhere else in it.
+	// a click on a change row, a click on a changed-file row in the sidebar, or
+	// by the jump key. It is applied by enterEditor, in the workspace the mode
+	// flip has already landed in.
 	pendingJump *codeRef
 	// jumpFrom is how far the jump key's walk into the transcript has got: the
 	// row after the change it went to last, and -1 before it has gone anywhere.
@@ -920,17 +919,21 @@ func (m *uiModel) openEditor() tea.Cmd {
 	return init
 }
 
-// enterEditor flips the (already existing) workspace into the editor mode:
-// the tabs for the files the agent changed open on top. The project tree and the
-// other panels stay as the user last left them — closed until asked for
-// with ctrl+b, F9 or the status-bar icons.
+// enterEditor flips the (already existing) workspace into the editor mode.
+// Nothing is opened on the way in: the files the agent changed are listed in the
+// chat's CHANGES section, and a tab appears only when the user clicks one — or
+// clicks a change row in the transcript, which is the jump below. Opening every
+// changed file on entry made a session that touched twenty files arrive at
+// twenty tabs, none of which was the one the user asked for.
 //
-// A jump the chat asked for is applied here, at the end, and not where it was
-// asked for: OpenChangedTabs above focuses a tab per changed file, so a cursor
-// set before it would be replaced by whichever of those files came last.
+// The project tree and the other panels stay as the user last left them —
+// closed until asked for with ctrl+b, F9 or the status-bar icons.
+//
+// A jump the chat asked for is applied here rather than where it was asked for:
+// openEditor may only be *asked* to flip the mode, and the place has to land in
+// a workspace that is already in editor mode.
 func (m *uiModel) enterEditor() {
 	m.ed.Chat = false
-	m.ed.OpenChangedTabs()
 	if m.pendingJump != nil {
 		j := *m.pendingJump
 		m.pendingJump = nil
@@ -1017,8 +1020,7 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 			_, cmd := m.Update(tea.PasteMsg{Content: text})
 			return cmd
 		},
-		View:         m.chatFrame,
-		ChangedFiles: func() []string { return tools.ChangedFiles() },
+		View: m.chatFrame,
 	}
 	m.ed = &ed
 	return ed.Init()
@@ -1027,11 +1029,26 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 // chatClick starts a transcript selection drag with the button that went down.
 // Right and middle are left to the terminal so a user who wants the terminal's
 // own paste menu keeps it.
+//
+// A changed-file row in the sidebar is opened on the press, not on the release.
+// That row is a link, not text: there is nothing to select in it, and waiting
+// for the release made the click depend on a message some terminals do not
+// deliver reliably and on the pointer not drifting a cell between press and
+// release — a drift turned the click into a one-character selection, so the row
+// looked dead. The transcript's change rows stay on the release path below,
+// where a drag across them is a selection and must not jump.
 func (m *uiModel) chatClick(msg tea.MouseClickMsg) tea.Cmd {
 	if !m.mouseEnabled {
 		return nil
 	}
 	if tea.Mouse(msg).Button == tea.MouseLeft {
+		if !m.chatOverlayUp() {
+			if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
+				m.selDown = false
+				m.jumpFrom = -1
+				return m.jumpToRef(ref)
+			}
+		}
 		m.selAnchorX, m.selAnchorY = msg.X, msg.Y
 		m.selFocusX, m.selFocusY = msg.X, msg.Y
 		m.selDown, m.selMoved = true, false
@@ -1058,8 +1075,8 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	if !m.selMoved {
 		// A click, not a drag: nothing is copied, and a click on a change row
 		// opens the file at the line that row stands for. Anything else — a
-		// reply, the input, the sidebar — is still nothing, which is the rule
-		// that keeps a click from becoming a copy of one character.
+		// reply, the input — is still nothing, which is the rule that keeps a
+		// click from becoming a copy of one character.
 		m.selMoved = false
 		if m.chatOverlayUp() {
 			// A box owns those pixels. The frame on screen is the box, so the
@@ -1069,10 +1086,12 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 			return nil
 		}
 		m.syncVP()
-		// The sidebar's own rows come first in the column test, because a click to
-		// the right of the chat panel is a click on the panel and not a click that
-		// missed: the changed-file list is there, and the transcript's index would
-		// refuse the column as out of range and silently drop it.
+		// The sidebar's rows are normally opened by chatClick on the press; this
+		// is the fallback for a release whose press started with a box up and
+		// saw it close before the button came up. The column test comes first
+		// because a click to the right of the chat panel is a click on the panel
+		// and not a click that missed: the transcript's index would refuse the
+		// column as out of range and silently drop it.
 		if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
 			m.jumpFrom = -1
 			return m.jumpToRef(ref)

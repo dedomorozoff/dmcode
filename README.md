@@ -544,7 +544,9 @@ transcript would be a jump.
 
 `ctrl+e` opens a code editor in the same workspace, and pressing it again puts
 the chat back (`ctrl+q` does the same). The project tree waits for `ctrl+b`
-rather than opening itself.
+rather than opening itself, and the files the agent changed are not opened on
+the way in: a click on a change row in the transcript, or on a file in the
+sidebar's `CHANGES` list, opens that one file.
 It is a real editor, not a viewer: syntax highlighting, a project tree, a git
 panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
 bookmarks, multi-cursor editing (`alt+d`, `alt+click`), LSP completion and

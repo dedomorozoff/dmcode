@@ -1,7 +1,10 @@
 package ui
 
 import (
+	"image"
 	"testing"
+
+	"github.com/dedomorozoff/dmcode/internal/clipimg"
 )
 
 // Pasting text into the prompt is the one paste that has to work in every
@@ -39,9 +42,14 @@ func TestPasteIntoThePromptReachesTheTextinput(t *testing.T) {
 func TestCtrlVPastesTextWithTheWorkspaceBuilt(t *testing.T) {
 	m := pastedModel(t)
 
-	old := readClipboardText
+	// Both clipboard readers are stubbed, not just the text one. ctrl+v asks the
+	// picture first, and the real clipboard is a shared resource: a developer
+	// with a screenshot copied would have this test paste an image and fail,
+	// while the same code passed for everyone whose clipboard held text.
+	oldImg, oldText := readClipboardImage, readClipboardText
+	readClipboardImage = func() (image.Image, error) { return nil, clipimg.ErrNoImage }
 	readClipboardText = func() (string, error) { return "copied line", nil }
-	t.Cleanup(func() { readClipboardText = old })
+	t.Cleanup(func() { readClipboardImage, readClipboardText = oldImg, oldText })
 
 	if msg := pressCtrlV(t, m); msg != nil {
 		m.Update(msg)
