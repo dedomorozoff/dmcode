@@ -2538,6 +2538,18 @@ func (m *uiModel) headerVisible() bool {
 // the constant because the header is conditional: hiding it must give its rows
 // to the transcript, not leave a gap.
 func (m *uiModel) chromeHeight() int {
+	// A question takes the bottom of the frame instead of floating over the
+	// conversation: the rows it needs come out of the transcript, the same way
+	// the pending-image strip's do, so the reply the question is about stays
+	// readable above it. It replaces the status bar and the input box — keys go
+	// to the question, and an input that cannot take them is a lie.
+	if m.ask.open {
+		h := m.askHeight() + panelBorder
+		if m.headerVisible() {
+			h += headerHeight
+		}
+		return h
+	}
 	h := chromeHeight
 	if m.headerVisible() {
 		h += headerHeight
@@ -5814,13 +5826,21 @@ type listView struct {
 // floatingPanel frames a palette-style box with the header every overlay
 // shares: the title, the filter line and a blank spacer.
 func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *listView) string {
-	inner := m.floatingWidth() - panelBorder
+	return m.floatingPanelAt(m.floatingWidth(), m.height, title, query, entries, lv)
+}
+
+// floatingPanelAt is floatingPanel at a width and a height the caller chooses.
+// The question uses it to sit under the transcript at the terminal's full width:
+// a box floating over the conversation hid the reply the question was about,
+// which is the one thing a user needs to read before answering.
+func (m *uiModel) floatingPanelAt(width, maxHeight int, title, query string, entries [][]string, lv *listView) string {
+	inner := max(width-panelBorder, 8)
 	head := []string{
 		styleHeader.Render(" "+title+" ") + styleHint.Render(i18n.T("esc — close")),
 		styleHint.Render(truncate(" › "+query, inner)),
 		"",
 	}
-	return m.floatingList(head, entries, lv)
+	return m.panelBox(width, maxHeight, head, entries, lv)
 }
 
 // floatingList is floatingPanel with a header the caller wrote. A list with more
@@ -5832,19 +5852,26 @@ func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *lis
 // model id can take two rows and a count taken before wrapping is not the count
 // that reaches the screen.
 func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) string {
+	return m.panelBox(m.floatingWidth(), m.height, head, entries, lv)
+}
+
+// panelBox frames a list at a chosen width and height. floatingList keeps the
+// full-screen case; the question uses it to fill the terminal's width while
+// taking only the rows the transcript can spare.
+func (m *uiModel) panelBox(width, maxHeight int, head []string, entries [][]string, lv *listView) string {
 	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 
 	// The head is measured rather than counted. The title shares its row with
 	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
 	// counted as three then leaves the panel one row taller than the screen it
 	// has to fit inside, and the bottom border falls off the bottom.
-	headRows := lipgloss.Height(stylePanel.Width(m.floatingWidth()).Render(strings.Join(head, "\n"))) - panelBorder
+	headRows := lipgloss.Height(stylePanel.Width(width).Render(strings.Join(head, "\n"))) - panelBorder
 
 	// Two rows are held back, one for each way a list can still be scrolled, so
 	// revealing a marker can never push the bottom border off the screen. A row
 	// the finished window does not need is given back below, because a list of
 	// six rows should not lose one of them to a marker it never draws.
-	avail := max(m.height-panelBorder-headRows, 1)
+	avail := max(maxHeight-panelBorder-headRows, 1)
 	room := max(avail-2, 1)
 	start, end := panelWindow(entries, lv.sel, lv.top, room)
 	if (start == 0 || end >= len(entries)) && room < avail {
@@ -5878,7 +5905,7 @@ func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) 
 		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(len(entries)-end)))
 	}
 
-	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
+	return stylePanel.Width(width).Render(strings.Join(rows, "\n"))
 }
 
 // panelWindow picks the entries a body of `room` rows can show.
@@ -6244,8 +6271,16 @@ func (m *uiModel) View() tea.View {
 // any of them open the frame is the box and not the chat, so every row the hit
 // test could name is a row that is not on screen.
 func (m *uiModel) modalUp() bool {
+	return m.otherModalUp() || m.ask.open
+}
+
+// otherModalUp reports a box that owns the whole screen. The question is not
+// one of them: it is docked under the transcript, so the chat stays on screen
+// and keeps its rows. It still owns the keyboard (modalUp) — an answer is
+// required before the turn can carry on — but it does not own the frame.
+func (m *uiModel) otherModalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
-		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
+		m.proxy.open || m.sessionsList.open || m.dirPick.open ||
 		m.help.open || m.ctxPick.open
 }
 
@@ -6264,7 +6299,7 @@ func (m *uiModel) chatOverlayUp() bool {
 // the whole window when the editor has never been opened, the workspace main
 // area in chat mode (chatFrame sets the sizes to the region's then).
 func (m *uiModel) buildFrame() string {
-	if m.modalUp() {
+	if m.otherModalUp() {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
@@ -6281,8 +6316,6 @@ func (m *uiModel) buildFrame() string {
 			box = m.dirPickBox()
 		case m.ctxPick.open:
 			box = m.ctxPickBox()
-		case m.ask.open:
-			box = m.askBox()
 		case m.help.open:
 			box = m.helpBox()
 		}
@@ -6310,18 +6343,32 @@ func (m *uiModel) buildFrame() string {
 	if m.headerVisible() {
 		parts = append(parts, m.headerView())
 	}
-	parts = append(parts, middle, m.statusBarView())
-	// The strip goes between the status bar and the input box rather than into
-	// either: it is about what the *next* message will carry, which is the input's
-	// business, and putting it above the bar would read as part of the transcript.
-	if strip := m.pendingStrip(); strip != "" {
-		parts = append(parts, strip)
+	parts = append(parts, middle)
+	if m.ask.open {
+		// The question is the bottom of the frame, not a box over it. It takes
+		// the status bar's and the input's place: the transcript above keeps
+		// every row it had apart from the ones the question itself needs.
+		parts = append(parts, m.askBox())
+	} else {
+		parts = append(parts, m.statusBarView())
+		// The strip goes between the status bar and the input box rather than
+		// into either: it is about what the *next* message will carry, which is
+		// the input's business, and putting it above the bar would read as part
+		// of the transcript.
+		if strip := m.pendingStrip(); strip != "" {
+			parts = append(parts, strip)
+		}
+		parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 	}
-	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	if rows := m.suggestHeight(); rows > 0 {
-		frame = overlaySuggest(frame, m, rows)
+	// The command list belongs to the prompt, and the prompt is not on screen
+	// while a question is up: painting it there would draw a picker over the
+	// question's own rows.
+	if !m.ask.open {
+		if rows := m.suggestHeight(); rows > 0 {
+			frame = overlaySuggest(frame, m, rows)
+		}
 	}
 	// The highlight is painted before the frame is cached, and the cache is what
 	// the release handler reads: so what is copied is the text as drawn, styling

@@ -765,6 +765,8 @@ JSON error.
   options and marks the one it recommends; you pick with `↑` `↓` and `enter`,
   tick several with `space` when it is a multi question, or type your own with
   `c`. `esc` skips the question and the agent carries on with its best guess.
+  The question docks under the conversation rather than covering it, so the
+  reply it is about stays readable while you answer.
   The wait is **off by default** — set `DMCODE_ASK_TIMEOUT=60` to have the
   recommended option chosen for you after a minute, with a countdown on screen.
 - `sub_agent` delegates one research task to a separate agent with its own

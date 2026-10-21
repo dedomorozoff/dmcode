@@ -368,6 +368,13 @@ rather than showing a badge it cannot honour.
   hang the event loop instead of the turn. The same rule is why the `ask_user`
   tool returns every outcome — including "nobody answered" — as *text*, never as
   a tool error the model would sensibly retry.
+- The question is **docked under the transcript**, not a centred box over it:
+  the reply it is about has to stay readable while the user answers. Its height
+  is measured from the rendered box rather than counted from the options (a note
+  wraps), and `chromeHeight` subtracts it from the viewport, so the frame keeps
+  exactly the terminal's rows. `askMaxHeight` leaves at least one transcript row.
+  It still owns the keyboard through `modalUp`, but `otherModalUp` is what
+  decides whether the frame is replaced — the question does not replace it.
 - The overlay's timer is off by default (`DMCODE_ASK_TIMEOUT=0`). With it off,
   no `tea.Tick` is scheduled at all: waking the event loop once a second for a
   question with no deadline is work for nothing.

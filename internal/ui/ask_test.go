@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/ask"
 )
@@ -283,5 +284,82 @@ func TestQuestionRendersItsOptionsAndNotes(t *testing.T) {
 		if !strings.Contains(box, want) {
 			t.Errorf("the overlay is missing %q", want)
 		}
+	}
+}
+
+// TestTheQuestionDoesNotCoverTheTranscript: the question is about the reply the
+// user is looking at, so that reply has to stay on screen while it is asked.
+// This is the difference between a docked panel and the centred overlay it used
+// to be, and it is checked on the frame the user actually sees.
+func TestTheQuestionDoesNotCoverTheTranscript(t *testing.T) {
+	m := newSessionModel(t)
+	m.width, m.height = 100, 40
+	m.layout()
+	m.history = []line{{kindAgent, "the reply the question is about"}}
+	m.followVP()
+	openQuestion(t, m, askTwoOptions(), 0)
+
+	frame := ansi.Strip(m.View().Content)
+	if !strings.Contains(frame, "the reply the question is about") {
+		t.Fatal("the question covered the reply it was about")
+	}
+	if !strings.Contains(frame, "что делаем?") {
+		t.Fatal("the question is not on screen")
+	}
+	if got := len(strings.Split(frame, "\n")); got != m.height {
+		t.Errorf("frame is %d rows, want %d", got, m.height)
+	}
+	reply, question := strings.Index(frame, "the reply the question is about"), strings.Index(frame, "что делаем?")
+	if reply > question {
+		t.Errorf("the question is above the reply (reply at %d, question at %d)", reply, question)
+	}
+}
+
+// TestTheQuestionTakesItsRowsFromTheTranscript: docking must not push the frame
+// past the terminal, and closing the question must give the rows back. A panel
+// appended without resizing the viewport would make the frame taller than the
+// screen; one that never gave the rows back would leave the chat short.
+func TestTheQuestionTakesItsRowsFromTheTranscript(t *testing.T) {
+	m := newSessionModel(t)
+	m.width, m.height = 100, 40
+	m.layout()
+	before := m.vp.Height()
+
+	openQuestion(t, m, askTwoOptions(), 0)
+	during := m.vp.Height()
+	if during >= before {
+		t.Errorf("viewport is %d rows while asking, want fewer than %d", during, before)
+	}
+	if got := len(strings.Split(ansi.Strip(m.View().Content), "\n")); got != m.height {
+		t.Errorf("frame with the question is %d rows, want %d", got, m.height)
+	}
+
+	m.askKey(pressKey("enter"))
+	if after := m.vp.Height(); after != before {
+		t.Errorf("viewport is %d rows after the answer, want %d back", after, before)
+	}
+}
+
+// TestALongCustomAnswerDoesNotGrowTheFrame: the custom row wraps as it is typed,
+// so the question gets taller after it was laid out. The viewport has to be
+// re-measured, or the bottom border is pushed off the terminal one wrapped row
+// at a time.
+func TestALongCustomAnswerDoesNotGrowTheFrame(t *testing.T) {
+	m := newSessionModel(t)
+	m.width, m.height = 60, 24
+	m.layout()
+	openQuestion(t, m, askTwoOptions(), 0)
+
+	m.askKey(pressKey("c"))
+	for i := 0; i < 200; i++ {
+		m.askKey(typed('ж'))
+	}
+
+	frame := ansi.Strip(m.View().Content)
+	if got := len(strings.Split(frame, "\n")); got != m.height {
+		t.Errorf("frame is %d rows, want %d", got, m.height)
+	}
+	if !strings.Contains(frame, "ж") {
+		t.Error("the custom answer left the screen")
 	}
 }
