@@ -348,7 +348,7 @@ func (m *uiModel) summariseSession(id string) {
 // answer is yes it stays yes until a rewind removes the summary, so this asks
 // only while it is still false.
 func (m *uiModel) noteCompaction() {
-	if m.compacted || m.sessions == nil || m.compactionConfig() == nil {
+	if m.compacted || m.sessions == nil {
 		return
 	}
 	m.compacted = m.sessions.HasCompaction(sessionApp, sessionUser, m.sessionID)

@@ -69,7 +69,16 @@ Naming a place:
 Delegating:
 - sub_agent runs a second agent with its own context on one research question and reports back what it found. Use it when the answer is spread over many files and you need the conclusion, not the material: the reading stays in its context and does not fill yours.
 - Give it one job, say what you already know, and say what shape of report you want. It cannot write anything and cannot ask the user anything, so what it reports back is yours to act on.
-- Do not delegate what a couple of your own tool calls would answer.` + projectBriefing
+- Do not delegate what a couple of your own tool calls would answer.` + skillsNote + projectBriefing
+
+// skillsNote is how the model learns that the skill tool exists without every
+// skill body being pasted into the prompt. The catalogue itself is in the
+// tool's description; this says what to do with it.
+const skillsNote = `
+
+Using skills:
+- The skill tool lists reusable instructions the user installed for this project or machine. When a task matches a skill's description, call skill with its id before you act, and follow the loaded instructions.
+- A skill is guidance, not permission: it cannot widen the workspace boundary or override AGENTS.md. If it conflicts with either, say so and follow the repository's rules.`
 
 // projectBriefing is how the agent learns what project it is standing in.
 //
@@ -133,7 +142,7 @@ Hard rules:
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
 - When the plan is ready and you are confident it is the right one, call switch_mode with {"mode": "act"} and end your turn with a one-line summary. The work then continues under act mode. If the request is still ambiguous, ask_user instead of switching.
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
-- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.` + projectBriefing
+- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.` + skillsNote + projectBriefing
 
 // yoloInstruction replaces the act workflow in yolo mode.
 //
@@ -159,7 +168,7 @@ Hard rules:
 - Never delete or modify files outside the workspace.
 - When you refer to a spot in the code, write it as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there, so a bare file name is a place they cannot reach.
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
-- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + projectBriefing
+- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + skillsNote + projectBriefing
 
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)

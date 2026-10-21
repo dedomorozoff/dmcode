@@ -14,6 +14,8 @@ var catalog = map[Lang]map[string]string{
 		"toggle the sidebar (ctrl+b)":                        "боковая панель (ctrl+b)",
 		"start a new session":                                "новая сессия",
 		"clear the screen":                                   "очистить экран",
+		"summarize older messages now":                       "сжать старые сообщения сейчас",
+		"list installed skills":                              "список установленных навыков",
 		"recent prompts (up/down to recall)":                 "последние промпты (↑/↓ — вызвать)",
 		"show the hotkeys":                                   "подсказки",
 		"list the available tools":                           "список инструментов",
@@ -45,6 +47,14 @@ var catalog = map[Lang]map[string]string{
 		"waiting for a task":                "ожидание задачи",
 		"turn stopped by the user (Esc)":    "ход прерван пользователем (Esc)",
 		"turn stopped by the user (Ctrl+C)": "ход прерван пользователем (Ctrl+C)",
+		"compacting the conversation…":      "сжатие разговора…",
+		"compacted %d older events into a summary; the newest %d are kept": "сжато %d старых событий в сводку; последние %d сохранены",
+		"nothing to compact yet":     "пока нечего сжимать",
+		"compaction stopped":         "сжатие прервано",
+		"compaction error: ":         "ошибка сжатия: ",
+		"no conversation to compact": "нечего сжимать",
+		"no model is configured":     "модель не настроена",
+		"no skills installed":        "навыки не установлены",
 
 		// Timing, tokens and the context meter.
 		"time:":                               "время:",

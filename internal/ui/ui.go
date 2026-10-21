@@ -24,6 +24,7 @@ import (
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/ask"
+	"github.com/dedomorozoff/dmcode/internal/compact"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
@@ -282,6 +283,14 @@ type turnDoneMsg struct {
 // as itself rather than as a spinner that looks hung.
 type retryMsg struct{ ev llm.RetryEvent }
 
+// compactDoneMsg is the result of a manual /compact. It is separate from
+// turnDoneMsg because compaction is not a turn: it produces no assistant
+// message, no tool calls and no timing worth adding to the turn totals.
+type compactDoneMsg struct {
+	res compact.Result
+	err error
+}
+
 type modelsListMsg struct {
 	Models []string
 	err    error
@@ -403,9 +412,10 @@ type uiModel struct {
 	// for the sidebar's MCP section. It is kept beside mcpToolsets rather than
 	// derived from it because a toolset's tools are only knowable by opening it:
 	// asking again here would connect to every server on the first frame.
-	mcpStates []mcp.ServerState
-	prog      *tea.Program
-	toolNames []string
+	mcpStates  []mcp.ServerState
+	prog       *tea.Program
+	toolNames  []string
+	skillLines []string
 	// gitState is the repository the session is working in, as of the last
 	// refresh: which branch, and how much of the tree is dirty. It is a value
 	// rather than a *vcs.Repo because the panel only ever draws the summary, and
@@ -1276,6 +1286,9 @@ func (m *uiModel) commands() []command {
 			m.rewind()
 			return nil
 		}},
+		{name: "compact", desc: i18n.T("summarize older messages now"), run: func(m *uiModel) tea.Cmd {
+			return m.compactCmd()
+		}},
 		{name: "clear", desc: i18n.T("clear the screen (ctrl+l)"), run: func(m *uiModel) tea.Cmd {
 			m.clearScreen()
 			return nil
@@ -1297,7 +1310,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, fmt.Sprintf(i18n.T("click a change or a path:line in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /compact, /skills, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -1310,6 +1323,18 @@ func (m *uiModel) commands() []command {
 				m.history = append(m.history, line{kindSys, "· " + t})
 			}
 			m.historyDirty = true
+			return nil
+		}},
+		{name: "skills", desc: i18n.T("list installed skills"), run: func(m *uiModel) tea.Cmd {
+			if len(m.skillLines) == 0 {
+				m.history = append(m.history, line{kindSys, i18n.T("no skills installed")})
+			} else {
+				for _, s := range m.skillLines {
+					m.history = append(m.history, line{kindSys, "· " + s})
+				}
+			}
+			m.historyDirty = true
+			m.followVP()
 			return nil
 		}},
 		{name: "debug", desc: i18n.T("diagnostics for the transcript renderer"), run: func(m *uiModel) tea.Cmd {
@@ -2055,7 +2080,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+e — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /compact, /skills, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -2078,6 +2103,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/sidebar":
 				m.showSidebar = !m.showSidebar
 				m.layout()
+				m.followVP()
+				return m, nil
+			case "/compact":
+				return m, m.compactCmd()
+			case "/skills":
+				if len(m.skillLines) == 0 {
+					m.history = append(m.history, line{kindSys, i18n.T("no skills installed")})
+				} else {
+					for _, s := range m.skillLines {
+						m.history = append(m.history, line{kindSys, "· " + s})
+					}
+				}
+				m.historyDirty = true
 				m.followVP()
 				return m, nil
 			case "/models":
@@ -2495,6 +2533,27 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the worktree all session — and it is asked for rather than read inline
 		// because that walk is disk I/O on the frame path.
 		extra = tea.Batch(extra, m.gitStatusCmd())
+	case compactDoneMsg:
+		m.busy = false
+		m.cancelTurn = nil
+		switch {
+		case msg.err == nil:
+			m.noteCompaction()
+			m.statusText = i18n.T("ready")
+			m.history = append(m.history, line{kindSys, fmt.Sprintf(
+				i18n.T("compacted %d older events into a summary; the newest %d are kept"),
+				msg.res.Covered, msg.res.Retained)})
+		case errors.Is(msg.err, compact.ErrNothing):
+			m.statusText = i18n.T("ready")
+			m.history = append(m.history, line{kindSys, i18n.T("nothing to compact yet")})
+		case errors.Is(msg.err, context.Canceled):
+			m.statusText = i18n.T("stopped")
+			m.history = append(m.history, line{kindSys, i18n.T("compaction stopped")})
+		default:
+			m.statusText = i18n.T("error")
+			m.history = append(m.history, line{kindErr, i18n.T("compaction error: ") + msg.err.Error()})
+		}
+		m.historyDirty = true
 	case errMsg:
 		m.busy = false
 		m.statusText = i18n.T("error")
@@ -4780,6 +4839,49 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 	}
 }
 
+// compactCmd summarizes the older part of the conversation now, rather than
+// waiting for ADK's threshold. It runs on a goroutine because the summarizer
+// makes a model call; the event loop keeps its spinner and its Esc.
+//
+// The pool is copied before the goroutine starts for the same reason
+// switchModelCmd copies it: a provider swap on the loop must not race the
+// summary's model construction.
+func (m *uiModel) compactCmd() tea.Cmd {
+	if m.busy {
+		return nil
+	}
+	if m.svc == nil || m.sessionID == "" {
+		m.statusText = i18n.T("no conversation to compact")
+		return nil
+	}
+	pool := append([]config.Provider(nil), m.pool...)
+	if len(pool) == 0 && m.prov.BaseURL != "" {
+		pool = []config.Provider{m.prov}
+	}
+	if len(pool) == 0 {
+		m.statusText = i18n.T("no model is configured")
+		return nil
+	}
+	svc, sid := m.svc, m.sessionID
+	base := m.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 2*time.Minute)
+	m.cancelTurn = cancel
+	m.busy = true
+	m.statusText = i18n.T("compacting the conversation…")
+	return func() tea.Msg {
+		defer cancel()
+		model, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, nil, nil)
+		if err != nil {
+			return compactDoneMsg{err: err}
+		}
+		res, err := compact.Now(ctx, svc, sessionApp, sessionUser, sid, model, 8)
+		return compactDoneMsg{res: res, err: err}
+	}
+}
+
 // switchModelCmd rebuilds the agent on a different model of the current
 // provider. The pool travels with it: the user picked a model, not a single
 // endpoint, and silently dropping the reserves would leave a later 429 with
@@ -6468,7 +6570,7 @@ func (r Resume) sessionToOpen() string {
 	return r.ID
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames, skillLines []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -6476,6 +6578,7 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	// agent: the program is wired in afterwards, and a failover cannot happen
 	// before the first turn anyway.
 	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames, yoloTools)
+	m.skillLines = skillLines
 	m.pool = pool
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets

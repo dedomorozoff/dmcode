@@ -89,6 +89,24 @@ func SessionsDir() string {
 	return filepath.Join(home, ".dmcode", "sessions")
 }
 
+// RagDir is where the local retrieval index is kept, defaulting to
+// ~/.dmcode/rag. DMCODE_RAG_DIR overrides it for tests and for a user who wants
+// the index beside a project rather than in their home directory.
+//
+// The index is a cache, not history: losing it costs a rebuild, never a
+// conversation. An unresolvable home therefore falls back to the system
+// temporary directory rather than disabling RAG outright.
+func RagDir() string {
+	if p := os.Getenv("DMCODE_RAG_DIR"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "dmcode-rag")
+	}
+	return filepath.Join(home, ".dmcode", "rag")
+}
+
 // Version is the dmcode build version, stamped by main from the -ldflags
 // value and read by the sidebar's brand block. A plain "go build" leaves it
 // at "dev", which is the honest answer for a binary nobody tagged.

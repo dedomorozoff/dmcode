@@ -40,7 +40,7 @@ Method:
 3. Report what you found, what you expected to find and did not, and anything that contradicts the task as given.
 4. Stop when you can answer the task. A short report that answers it beats a long one that pads it.
 
-Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.` + projectBriefing
+Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.` + skillsNote + projectBriefing
 
 // SubAgentName is the tool name, for the caller keeping the read-only set in
 // step with the full one.

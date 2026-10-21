@@ -48,6 +48,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/llm"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
+	"github.com/dedomorozoff/dmcode/internal/skills"
 	"github.com/dedomorozoff/dmcode/internal/todo"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 )
@@ -170,6 +171,11 @@ func toolSet(t *testing.T) []tool.Tool {
 		t.Fatal(err)
 	}
 	tools = append(tools, askTool)
+	skillTool, err := skills.MakeTool(skills.Catalog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = append(tools, skillTool)
 	subTool, err := dmagent.SubAgentTool(nil, tools, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -197,6 +203,11 @@ func planToolSet(t *testing.T) []tool.Tool {
 		t.Fatal(err)
 	}
 	tools = append(tools, askTool)
+	skillTool, err := skills.MakeTool(skills.Catalog{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools = append(tools, skillTool)
 	subTool, err := dmagent.SubAgentTool(nil, tools, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -367,8 +378,12 @@ func TestTheDeclarationsReachTheWire(t *testing.T) {
 // endpoint will refuse, and it should be read as one.
 var requiredArgs = map[string][]string{
 	"read_file":   {"path"},
+	"read_files":  {"paths"},
 	"write_file":  {"path", "content"},
 	"edit_file":   {"path"},
+	"apply_patch": {"patch"},
+	"rag_search":  {"query"},
+	"skill":       {"id"},
 	"list_dir":    {},
 	"grep":        {"pattern"},
 	"glob":        {"pattern"},

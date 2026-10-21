@@ -1555,6 +1555,30 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	readFilesTool, err := makeReadFilesTool()
+	if err != nil {
+		return nil, err
+	}
+	applyPatchTool, err := makeApplyPatchTool()
+	if err != nil {
+		return nil, err
+	}
+	gitStatusTool, err := makeGitStatusTool()
+	if err != nil {
+		return nil, err
+	}
+	gitDiffTool, err := makeGitDiffTool()
+	if err != nil {
+		return nil, err
+	}
+	ragIndexTool, err := makeRAGIndexTool()
+	if err != nil {
+		return nil, err
+	}
+	ragSearchTool, err := makeRAGSearchTool()
+	if err != nil {
+		return nil, err
+	}
 	// The plan tools live in their own package but belong to the same set: the
 	// agent publishes a plan through them and the user reads it with /todo, so
 	// one without the other would show a user a plan the agent cannot keep.
@@ -1566,6 +1590,8 @@ func MakeTools() ([]tool.Tool, error) {
 		readFileTool, writeFileTool, editFileTool, listDirTool,
 		grepTool, globTool2, runCommandTool, commandOutputTool, moveFileTool, deleteFileTool,
 		webSearchTool, fetchURLTool, projectMapTool,
+		readFilesTool, applyPatchTool, gitStatusTool, gitDiffTool,
+		ragIndexTool, ragSearchTool,
 	}
 	return append(out, todoTools...), nil
 }
@@ -1590,12 +1616,17 @@ func MakeTools() ([]tool.Tool, error) {
 // what the build said.
 var readOnlyNames = map[string]bool{
 	"read_file":      true,
+	"read_files":     true,
 	"list_dir":       true,
 	"project_map":    true,
 	"grep":           true,
 	"glob":           true,
 	"web_search":     true,
 	"fetch_url":      true,
+	"git_status":     true,
+	"git_diff":       true,
+	"rag_index":      true,
+	"rag_search":     true,
 	"todo_write":     true,
 	"todo_set":       true,
 	"todo_read":      true,
