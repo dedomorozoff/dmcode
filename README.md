@@ -165,6 +165,14 @@ before the interface is drawn, because those are instant to check. The server's
 output goes to `~/.dmcode/llama-server.log`, and the process is taken down when
 dmCode exits — including when it exits during the load.
 
+Once the server answers, dmcode reads the context size llama-server was actually
+started with from `/v1/models` (llama.cpp reports it under `meta.n_ctx`). That is
+the figure the context meter uses and the point where older turns are summarized,
+so a long session on a local model does not simply hit the wall and stop. The
+sidebar says `compressed` once a summary has replaced older turns. If a single
+turn is larger than the whole window there is nothing to summarize yet, and the
+restart offer with a larger `-c` remains the answer.
+
 ## Tools
 
 The agent works on files and a shell, rather than just talking:

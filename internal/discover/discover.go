@@ -117,6 +117,15 @@ func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]servedModel, 
 			MaxModelLen      int    `json:"max_model_len"`
 			ContextLength    int    `json:"context_length"`
 			MaxContextLength int    `json:"max_context_length"`
+			// llama.cpp's /v1/models puts the context sizes under meta rather
+			// than at the top level: n_ctx is the slot context the server was
+			// actually started with, n_ctx_train is the model's training cap.
+			// Without this a GGUF provider reports no window, which switches
+			// compaction off exactly where the window is smallest.
+			Meta struct {
+				NCtx      int `json:"n_ctx"`
+				NCtxTrain int `json:"n_ctx_train"`
+			} `json:"meta"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -129,7 +138,15 @@ func fetchModels(BaseURL, APIKey string, timeout time.Duration) ([]servedModel, 
 		}
 		ctx := m.MaxModelLen
 		if ctx <= 0 {
+			// The slot context wins over the training context: it is the cap
+			// this server will enforce, which is what compaction must divide.
+			ctx = m.Meta.NCtx
+		}
+		if ctx <= 0 {
 			ctx = m.ContextLength
+		}
+		if ctx <= 0 {
+			ctx = m.Meta.NCtxTrain
 		}
 		if ctx <= 0 {
 			ctx = m.MaxContextLength

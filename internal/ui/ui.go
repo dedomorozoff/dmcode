@@ -622,9 +622,9 @@ type uiModel struct {
 	// guess, which is not one worth making, even though the meter can show one.
 	window      int
 	windowGuess bool
-	// exactWindow is the real context size, zero when the model is not one this
-	// build recognises. Compaction reads this rather than window: the meter may
-	// draw an assumed denominator, a compaction threshold may not.
+	// exactWindow is the real context size, zero when neither the endpoint nor
+	// the table states one. Compaction reads this rather than window: the meter
+	// may draw an assumed denominator, a compaction threshold may not.
 	exactWindow int
 	// compacted records that the context has been summarized at least once in
 	// this session, so the sidebar can say so. Compaction is invisible
@@ -2427,6 +2427,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
+		// Compaction happens inside the runner and writes its summary straight
+		// to the store, so the only moment the sidebar can learn about it is
+		// after the turn has finished.
+		m.noteCompaction()
 		// The timer is cleared before anything is printed from it, so the live
 		// counter stops where the turn stopped instead of continuing to run
 		// against the wall clock and reporting a turn that is already over.
@@ -4494,7 +4498,14 @@ func (m *uiModel) persistSetup(vars map[string]string) (string, error) {
 
 // rebuildRunnerFor points the session at p: a new agent on the same session
 // service, then the background tool-calling check the new provider deserves.
+//
+// The window is re-read here rather than left to the caller, because this is
+// the one place every provider swap goes through - a GGUF model finishing its
+// load and a /setup choice both land here. A runner built without the window
+// would have compaction switched off even after the endpoint named its cap,
+// which is exactly the case the context parsing exists for.
 func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
+	m.applyWindow(p)
 	ctx := context.Background()
 	a, berr := dmagent.BuildAgent(ctx, p, m.tools, m.mcpToolsets...)
 	if berr != nil {
@@ -4502,12 +4513,7 @@ func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
 		m.historyDirty = true
 		return nil
 	}
-	r, rerr := runner.New(runner.Config{
-		AppName:           "dmcode",
-		Agent:             a,
-		SessionService:    m.svc,
-		AutoCreateSession: true,
-	})
+	r, rerr := runner.New(m.runnerConfig(a))
 	if rerr != nil {
 		m.history = append(m.history, line{kindErr, "setup: " + rerr.Error()})
 		m.historyDirty = true
@@ -4831,14 +4837,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		// it started with: a runner rebuilt without them would silently stop
 		// compacting at exactly the moment the user switched away from a small
 		// model, where it mattered most.
-		comp := (&uiModel{exactWindow: exactWindow}).compactionConfig()
-		r, err := runner.New(runner.Config{
-			AppName:           "dmcode",
-			Agent:             a,
-			SessionService:    svc,
-			AutoCreateSession: true,
-			Compaction:        comp,
-		})
+		r, err := runner.New(runnerConfigFor(svc, a, exactWindow))
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -6605,13 +6604,30 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 		}
 		m.svc = m.sessions
 	}
-	return runner.New(runner.Config{
+	return runner.New(m.runnerConfig(a))
+}
+
+// runnerConfig is the one place an in-place runner's settings are assembled.
+// Startup, a mode switch, a provider swap and a GGUF model finishing its load
+// all come through it, because the settings have to agree with the window the
+// panel is showing. Compaction was once passed by the startup path alone, so a
+// model that arrived later was served by a runner that could not compact at
+// all. /model passes its own snapshot to runnerConfigFor because it runs on a
+// goroutine and must not read the model from off-loop.
+func (m *uiModel) runnerConfig(a adkagent.Agent) runner.Config {
+	return runnerConfigFor(m.svc, a, m.exactWindow)
+}
+
+// runnerConfigFor is the same settings from values a goroutine already owns,
+// rather than from the model it cannot safely read.
+func runnerConfigFor(svc session.Service, a adkagent.Agent, exactWindow int) runner.Config {
+	return runner.Config{
 		AppName:           "dmcode",
 		Agent:             a,
-		SessionService:    m.svc,
+		SessionService:    svc,
 		AutoCreateSession: true,
-		Compaction:        m.compactionConfig(),
-	})
+		Compaction:        compactionConfigFor(exactWindow),
+	}
 }
 
 // applyWindow re-reads the context size for a model and records whether it was
@@ -6651,21 +6667,27 @@ func (m *uiModel) applyWindow(p config.Provider) {
 // before them.
 //
 // The threshold is a fraction of the window rather than a fixed number,
-// because dmcode does not ask the endpoint how big its window is and a guess
-// that is right for a 200k model is catastrophic for an 8k one — it would
-// compact nothing and then fail with a length error. A model this build does
-// not recognise gets compaction switched off rather than given a guess: an
-// invented threshold could compact a conversation that was never near full.
+// because a threshold that is right for a 200k model is catastrophic for an 8k
+// one — it would compact nothing and then fail with a length error. A model
+// with no exact window, neither from the endpoint nor from the table, gets
+// compaction switched off rather than given a guess: an invented threshold
+// could compact a conversation that was never near full.
 func (m *uiModel) compactionConfig() *compaction.Config {
+	return compactionConfigFor(m.exactWindow)
+}
+
+// compactionConfigFor is the same decision from an exact window a goroutine
+// already carries, so a model switch and an in-place rebuild cannot disagree.
+func compactionConfigFor(exactWindow int) *compaction.Config {
 	// The exact size, never the display fallback: a threshold decides when the
 	// user's own conversation gets rewritten, and that is not a decision to
 	// make from an assumed number.
-	if m.exactWindow <= 0 {
+	if exactWindow <= 0 {
 		return nil
 	}
 	// 70% rather than 90%: the summary itself has to fit in what is left, and
 	// the turn that triggered compaction still has to fit its own answer.
-	threshold := m.exactWindow * 7 / 10
+	threshold := exactWindow * 7 / 10
 	if threshold < 1000 {
 		return nil
 	}

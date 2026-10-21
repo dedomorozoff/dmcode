@@ -64,6 +64,53 @@ func sendTurn(t *testing.T, m *uiModel, prompt string) {
 	m.savePrompt(prompt)
 }
 
+// A compaction summary is written straight to the store by ADK, so the UI has
+// to ask the store after a turn. The sidebar's "compressed" note is the only
+// thing that tells a user why the model forgot an older turn.
+func TestNoteCompactionFollowsTheStore(t *testing.T) {
+	m := newSessionModel(t)
+	// Compaction is only enabled when the window is known; without this the
+	// note would have nothing to look for.
+	m.applyWindow(config.Provider{Model: "gpt-4o"})
+	if m.compacted {
+		t.Fatal("a fresh session already claims to be compressed")
+	}
+	// A real turn, so there is a user event for the rewind below to cut at.
+	sendTurn(t, m, "a long question")
+
+	sess, err := m.sessions.Get(m.ctx, &session.GetRequest{
+		AppName: sessionApp, UserID: sessionUser, SessionID: m.sessionID,
+	})
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	summary := session.NewEvent(m.ctx, "inv")
+	summary.Author = "dmcode"
+	summary.Content = genai.NewContentFromText("summary of earlier turns", genai.RoleModel)
+	summary.Actions.Compaction = &session.EventCompaction{
+		CompactedContent: genai.NewContentFromText("summary of earlier turns", genai.RoleModel),
+	}
+	if err := m.sessions.AppendEvent(m.ctx, sess.Session, summary); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+
+	m.noteCompaction()
+	if !m.compacted {
+		t.Fatal("the stored summary was not noticed")
+	}
+
+	// The summary sits after the prompt, so rewinding that turn takes it away.
+	m.rewind()
+	if m.compacted {
+		t.Error("the compression note survived a rewind that removed the summary")
+	}
+
+	m.newSession("")
+	if m.compacted {
+		t.Error("the compression note survived into a new session")
+	}
+}
+
 // TestRewindPutsThePromptBackAndCutsBothHistories is the contract of ctrl+z:
 // the prompt returns to the input, the transcript loses the exchange, and the
 // model's memory is cut at the same place.

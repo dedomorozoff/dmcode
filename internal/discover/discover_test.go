@@ -52,6 +52,36 @@ func TestTheEndpointReportedWindowTravelsOntoTheProvider(t *testing.T) {
 	}
 }
 
+// llama.cpp names the context it actually runs with under meta, not at the
+// top level. A parser that reads only the OpenAI-style aliases leaves a local
+// provider with no window, which switches compaction off for the model that
+// needs it most.
+func TestLlamaCppSlotContextIsReadFromMeta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"slot","meta":{"n_ctx":16384,"n_ctx_train":131072}},
+			{"id":"train-only","meta":{"n_ctx_train":32768}},
+			{"id":"top-level","context_length":8192}
+		]}`)
+	}))
+	defer srv.Close()
+
+	served, err := fetchModels(srv.URL+"/v1", "", time.Second)
+	if err != nil {
+		t.Fatalf("fetchModels: %v", err)
+	}
+	want := map[string]int{
+		"slot":       16_384, // the enforced slot context, not the training cap
+		"train-only": 32_768,
+		"top-level":  8_192,
+	}
+	for _, m := range served {
+		if got, ok := want[m.ID]; ok && m.Context != got {
+			t.Errorf("%s context = %d, want %d", m.ID, m.Context, got)
+		}
+	}
+}
+
 // A server that says nothing about its window yields a provider whose Context
 // is zero, so callers fall back to the name-to-tokens table.
 func TestASilentEndpointLeavesTheWindowZero(t *testing.T) {

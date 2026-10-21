@@ -283,6 +283,15 @@ func fetchServedModels(baseURL, apiKey string, timeout time.Duration) ([]servedM
 			MaxModelLen      int    `json:"max_model_len"`
 			ContextLength    int    `json:"context_length"`
 			MaxContextLength int    `json:"max_context_length"`
+			// llama.cpp reports its context sizes under meta: n_ctx is the
+			// slot context the server actually runs with, n_ctx_train is the
+			// model's training cap. A server started with a small -c names the
+			// small number here and nowhere else, so a parser that only reads
+			// the top-level aliases sees no window and disables compaction.
+			Meta struct {
+				NCtx      int `json:"n_ctx"`
+				NCtxTrain int `json:"n_ctx_train"`
+			} `json:"meta"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -292,7 +301,15 @@ func fetchServedModels(baseURL, apiKey string, timeout time.Duration) ([]servedM
 	for _, m := range body.Data {
 		ctx := m.MaxModelLen
 		if ctx <= 0 {
+			// The slot context is the cap the server enforces, so it wins over
+			// the training context when both are present.
+			ctx = m.Meta.NCtx
+		}
+		if ctx <= 0 {
 			ctx = m.ContextLength
+		}
+		if ctx <= 0 {
+			ctx = m.Meta.NCtxTrain
 		}
 		if ctx <= 0 {
 			ctx = m.MaxContextLength

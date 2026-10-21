@@ -586,6 +586,20 @@ pool — `Tab`, `shift+tab`, `/cd` all do — would otherwise put the session ba
 the endpoint the user just switched away from, so the swap would hold for one turn
 and be quietly undone.
 
+llama-server reports the context it was actually started with under
+`data[0].meta.n_ctx`, not the OpenAI-style top-level aliases: `context_length` is
+the model's training cap in router mode, and the slot context is the smaller
+number the server enforces. `fetchModels` reads `meta.n_ctx` first and falls back
+to `meta.n_ctx_train`, because without it a GGUF provider's `Provider.Context` is
+zero, `compactionConfig` returns nil, and the session runs until the endpoint
+refuses a prompt instead of summarizing before that. The second half of the same
+bug was `rebuildRunnerFor`: it built a `runner.Config` without `Compaction` and
+without re-reading the window, so the model that had just finished loading was
+served by a runner that could not compact. Both paths now share `runnerConfig`
+and call `applyWindow`; `HasCompaction` lets the sidebar say when a summary has
+actually replaced older turns, since ADK appends that event to the store rather
+than yielding it through `runner.Run`.
+
 ### Workspace boundary
 
 `tools.SetRoot` is called once at startup (and again on `/cd`) and every tool

@@ -592,6 +592,26 @@ func (s *Service) TranscriptOf(appName, userID, sessionID string, maxTurns int) 
 	return tr, nil
 }
 
+// HasCompaction reports whether the stored conversation has ever been
+// summarized. The summary is appended to the store by ADK's compaction
+// processor rather than yielded to the caller of runner.Run, so a turn cannot
+// learn about it from its own event stream; asking the store afterwards is the
+// only reliable way for the UI to say that older turns are no longer raw.
+func (s *Service) HasCompaction(appName, userID, sessionID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.load(appName, userID, sessionID)
+	if err != nil {
+		return false
+	}
+	for _, ev := range st.events {
+		if ev != nil && ev.Actions.Compaction != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Ensure registers a session if it is not known yet, and returns its id.
 // The runner auto-creates through Create, but the UI needs a session to exist
 // before the first message: /new has to produce a row in /sessions even if the
