@@ -2,10 +2,8 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -26,6 +24,7 @@ import (
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/ask"
+	"github.com/dedomorozoff/dmcode/internal/compact"
 	"github.com/dedomorozoff/dmcode/internal/config"
 	"github.com/dedomorozoff/dmcode/internal/discover"
 	"github.com/dedomorozoff/dmcode/internal/editor/editor"
@@ -37,7 +36,6 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
 	"github.com/dedomorozoff/dmcode/internal/todo"
-	"github.com/dedomorozoff/dmcode/internal/tools"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
 	adkagent "google.golang.org/adk/v2/agent"
@@ -261,7 +259,11 @@ type toolPart struct {
 
 type toolCallMsg struct {
 	name string
-	args string
+	// args travels as the map, not as a rendered string, so the line is built
+	// where it is drawn. Rendering it at the call site would put the choice of
+	// what to name next to the event loop instead of next to the code that knows
+	// the tools, and a restored session would have to repeat the decision.
+	args map[string]any
 }
 type toolResMsg struct {
 	name   string
@@ -280,6 +282,14 @@ type turnDoneMsg struct {
 // retryMsg reports an endpoint about to be tried again, so the wait shows up
 // as itself rather than as a spinner that looks hung.
 type retryMsg struct{ ev llm.RetryEvent }
+
+// compactDoneMsg is the result of a manual /compact. It is separate from
+// turnDoneMsg because compaction is not a turn: it produces no assistant
+// message, no tool calls and no timing worth adding to the turn totals.
+type compactDoneMsg struct {
+	res compact.Result
+	err error
+}
 
 type modelsListMsg struct {
 	Models []string
@@ -402,9 +412,10 @@ type uiModel struct {
 	// for the sidebar's MCP section. It is kept beside mcpToolsets rather than
 	// derived from it because a toolset's tools are only knowable by opening it:
 	// asking again here would connect to every server on the first frame.
-	mcpStates []mcp.ServerState
-	prog      *tea.Program
-	toolNames []string
+	mcpStates  []mcp.ServerState
+	prog       *tea.Program
+	toolNames  []string
+	skillLines []string
 	// gitState is the repository the session is working in, as of the last
 	// refresh: which branch, and how much of the tree is dirty. It is a value
 	// rather than a *vcs.Repo because the panel only ever draws the summary, and
@@ -498,6 +509,9 @@ type uiModel struct {
 	// dirPick is the /cd folder browser, open while the user navigates to the
 	// folder the next turn should work in.
 	dirPick dirPickState
+	// ctxPick is the restart offer, open when a turn outgrew a local model's
+	// context window and a llama-server restart with a larger one is possible.
+	ctxPick ctxPickState
 	// help is the F1 reference: the keybindings and the slash commands in one
 	// scrollable box. Its content is static, so the state is only where the
 	// user is looking, not a filter or a draft.
@@ -581,9 +595,9 @@ type uiModel struct {
 	// direct flip of m.ed — so the flip is deferred until the copy lands.
 	pendingEditor bool
 	// pendingJump is the place in a file the chat asked the editor to go to, by
-	// a click on a change row or by the jump key. It is applied by enterEditor,
-	// because OpenChangedTabs runs first and would otherwise focus a tab for the
-	// same file and leave the cursor somewhere else in it.
+	// a click on a change row, a click on a changed-file row in the sidebar, or
+	// by the jump key. It is applied by enterEditor, in the workspace the mode
+	// flip has already landed in.
 	pendingJump *codeRef
 	// jumpFrom is how far the jump key's walk into the transcript has got: the
 	// row after the change it went to last, and -1 before it has gone anywhere.
@@ -618,9 +632,9 @@ type uiModel struct {
 	// guess, which is not one worth making, even though the meter can show one.
 	window      int
 	windowGuess bool
-	// exactWindow is the real context size, zero when the model is not one this
-	// build recognises. Compaction reads this rather than window: the meter may
-	// draw an assumed denominator, a compaction threshold may not.
+	// exactWindow is the real context size, zero when neither the endpoint nor
+	// the table states one. Compaction reads this rather than window: the meter
+	// may draw an assumed denominator, a compaction threshold may not.
 	exactWindow int
 	// compacted records that the context has been summarized at least once in
 	// this session, so the sidebar can say so. Compaction is invisible
@@ -915,17 +929,21 @@ func (m *uiModel) openEditor() tea.Cmd {
 	return init
 }
 
-// enterEditor flips the (already existing) workspace into the editor mode:
-// the tabs for the files the agent changed open on top. The project tree and the
-// other panels stay as the user last left them — closed until asked for
-// with ctrl+b, F9 or the status-bar icons.
+// enterEditor flips the (already existing) workspace into the editor mode.
+// Nothing is opened on the way in: the files the agent changed are listed in the
+// chat's CHANGES section, and a tab appears only when the user clicks one — or
+// clicks a change row in the transcript, which is the jump below. Opening every
+// changed file on entry made a session that touched twenty files arrive at
+// twenty tabs, none of which was the one the user asked for.
 //
-// A jump the chat asked for is applied here, at the end, and not where it was
-// asked for: OpenChangedTabs above focuses a tab per changed file, so a cursor
-// set before it would be replaced by whichever of those files came last.
+// The project tree and the other panels stay as the user last left them —
+// closed until asked for with ctrl+b, F9 or the status-bar icons.
+//
+// A jump the chat asked for is applied here rather than where it was asked for:
+// openEditor may only be *asked* to flip the mode, and the place has to land in
+// a workspace that is already in editor mode.
 func (m *uiModel) enterEditor() {
 	m.ed.Chat = false
-	m.ed.OpenChangedTabs()
 	if m.pendingJump != nil {
 		j := *m.pendingJump
 		m.pendingJump = nil
@@ -1012,8 +1030,7 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 			_, cmd := m.Update(tea.PasteMsg{Content: text})
 			return cmd
 		},
-		View:         m.chatFrame,
-		ChangedFiles: func() []string { return tools.ChangedFiles() },
+		View: m.chatFrame,
 	}
 	m.ed = &ed
 	return ed.Init()
@@ -1022,11 +1039,26 @@ func (m *uiModel) ensureEditor() tea.Cmd {
 // chatClick starts a transcript selection drag with the button that went down.
 // Right and middle are left to the terminal so a user who wants the terminal's
 // own paste menu keeps it.
+//
+// A changed-file row in the sidebar is opened on the press, not on the release.
+// That row is a link, not text: there is nothing to select in it, and waiting
+// for the release made the click depend on a message some terminals do not
+// deliver reliably and on the pointer not drifting a cell between press and
+// release — a drift turned the click into a one-character selection, so the row
+// looked dead. The transcript's change rows stay on the release path below,
+// where a drag across them is a selection and must not jump.
 func (m *uiModel) chatClick(msg tea.MouseClickMsg) tea.Cmd {
 	if !m.mouseEnabled {
 		return nil
 	}
 	if tea.Mouse(msg).Button == tea.MouseLeft {
+		if !m.chatOverlayUp() {
+			if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
+				m.selDown = false
+				m.jumpFrom = -1
+				return m.jumpToRef(ref)
+			}
+		}
 		m.selAnchorX, m.selAnchorY = msg.X, msg.Y
 		m.selFocusX, m.selFocusY = msg.X, msg.Y
 		m.selDown, m.selMoved = true, false
@@ -1053,8 +1085,8 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 	if !m.selMoved {
 		// A click, not a drag: nothing is copied, and a click on a change row
 		// opens the file at the line that row stands for. Anything else — a
-		// reply, the input, the sidebar — is still nothing, which is the rule
-		// that keeps a click from becoming a copy of one character.
+		// reply, the input — is still nothing, which is the rule that keeps a
+		// click from becoming a copy of one character.
 		m.selMoved = false
 		if m.chatOverlayUp() {
 			// A box owns those pixels. The frame on screen is the box, so the
@@ -1064,10 +1096,12 @@ func (m *uiModel) chatRelease(msg tea.MouseReleaseMsg) tea.Cmd {
 			return nil
 		}
 		m.syncVP()
-		// The sidebar's own rows come first in the column test, because a click to
-		// the right of the chat panel is a click on the panel and not a click that
-		// missed: the changed-file list is there, and the transcript's index would
-		// refuse the column as out of range and silently drop it.
+		// The sidebar's rows are normally opened by chatClick on the press; this
+		// is the fallback for a release whose press started with a box up and
+		// saw it close before the button came up. The column test comes first
+		// because a click to the right of the chat panel is a click on the panel
+		// and not a click that missed: the transcript's index would refuse the
+		// column as out of range and silently drop it.
 		if ref, ok := m.sideRefAtPointer(msg.X, msg.Y); ok {
 			m.jumpFrom = -1
 			return m.jumpToRef(ref)
@@ -1252,6 +1286,9 @@ func (m *uiModel) commands() []command {
 			m.rewind()
 			return nil
 		}},
+		{name: "compact", desc: i18n.T("summarize older messages now"), run: func(m *uiModel) tea.Cmd {
+			return m.compactCmd()
+		}},
 		{name: "clear", desc: i18n.T("clear the screen (ctrl+l)"), run: func(m *uiModel) tea.Cmd {
 			m.clearScreen()
 			return nil
@@ -1270,10 +1307,10 @@ func (m *uiModel) commands() []command {
 				line{kindSys, i18n.T("mouse — select and copy text right in the terminal")},
 				// The key is asked of the binding rather than written into the text,
 				// so the line cannot advertise a key the handler no longer answers.
-				line{kindSys, fmt.Sprintf(i18n.T("click a change in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
+				line{kindSys, fmt.Sprintf(i18n.T("click a change or a path:line in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /compact, /skills, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -1286,6 +1323,18 @@ func (m *uiModel) commands() []command {
 				m.history = append(m.history, line{kindSys, "· " + t})
 			}
 			m.historyDirty = true
+			return nil
+		}},
+		{name: "skills", desc: i18n.T("list installed skills"), run: func(m *uiModel) tea.Cmd {
+			if len(m.skillLines) == 0 {
+				m.history = append(m.history, line{kindSys, i18n.T("no skills installed")})
+			} else {
+				for _, s := range m.skillLines {
+					m.history = append(m.history, line{kindSys, "· " + s})
+				}
+			}
+			m.historyDirty = true
+			m.followVP()
 			return nil
 		}},
 		{name: "debug", desc: i18n.T("diagnostics for the transcript renderer"), run: func(m *uiModel) tea.Cmd {
@@ -1788,6 +1837,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.dirPickKey(msg)
 			return model, cmd
 		}
+		if m.ctxPick.open {
+			model, cmd := m.ctxPickKey(msg)
+			return model, cmd
+		}
 		if m.ask.open {
 			model, cmd := m.askKey(msg)
 			return model, cmd
@@ -2027,7 +2080,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+e — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /compact, /skills, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -2050,6 +2103,19 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "/sidebar":
 				m.showSidebar = !m.showSidebar
 				m.layout()
+				m.followVP()
+				return m, nil
+			case "/compact":
+				return m, m.compactCmd()
+			case "/skills":
+				if len(m.skillLines) == 0 {
+					m.history = append(m.history, line{kindSys, i18n.T("no skills installed")})
+				} else {
+					for _, s := range m.skillLines {
+						m.history = append(m.history, line{kindSys, "· " + s})
+					}
+				}
+				m.historyDirty = true
 				m.followVP()
 				return m, nil
 			case "/models":
@@ -2399,6 +2465,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case turnDoneMsg:
 		m.busy = false
 		m.cancelTurn = nil
+		// Compaction happens inside the runner and writes its summary straight
+		// to the store, so the only moment the sidebar can learn about it is
+		// after the turn has finished.
+		m.noteCompaction()
 		// The timer is cleared before anything is printed from it, so the live
 		// counter stops where the turn stopped instead of continuing to run
 		// against the wall clock and reporting a turn that is already over.
@@ -2417,6 +2487,11 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusText = i18n.T("error")
 				m.history = append(m.history, line{kindErr, "error: " + msg.err.Error()})
+				// A turn that did not fit a local model's context window is an
+				// action away from working, so the offer to act opens beside
+				// the error line: the restart dialog lives in m.ctxPick and
+				// takes the next keystrokes itself.
+				m.offerCtxRestart(msg.err)
 			}
 		} else {
 			m.statusText = i18n.T("ready")
@@ -2458,6 +2533,27 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the worktree all session — and it is asked for rather than read inline
 		// because that walk is disk I/O on the frame path.
 		extra = tea.Batch(extra, m.gitStatusCmd())
+	case compactDoneMsg:
+		m.busy = false
+		m.cancelTurn = nil
+		switch {
+		case msg.err == nil:
+			m.noteCompaction()
+			m.statusText = i18n.T("ready")
+			m.history = append(m.history, line{kindSys, fmt.Sprintf(
+				i18n.T("compacted %d older events into a summary; the newest %d are kept"),
+				msg.res.Covered, msg.res.Retained)})
+		case errors.Is(msg.err, compact.ErrNothing):
+			m.statusText = i18n.T("ready")
+			m.history = append(m.history, line{kindSys, i18n.T("nothing to compact yet")})
+		case errors.Is(msg.err, context.Canceled):
+			m.statusText = i18n.T("stopped")
+			m.history = append(m.history, line{kindSys, i18n.T("compaction stopped")})
+		default:
+			m.statusText = i18n.T("error")
+			m.history = append(m.history, line{kindErr, i18n.T("compaction error: ") + msg.err.Error()})
+		}
+		m.historyDirty = true
 	case errMsg:
 		m.busy = false
 		m.statusText = i18n.T("error")
@@ -2467,6 +2563,8 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.handleToolCheck(msg)
 	case proxyCheckMsg:
 		m.handleProxyCheck(msg)
+	case proxyVerifyMsg:
+		m.handleProxyVerify(msg)
 	case failoverMsg:
 		extra = m.handleFailover(msg)
 	}
@@ -2503,6 +2601,18 @@ func (m *uiModel) headerVisible() bool {
 // the constant because the header is conditional: hiding it must give its rows
 // to the transcript, not leave a gap.
 func (m *uiModel) chromeHeight() int {
+	// A question takes the bottom of the frame instead of floating over the
+	// conversation: the rows it needs come out of the transcript, the same way
+	// the pending-image strip's do, so the reply the question is about stays
+	// readable above it. It replaces the status bar and the input box — keys go
+	// to the question, and an input that cannot take them is a lie.
+	if m.ask.open {
+		h := m.askHeight() + panelBorder
+		if m.headerVisible() {
+			h += headerHeight
+		}
+		return h
+	}
 	h := chromeHeight
 	if m.headerVisible() {
 		h += headerHeight
@@ -3113,7 +3223,10 @@ func rowRows(text string, width int, row transcriptRow) renderedRows {
 		for i, r := range rows {
 			rows[i] = row.first + r
 		}
-		return renderedRows{rows: rows}
+		// A citation in the reply is a place the user can click. The rows are
+		// read as they are drawn, so a place the markdown renderer rearranged
+		// is still found — see citeRows for what that costs.
+		return renderedRows{rows: rows, refs: citeRows(rows)}
 	}
 	if row.diff {
 		return diffRows(text, width, row)
@@ -3574,6 +3687,7 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 	// "no" sets the bypass list rather than the proxy, so a user with a proxy
 	// already in the environment can exempt their own services without turning
 	// the proxy off entirely.
+	prev := config.CurrentProxy()
 	if rest, ok := strings.CutPrefix(arg, "no "); ok {
 		if err := config.SetNoProxy(strings.TrimSpace(rest)); err != nil {
 			return fail(err)
@@ -3583,17 +3697,73 @@ func (m *uiModel) applyProxy(arg string) tea.Cmd {
 	}
 
 	s := config.CurrentProxy()
-	if err := m.persistProxy(s); err != nil {
-		return fail(err)
-	}
-	if s.Active {
-		m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
-	} else {
+	if !s.Active {
+		// Turning it off has nothing to verify — a proxy that is not used cannot
+		// be the wrong one — so it persists straight away.
+		if err := m.persistProxy(s); err != nil {
+			return fail(err)
+		}
 		m.history = append(m.history, line{kindSys, i18n.T("proxy: cleared, connecting directly")})
+		m.historyDirty = true
+		m.followVP()
+		return m.showProxy()
 	}
+
+	// A live address is verified before it is persisted, and put back if it does
+	// not answer. Saving first is what leaves a stale proxy in
+	// ~/.dmcode/settings.json: two weeks later every turn fails and the complaint
+	// is about the provider, which never saw the request. The address is in
+	// effect for the probe — which is what makes the probe worth doing — but
+	// nothing on disk has moved yet.
+	m.statusText = i18n.T("checking the proxy…")
+	m.history = append(m.history, line{kindSys, "proxy: " + config.RedactProxy(s.Effective())})
 	m.historyDirty = true
 	m.followVP()
-	return m.showProxy()
+	return func() tea.Msg {
+		_, err := config.ListModels(m.prov)
+		return proxyVerifyMsg{err: err, prev: prev.ProxyVars()}
+	}
+}
+
+// proxyVerifyMsg is the answer to "does the address I just set work". prev is
+// the proxy in effect before, so a failed address can be undone rather than
+// merely reported.
+type proxyVerifyMsg struct {
+	err  error
+	prev map[string]string
+}
+
+func (m *uiModel) handleProxyVerify(msg proxyVerifyMsg) {
+	m.statusText = ""
+	if msg.err == nil {
+		s := config.CurrentProxy()
+		if err := m.persistProxy(s); err != nil {
+			m.history = append(m.history, line{kindErr, "proxy: " + err.Error()})
+		} else {
+			m.history = append(m.history, line{kindSys, i18n.T("proxy: the provider answered through it")})
+		}
+		m.historyDirty = true
+		m.followVP()
+		return
+	}
+
+	// Nothing reached the disk, so undoing is only about this process: the
+	// previous address goes back into the environment and the failure is reported
+	// with its reason, because "it did not work" without the refusal is a much
+	// worse thing to read than "connection refused".
+	_ = config.SetProxy("off")
+	for k, v := range msg.prev {
+		_ = os.Setenv(k, v)
+	}
+	restored := config.CurrentProxy()
+	text := i18n.T("proxy: not saved — it did not answer, and every request goes through it")
+	if restored.Active {
+		text = i18n.T("proxy: not saved — it did not answer; still using ") + config.RedactProxy(restored.Effective())
+	}
+	m.history = append(m.history, line{kindErr, text})
+	m.history = append(m.history, line{kindErr, "  " + msg.err.Error()})
+	m.historyDirty = true
+	m.followVP()
 }
 
 // persistProxy writes the proxy settings to ~/.dmcode/settings.json so they
@@ -4387,7 +4557,14 @@ func (m *uiModel) persistSetup(vars map[string]string) (string, error) {
 
 // rebuildRunnerFor points the session at p: a new agent on the same session
 // service, then the background tool-calling check the new provider deserves.
+//
+// The window is re-read here rather than left to the caller, because this is
+// the one place every provider swap goes through - a GGUF model finishing its
+// load and a /setup choice both land here. A runner built without the window
+// would have compaction switched off even after the endpoint named its cap,
+// which is exactly the case the context parsing exists for.
 func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
+	m.applyWindow(p)
 	ctx := context.Background()
 	a, berr := dmagent.BuildAgent(ctx, p, m.tools, m.mcpToolsets...)
 	if berr != nil {
@@ -4395,12 +4572,7 @@ func (m *uiModel) rebuildRunnerFor(p config.Provider) tea.Cmd {
 		m.historyDirty = true
 		return nil
 	}
-	r, rerr := runner.New(runner.Config{
-		AppName:           "dmcode",
-		Agent:             a,
-		SessionService:    m.svc,
-		AutoCreateSession: true,
-	})
+	r, rerr := runner.New(m.runnerConfig(a))
 	if rerr != nil {
 		m.history = append(m.history, line{kindErr, "setup: " + rerr.Error()})
 		m.historyDirty = true
@@ -4667,6 +4839,49 @@ func (m *uiModel) fetchModelsCmd() tea.Cmd {
 	}
 }
 
+// compactCmd summarizes the older part of the conversation now, rather than
+// waiting for ADK's threshold. It runs on a goroutine because the summarizer
+// makes a model call; the event loop keeps its spinner and its Esc.
+//
+// The pool is copied before the goroutine starts for the same reason
+// switchModelCmd copies it: a provider swap on the loop must not race the
+// summary's model construction.
+func (m *uiModel) compactCmd() tea.Cmd {
+	if m.busy {
+		return nil
+	}
+	if m.svc == nil || m.sessionID == "" {
+		m.statusText = i18n.T("no conversation to compact")
+		return nil
+	}
+	pool := append([]config.Provider(nil), m.pool...)
+	if len(pool) == 0 && m.prov.BaseURL != "" {
+		pool = []config.Provider{m.prov}
+	}
+	if len(pool) == 0 {
+		m.statusText = i18n.T("no model is configured")
+		return nil
+	}
+	svc, sid := m.svc, m.sessionID
+	base := m.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(base, 2*time.Minute)
+	m.cancelTurn = cancel
+	m.busy = true
+	m.statusText = i18n.T("compacting the conversation…")
+	return func() tea.Msg {
+		defer cancel()
+		model, err := llm.NewFailoverModel(ctx, pool, discover.FreeBackups, nil, nil)
+		if err != nil {
+			return compactDoneMsg{err: err}
+		}
+		res, err := compact.Now(ctx, svc, sessionApp, sessionUser, sid, model, 8)
+		return compactDoneMsg{res: res, err: err}
+	}
+}
+
 // switchModelCmd rebuilds the agent on a different model of the current
 // provider. The pool travels with it: the user picked a model, not a single
 // endpoint, and silently dropping the reserves would leave a later 429 with
@@ -4724,14 +4939,7 @@ func (m *uiModel) switchModelCmd(id string) tea.Cmd {
 		// it started with: a runner rebuilt without them would silently stop
 		// compacting at exactly the moment the user switched away from a small
 		// model, where it mattered most.
-		comp := (&uiModel{exactWindow: exactWindow}).compactionConfig()
-		r, err := runner.New(runner.Config{
-			AppName:           "dmcode",
-			Agent:             a,
-			SessionService:    svc,
-			AutoCreateSession: true,
-			Compaction:        comp,
-		})
+		r, err := runner.New(runnerConfigFor(svc, a, exactWindow))
 		if err != nil {
 			return modelSwitchedMsg{name: id, err: err}
 		}
@@ -4862,7 +5070,7 @@ func (m *uiModel) startTurn(text string, imgs []imgprev.Attachment) tea.Cmd {
 			for _, tp := range parts {
 				switch {
 				case tp.call != nil:
-					p.Send(toolCallMsg{name: tp.call.Name, args: toolArgs(tp.call.Args)})
+					p.Send(toolCallMsg{name: tp.call.Name, args: tp.call.Args})
 				case tp.resp != nil:
 					summary, diff := renderToolResponse(tp.resp)
 					p.Send(toolResMsg{name: tp.resp.Name, output: summary, diff: diff})
@@ -5070,29 +5278,23 @@ func isANSIFinal(b byte) bool { return b >= 0x40 && b <= 0x7e }
 // answer to "what does a tool call look like" — free to drift, and with the
 // transcript of a resumed session quietly showing a different shape from the one
 // the user remembers.
-func toolLine(name, args string) string { return name + "(" + args + ")" }
-
-// toolArgs is a call's arguments as the transcript shows them: the marshalled
-// map, shortened so a long path cannot take the row.
-func toolArgs(args map[string]any) string {
-	b, _ := json.Marshal(args)
-	return truncate(string(b), 160)
+// toolLine is one line of the transcript: what the agent called, and the one
+// argument that decided what it was calling about. Two callers build it — the
+// live turn and a restored session — and they go through here so a resumed
+// transcript cannot show a different shape from the one the user remembers.
+func toolLine(name string, args map[string]any) string {
+	return toolCallSummary(name, args)
 }
 
-func renderToolResponse(fr *genai.FunctionResponse) (summary, diff string) {
-	resp := fr.Response
-	if m := resp; m != nil {
-		if d, ok := m["diff"].(string); ok && d != "" {
-			diff = d
-			resp = maps.Clone(m)
-			delete(resp, "diff")
-		}
+// toolArgs is a call's arguments as the transcript shows them. It is only a
+// fallback now — toolCallSummary knows the tool and names the argument that
+// decided what the call was about — and it is what an MCP tool's arguments go
+// through, because those names are the server's, not dmcode's.
+func toolArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
 	}
-	b, err := json.Marshal(resp)
-	if err != nil {
-		return fmt.Sprint(resp), diff
-	}
-	return truncate(string(b), 600), diff
+	return genericArgs(args)
 }
 
 // truncate cuts s to at most n terminal cells. Counting cells instead of bytes
@@ -5725,13 +5927,21 @@ type listView struct {
 // floatingPanel frames a palette-style box with the header every overlay
 // shares: the title, the filter line and a blank spacer.
 func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *listView) string {
-	inner := m.floatingWidth() - panelBorder
+	return m.floatingPanelAt(m.floatingWidth(), m.height, title, query, entries, lv)
+}
+
+// floatingPanelAt is floatingPanel at a width and a height the caller chooses.
+// The question uses it to sit under the transcript at the terminal's full width:
+// a box floating over the conversation hid the reply the question was about,
+// which is the one thing a user needs to read before answering.
+func (m *uiModel) floatingPanelAt(width, maxHeight int, title, query string, entries [][]string, lv *listView) string {
+	inner := max(width-panelBorder, 8)
 	head := []string{
 		styleHeader.Render(" "+title+" ") + styleHint.Render(i18n.T("esc — close")),
 		styleHint.Render(truncate(" › "+query, inner)),
 		"",
 	}
-	return m.floatingList(head, entries, lv)
+	return m.panelBox(width, maxHeight, head, entries, lv)
 }
 
 // floatingList is floatingPanel with a header the caller wrote. A list with more
@@ -5743,19 +5953,26 @@ func (m *uiModel) floatingPanel(title, query string, entries [][]string, lv *lis
 // model id can take two rows and a count taken before wrapping is not the count
 // that reaches the screen.
 func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) string {
+	return m.panelBox(m.floatingWidth(), m.height, head, entries, lv)
+}
+
+// panelBox frames a list at a chosen width and height. floatingList keeps the
+// full-screen case; the question uses it to fill the terminal's width while
+// taking only the rows the transcript can spare.
+func (m *uiModel) panelBox(width, maxHeight int, head []string, entries [][]string, lv *listView) string {
 	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 
 	// The head is measured rather than counted. The title shares its row with
 	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
 	// counted as three then leaves the panel one row taller than the screen it
 	// has to fit inside, and the bottom border falls off the bottom.
-	headRows := lipgloss.Height(stylePanel.Width(m.floatingWidth()).Render(strings.Join(head, "\n"))) - panelBorder
+	headRows := lipgloss.Height(stylePanel.Width(width).Render(strings.Join(head, "\n"))) - panelBorder
 
 	// Two rows are held back, one for each way a list can still be scrolled, so
 	// revealing a marker can never push the bottom border off the screen. A row
 	// the finished window does not need is given back below, because a list of
 	// six rows should not lose one of them to a marker it never draws.
-	avail := max(m.height-panelBorder-headRows, 1)
+	avail := max(maxHeight-panelBorder-headRows, 1)
 	room := max(avail-2, 1)
 	start, end := panelWindow(entries, lv.sel, lv.top, room)
 	if (start == 0 || end >= len(entries)) && room < avail {
@@ -5789,7 +6006,7 @@ func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) 
 		rows = append(rows, styleHint.Render(i18n.T("   ↓ more ")+fmt.Sprint(len(entries)-end)))
 	}
 
-	return stylePanel.Width(m.floatingWidth()).Render(strings.Join(rows, "\n"))
+	return stylePanel.Width(width).Render(strings.Join(rows, "\n"))
 }
 
 // panelWindow picks the entries a body of `room` rows can show.
@@ -6155,9 +6372,17 @@ func (m *uiModel) View() tea.View {
 // any of them open the frame is the box and not the chat, so every row the hit
 // test could name is a row that is not on screen.
 func (m *uiModel) modalUp() bool {
+	return m.otherModalUp() || m.ask.open
+}
+
+// otherModalUp reports a box that owns the whole screen. The question is not
+// one of them: it is docked under the transcript, so the chat stays on screen
+// and keeps its rows. It still owns the keyboard (modalUp) — an answer is
+// required before the turn can carry on — but it does not own the frame.
+func (m *uiModel) otherModalUp() bool {
 	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
-		m.proxy.open || m.sessionsList.open || m.dirPick.open || m.ask.open ||
-		m.help.open
+		m.proxy.open || m.sessionsList.open || m.dirPick.open ||
+		m.help.open || m.ctxPick.open
 }
 
 // chatOverlayUp reports whether anything is drawn over the transcript, so that
@@ -6175,7 +6400,7 @@ func (m *uiModel) chatOverlayUp() bool {
 // the whole window when the editor has never been opened, the workspace main
 // area in chat mode (chatFrame sets the sizes to the region's then).
 func (m *uiModel) buildFrame() string {
-	if m.modalUp() {
+	if m.otherModalUp() {
 		box := m.paletteBox()
 		switch {
 		case m.picker.open:
@@ -6190,8 +6415,8 @@ func (m *uiModel) buildFrame() string {
 			box = m.sessionsBox()
 		case m.dirPick.open:
 			box = m.dirPickBox()
-		case m.ask.open:
-			box = m.askBox()
+		case m.ctxPick.open:
+			box = m.ctxPickBox()
 		case m.help.open:
 			box = m.helpBox()
 		}
@@ -6219,18 +6444,32 @@ func (m *uiModel) buildFrame() string {
 	if m.headerVisible() {
 		parts = append(parts, m.headerView())
 	}
-	parts = append(parts, middle, m.statusBarView())
-	// The strip goes between the status bar and the input box rather than into
-	// either: it is about what the *next* message will carry, which is the input's
-	// business, and putting it above the bar would read as part of the transcript.
-	if strip := m.pendingStrip(); strip != "" {
-		parts = append(parts, strip)
+	parts = append(parts, middle)
+	if m.ask.open {
+		// The question is the bottom of the frame, not a box over it. It takes
+		// the status bar's and the input's place: the transcript above keeps
+		// every row it had apart from the ones the question itself needs.
+		parts = append(parts, m.askBox())
+	} else {
+		parts = append(parts, m.statusBarView())
+		// The strip goes between the status bar and the input box rather than
+		// into either: it is about what the *next* message will carry, which is
+		// the input's business, and putting it above the bar would read as part
+		// of the transcript.
+		if strip := m.pendingStrip(); strip != "" {
+			parts = append(parts, strip)
+		}
+		parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 	}
-	parts = append(parts, stylePanel.Width(m.width).Render(m.input.View()))
 
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	if rows := m.suggestHeight(); rows > 0 {
-		frame = overlaySuggest(frame, m, rows)
+	// The command list belongs to the prompt, and the prompt is not on screen
+	// while a question is up: painting it there would draw a picker over the
+	// question's own rows.
+	if !m.ask.open {
+		if rows := m.suggestHeight(); rows > 0 {
+			frame = overlaySuggest(frame, m, rows)
+		}
 	}
 	// The highlight is painted before the frame is cached, and the cache is what
 	// the release handler reads: so what is copied is the text as drawn, styling
@@ -6331,7 +6570,7 @@ func (r Resume) sessionToOpen() string {
 	return r.ID
 }
 
-func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
+func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agentTools, readOnlyTools []tool.Tool, toolNames, skillLines []string, mcpToolsets []tool.Toolset, mcpStates []mcp.ServerState, mcpNotes []string, broker *ask.Broker, bindSub func(func(dmagent.SubEvent)), yoloTools []tool.Tool, resume Resume, loading *discover.Launch) error {
 	if len(pool) == 0 {
 		pool = []config.Provider{p}
 	}
@@ -6339,6 +6578,7 @@ func RunTUI(ctx context.Context, p config.Provider, pool []config.Provider, agen
 	// agent: the program is wired in afterwards, and a failover cannot happen
 	// before the first turn anyway.
 	m := InitialModel(nil, nil, p, agentTools, readOnlyTools, toolNames, yoloTools)
+	m.skillLines = skillLines
 	m.pool = pool
 	m.ctx = ctx
 	m.mcpToolsets = mcpToolsets
@@ -6467,13 +6707,30 @@ func (m *uiModel) newRunner(pool []config.Provider, ts []tool.Tool, mode agentMo
 		}
 		m.svc = m.sessions
 	}
-	return runner.New(runner.Config{
+	return runner.New(m.runnerConfig(a))
+}
+
+// runnerConfig is the one place an in-place runner's settings are assembled.
+// Startup, a mode switch, a provider swap and a GGUF model finishing its load
+// all come through it, because the settings have to agree with the window the
+// panel is showing. Compaction was once passed by the startup path alone, so a
+// model that arrived later was served by a runner that could not compact at
+// all. /model passes its own snapshot to runnerConfigFor because it runs on a
+// goroutine and must not read the model from off-loop.
+func (m *uiModel) runnerConfig(a adkagent.Agent) runner.Config {
+	return runnerConfigFor(m.svc, a, m.exactWindow)
+}
+
+// runnerConfigFor is the same settings from values a goroutine already owns,
+// rather than from the model it cannot safely read.
+func runnerConfigFor(svc session.Service, a adkagent.Agent, exactWindow int) runner.Config {
+	return runner.Config{
 		AppName:           "dmcode",
 		Agent:             a,
-		SessionService:    m.svc,
+		SessionService:    svc,
 		AutoCreateSession: true,
-		Compaction:        m.compactionConfig(),
-	})
+		Compaction:        compactionConfigFor(exactWindow),
+	}
 }
 
 // applyWindow re-reads the context size for a model and records whether it was
@@ -6513,21 +6770,27 @@ func (m *uiModel) applyWindow(p config.Provider) {
 // before them.
 //
 // The threshold is a fraction of the window rather than a fixed number,
-// because dmcode does not ask the endpoint how big its window is and a guess
-// that is right for a 200k model is catastrophic for an 8k one — it would
-// compact nothing and then fail with a length error. A model this build does
-// not recognise gets compaction switched off rather than given a guess: an
-// invented threshold could compact a conversation that was never near full.
+// because a threshold that is right for a 200k model is catastrophic for an 8k
+// one — it would compact nothing and then fail with a length error. A model
+// with no exact window, neither from the endpoint nor from the table, gets
+// compaction switched off rather than given a guess: an invented threshold
+// could compact a conversation that was never near full.
 func (m *uiModel) compactionConfig() *compaction.Config {
+	return compactionConfigFor(m.exactWindow)
+}
+
+// compactionConfigFor is the same decision from an exact window a goroutine
+// already carries, so a model switch and an in-place rebuild cannot disagree.
+func compactionConfigFor(exactWindow int) *compaction.Config {
 	// The exact size, never the display fallback: a threshold decides when the
 	// user's own conversation gets rewritten, and that is not a decision to
 	// make from an assumed number.
-	if m.exactWindow <= 0 {
+	if exactWindow <= 0 {
 		return nil
 	}
 	// 70% rather than 90%: the summary itself has to fit in what is left, and
 	// the turn that triggered compaction still has to fit its own answer.
-	threshold := m.exactWindow * 7 / 10
+	threshold := exactWindow * 7 / 10
 	if threshold < 1000 {
 		return nil
 	}

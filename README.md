@@ -165,11 +165,19 @@ before the interface is drawn, because those are instant to check. The server's
 output goes to `~/.dmcode/llama-server.log`, and the process is taken down when
 dmCode exits — including when it exits during the load.
 
+Once the server answers, dmcode reads the context size llama-server was actually
+started with from `/v1/models` (llama.cpp reports it under `meta.n_ctx`). That is
+the figure the context meter uses and the point where older turns are summarized,
+so a long session on a local model does not simply hit the wall and stop. The
+sidebar says `compressed` once a summary has replaced older turns. If a single
+turn is larger than the whole window there is nothing to summarize yet, and the
+restart offer with a larger `-c` remains the answer.
+
 ## Tools
 
 The agent works on files and a shell, rather than just talking:
 
-`read_file` · `write_file` · `edit_file` · `list_dir` · `grep` · `glob` · `run_command` · `move_file` · `delete_file` · `project_map`
+`read_file` · `read_files` · `write_file` · `edit_file` · `apply_patch` · `list_dir` · `grep` · `glob` · `run_command` · `command_output` · `move_file` · `delete_file` · `project_map` · `git_status` · `git_diff` · `rag_index` · `rag_search` · `skill`
 
 `project_map` is the one to reach for first. It answers "what is this project"
 in a single call — the directory tree, the languages it is written in, and the
@@ -177,6 +185,29 @@ build files, entry points and manuals it contains — so the agent orients itsel
 before it starts guessing at filenames. Its language share and file counts cover
 the whole tree however shallow the tree it shows, and it says so when a bound
 stopped it early.
+
+`read_file` pages through a large file and says where it is: the answer carries
+`start_line`, the number of the first line you got, and `next_offset`, the
+offset to pass for the page after this one. The agent never counts lines
+itself, which is what lets it name a place — `internal/ui/ui.go:412` — that you
+can then click.
+
+`read_files` is the batch form: several files in one call, each with the same
+paging facts, and an unreadable file reports its error in its own entry rather
+than failing the whole batch.
+
+`apply_patch` takes a unified diff — the format `git diff` produces — and
+applies it to one or more files. It parses and applies the patch **in memory
+first**, so a conflict in any file is reported before anything is written. It
+supports new files, modifications and deletions, and refuses renames, copies and
+binary patches; those have `move_file`, `edit_file` and `write_file`. Every
+write goes through the same change tally and undo journal as the other editing
+tools, so `ctrl+z` takes a patch back.
+
+`git_status` and `git_diff` are read-only views of the repository: the short
+status with its branch, and a unified diff of unstaged changes or — with
+`staged=true` — what the index holds. They never stage, commit or apply
+anything; the agent asks `git` rather than guessing at its output.
 
 `edit_file` takes one replacement or a list of them. The batch form applies
 every replacement in order and writes the file **once** — so five edits to one
@@ -192,6 +223,19 @@ session's change list and undone by `ctrl+z` — see
 [Sessions and rewinding](#sessions-and-rewinding) — and `move_file` refuses to
 overwrite an existing destination, because a move that silently replaced a file
 would destroy content the agent may never have read.
+
+`run_command` waits, and it waits at most ten minutes. A build on a cold cache
+or a full test suite on a big repository can take longer, and a command that is
+killed at the timeout teaches the agent nothing — so a command can also be
+started in the background: it returns a handle at once, and `command_output`
+tells the agent what it has printed and whether it has finished. The output is
+the *tail* of what the command printed, because a build's failure is at the
+end. A command started this way is stopped when dmcode exits.
+
+The shell is not a sandbox: it reaches anything you can. A short list of
+catastrophic commands is refused outright — a recursive delete of a root
+directory, a format, a raw write to a device, a force push, a forced clean, a
+hard reset — and the refusal says what to use instead.
 
 It can also reach past the workspace on purpose:
 
@@ -241,6 +285,56 @@ server that did not answer, `(no tools)` for one that answered with an empty
 list, and the number of tools for the rest. The two failures are different
 problems and are drawn differently: the first needs a process hunted down, the
 second is a misconfigured server that is running perfectly well.
+
+## Skills
+
+A skill is a markdown instruction file the agent loads only when it needs it.
+dmcode uses the same layout as OpenCode, so an existing skills directory works
+without conversion:
+
+- `.opencode/skills`, `.claude/skills` and `.agents/skills` in the workspace;
+- `~/.config/opencode/skills`, `~/.claude/skills` and `~/.agents/skills` for the
+  whole machine;
+- the native `.dmcode/skills` and `~/.dmcode/skills` alongside them.
+
+A skill is either a directory with a `SKILL.md` inside it, or a flat `.md` file
+directly under a skills root. The id is derived from the path — the directory
+name for a `SKILL.md`, the file name without `.md` for a flat file — and the
+frontmatter `name` is only the label shown to you. Project sources override
+global ones with the same id, and a later source overrides an earlier one.
+
+```markdown
+---
+name: Release checklist
+description: Use when cutting a release or updating the changelog.
+---
+Read CHANGELOG.md, bump the version in the build file, and run the release tests.
+```
+
+The `description` is what the agent matches a task against; a skill with no
+description stays loadable by id but is not advertised. `metadata.opencode/autoinvoke: false` and `disable-model-invocation: true` do the same thing: the skill is left
+out of the tool's advertised list and can still be loaded by name. `/skills`
+lists every skill dmcode found, including the hidden ones.
+
+A nested skill may ship supporting files beside its `SKILL.md`. The `skill` tool
+loads the body by default and takes `file` to read one of those files, resolved
+against the skill's own directory — so a checklist can have templates and
+examples without copying them into the workspace or the prompt.
+
+## Local retrieval
+
+`rag_index` builds a local BM25 index of the workspace: text files are chunked
+with line numbers, and `rag_search` returns the best-matching chunks with their
+path and line range. There is no database service, no embedding endpoint and no
+key — the index is a JSON file under `~/.dmcode/rag`, one per workspace, and
+`DMCODE_RAG_DIR` puts it somewhere else.
+
+By default the index covers the workspace. Call `rag_index` with
+`include_sessions=true` to add the saved conversations from
+`~/.dmcode/sessions`; that is useful when the answer is in an earlier session
+rather than in a file. `rag_search` never rebuilds the index itself: a stale
+index is stale until the next `rag_index`, which is what keeps a search from
+turning into a surprise walk of the whole tree.
 
 ## Interface language
 
@@ -347,6 +441,12 @@ model it recognises, a window the endpoint reported, or `DMCODE_CONTEXT`. An
 unknown window gets compaction switched off rather than a guessed threshold —
 an invented one would compact a conversation that was never near full, or fail
 to compact one that was.
+
+`/compact` does the same thing on demand. It summarizes all but the newest eight
+events with the model the session is already running on, appends the summary to
+the session, and keeps the recent turns raw. It works even when automatic
+compaction is off, because wanting a smaller conversation is a reason of its
+own; `esc` cancels the summary while it runs.
 
 ## Sending a picture
 
@@ -488,13 +588,13 @@ the agent is not going to ask before they stop watching.
 | `pgup` `pgdn` | scroll · `home` `end` — top and bottom |
 | `wheel` | scroll (`/mouse` turns it off, restoring drag-select) |
 | drag | select anything on screen; the selection is copied on release |
-| click | open the file at the line of the change you clicked |
+| click | open the file at the line you clicked — a change, or a `path:line` the reply named |
 
 Inside the editor, `F1` lists its own keys — a project tree, a git panel, a real
 PTY, LSP completions, splits and bookmarks, which is too much for a table here.
 In the chat, `F1` opens the reference above, scrolled with `pgup`/`pgdn`.
 
-## Going to a change
+## Going to a change, or to a place
 
 When a write lands, the transcript draws what changed: the file's name, the real
 line numbers in the gutter, and the code itself. **Click any line of that block
@@ -506,15 +606,28 @@ the one a reader is looking for.
 below where you are, and pressing it again steps through the rest of the
 session's edits and comes back round to the first.
 
-A click that is not on a change row still does nothing, which is the rule that
-keeps the selection below usable: without it, every click in the transcript would
-be a jump.
+### A place the reply named
+
+The agent is asked to write a place as `path:line` — `internal/ui/ui.go:412` —
+and **clicking that line opens the file at that line**, the same way a click on
+a change block does. The citation is drawn in the tool colour, because a thing
+that can be clicked and does not look like it is a thing nobody clicks.
+
+The number is not decoration: it is read out of the drawn row and carried
+beside it, so a line that wrapped, was styled by the markdown renderer or came
+out of the render cache still opens the place it names.
+
+A click that is not on a change row or a citation still does nothing, which is
+the rule that keeps the selection below usable: without it, every click in the
+transcript would be a jump.
 
 ## The editor
 
 `ctrl+e` opens a code editor in the same workspace, and pressing it again puts
 the chat back (`ctrl+q` does the same). The project tree waits for `ctrl+b`
-rather than opening itself.
+rather than opening itself, and the files the agent changed are not opened on
+the way in: a click on a change row in the transcript, or on a file in the
+sidebar's `CHANGES` list, opens that one file.
 It is a real editor, not a viewer: syntax highlighting, a project tree, a git
 panel with inline diffs and blame, a terminal, fuzzy file finding, splits,
 bookmarks, multi-cursor editing (`alt+d`, `alt+click`), LSP completion and
@@ -625,7 +738,7 @@ refresh (the start, the end of a turn, a `/cd`, leaving the editor), read off
 the frame rather than on it, so an unreadable tree says `status unavailable`
 instead of printing zeros about a clean tree nobody checked.
 
-Commands: `/setup` `/models` `/model <id>` `/tools` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/model <id>` `/tools` `/skills` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/compact` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
 ## Commands
 
@@ -733,6 +846,8 @@ JSON error.
   options and marks the one it recommends; you pick with `↑` `↓` and `enter`,
   tick several with `space` when it is a multi question, or type your own with
   `c`. `esc` skips the question and the agent carries on with its best guess.
+  The question docks under the conversation rather than covering it, so the
+  reply it is about stays readable while you answer.
   The wait is **off by default** — set `DMCODE_ASK_TIMEOUT=60` to have the
   recommended option chosen for you after a minute, with a countdown on screen.
 - `sub_agent` delegates one research task to a separate agent with its own
@@ -827,6 +942,7 @@ main.go              chains the packages together, nothing else
 internal/agent       the agent, its instructions, sub-agents, the mode switch
 internal/ask         the ask_user broker and its timer
 internal/clipimg     reads a picture off the system clipboard (Windows)
+internal/compact     manual /compact: summarize older events and append the summary
 internal/config      endpoints, the provider presets, the setup wizard, the proxy
 internal/discover    finds the providers that actually answer, starts llama-server
 internal/editor      the workspace editor: tree, git, terminal, splits, LSP, picture view
@@ -837,7 +953,9 @@ internal/llm         OpenAI-compatible wire, failover, retries
 internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence
 internal/pathnorm    one spelling of a path, so two names for one file compare equal
+internal/rag         the local BM25 index and its session-history loader
 internal/settings    ~/.dmcode/settings.json — saved provider, model, proxy, language
+internal/skills      OpenCode-compatible skill discovery and the skill tool
 internal/todo        the agent's plan
 internal/tools       the workspace tools, the boundary they are confined to,
                      the change tally and the turn journal ctrl+z reads
@@ -855,6 +973,7 @@ model replaces.
 |---|---|
 | `DMCODE_SETTINGS_PATH` | where `settings.json` lives (default `~/.dmcode/settings.json`) |
 | `DMCODE_SESSIONS_DIR` | where conversations are kept (default `~/.dmcode/sessions`) |
+| `DMCODE_RAG_DIR` | where the local retrieval index lives (default `~/.dmcode/rag`) |
 | `DMCODE_LLM_RETRIES` | attempts per endpoint before failing over (default 3) |
 | `DMCODE_LLM_RETRY_MS` | first backoff pause, doubling after that (default 500) |
 | `DMCODE_ASK_TIMEOUT` | seconds before a question picks its own recommended answer (**default 0 — off**) |

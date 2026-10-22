@@ -232,6 +232,7 @@ func TestAClickOnAnythingElseStillDoesNothing(t *testing.T) {
 func TestAClickOnAChangedFileRowOpensThatFile(t *testing.T) {
 	dir := t.TempDir()
 	writeJumpFile(t, dir, "alpha.txt", "one", "two", "three")
+	writeJumpFile(t, dir, "beta.txt", "one", "two")
 	cleanTally(t)
 	m := jumpModel(t, dir)
 	m.showSidebar = true
@@ -243,6 +244,7 @@ func TestAClickOnAChangedFileRowOpensThatFile(t *testing.T) {
 	m.followVP()
 
 	dmtools.RecordChange(filepath.Join(dir, "alpha.txt"), "one\n", "ONE\n")
+	dmtools.RecordChange(filepath.Join(dir, "beta.txt"), "one\n", "ONE\n")
 
 	frame := m.View().Content
 	row, col := frameRowContaining(t, frame, "alpha.txt")
@@ -266,8 +268,106 @@ func TestAClickOnAChangedFileRowOpensThatFile(t *testing.T) {
 	if !strings.HasSuffix(m.statusText, string(filepath.Separator)+"alpha.txt:1") {
 		t.Fatalf("status = %q, want it to end in alpha.txt:1", m.statusText)
 	}
-	if shown := ansi.Strip(m.View().Content); !strings.Contains(shown, "alpha.txt") {
+	shown := ansi.Strip(m.View().Content)
+	if !strings.Contains(shown, "alpha.txt") {
 		t.Fatalf("the workspace does not show alpha.txt:\n%s", shown)
+	}
+	// The other changed file was listed in the same section and was not clicked,
+	// so it must not have come along: a click opens one tab, not the list.
+	if strings.Contains(shown, "beta.txt") {
+		t.Fatalf("a click on alpha.txt opened beta.txt too:\n%s", shown)
+	}
+	m.ed.Shutdown()
+}
+
+// TestAPressOnAChangedFileRowOpensIt is the sidebar row acting like a link: the
+// file opens on the press, before any release arrives. Waiting for the release
+// made the row depend on a message some terminals do not deliver and on the
+// pointer not drifting a cell in between — a drift turned the click into a
+// one-character selection, and the row looked dead.
+func TestAPressOnAChangedFileRowOpensIt(t *testing.T) {
+	dir := t.TempDir()
+	writeJumpFile(t, dir, "alpha.txt", "one", "two", "three")
+	cleanTally(t)
+	m := jumpModel(t, dir)
+	m.showSidebar = true
+	m.height = 44
+	m.layout()
+	m.followVP()
+
+	dmtools.RecordChange(filepath.Join(dir, "alpha.txt"), "one\n", "ONE\n")
+	frame := m.View().Content
+	row, col := frameRowContaining(t, frame, "alpha.txt")
+	side := m.chatBoxWidth() + sidebarGap + 2
+	if col < side {
+		t.Fatalf("the row was found at column %d, left of the panel's edge at %d", col, side)
+	}
+	// The press alone: no release follows.
+	_, _ = m.Update(tea.MouseClickMsg{X: side, Y: row, Button: tea.MouseLeft})
+
+	if m.ed == nil {
+		t.Fatal("a press on a changed-file row must bring the workspace up")
+	}
+	if m.ed.Chat {
+		t.Fatal("the workspace must be showing the file, not the chat")
+	}
+	if !strings.HasSuffix(m.statusText, string(filepath.Separator)+"alpha.txt:1") {
+		t.Fatalf("status = %q, want it to end in alpha.txt:1", m.statusText)
+	}
+	m.ed.Shutdown()
+}
+
+// TestAClickOnAChangedFileRowInsideTheWorkspace is the same click once the
+// editor exists. Then the chat is drawn in the editor's main area and its mouse
+// events arrive through the editor's own handling, routed back by the host
+// callbacks — so the column arithmetic has one more origin in it than the
+// chat-only case, and a jump taken from there asks for the mode flip from inside
+// the editor's Update.
+func TestAClickOnAChangedFileRowInsideTheWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	writeJumpFile(t, dir, "alpha.txt", "one", "two", "three")
+	writeJumpFile(t, dir, "beta.txt", "one", "two")
+	cleanTally(t)
+	m := jumpModel(t, dir)
+	m.showSidebar = true
+	m.height = 44
+	m.layout()
+	m.followVP()
+
+	// Into the workspace and back to the chat: the second half of a session
+	// arrives here, with the sidebar drawn inside the main area. The editor is
+	// sized like a terminal first — it starts at its own 80×24 default, which is
+	// too narrow for the sidebar.
+	_ = m.openEditor()
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 44})
+	_, _ = m.Update(editor.CloseEditorMsg{})
+	if !m.ed.Chat {
+		t.Fatal("setup: the chat should be showing inside the workspace")
+	}
+
+	dmtools.RecordChange(filepath.Join(dir, "alpha.txt"), "one\n", "ONE\n")
+	dmtools.RecordChange(filepath.Join(dir, "beta.txt"), "one\n", "ONE\n")
+
+	frame := m.View().Content
+	row, col := frameRowContaining(t, frame, "alpha.txt")
+	side := m.chatBoxWidth() + sidebarGap + 2
+	if col < side {
+		t.Fatalf("the row was found at column %d, left of the panel's edge at %d", col, side)
+	}
+	clickAt(m, side, row)
+
+	if m.ed.Chat {
+		t.Fatal("a click on a changed-file row must switch the workspace to the file")
+	}
+	if !strings.HasSuffix(m.statusText, string(filepath.Separator)+"alpha.txt:1") {
+		t.Fatalf("status = %q, want it to end in alpha.txt:1", m.statusText)
+	}
+	shown := ansi.Strip(m.View().Content)
+	if !strings.Contains(shown, "alpha.txt") {
+		t.Fatalf("the workspace does not show alpha.txt:\n%s", shown)
+	}
+	if strings.Contains(shown, "beta.txt") {
+		t.Fatalf("a click on alpha.txt opened beta.txt too:\n%s", shown)
 	}
 	m.ed.Shutdown()
 }

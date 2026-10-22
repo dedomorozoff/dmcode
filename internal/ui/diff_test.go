@@ -92,10 +92,54 @@ func TestRenderToolResponsePullsTheDiffOut(t *testing.T) {
 		t.Fatalf("the summary still carries the diff: %s", summary)
 	}
 
-	// A result without a diff keeps its whole JSON.
+	// A result without a diff still says what happened, and says it in words.
 	plain := &genai.FunctionResponse{Response: map[string]any{"replacements": 1}}
 	summary, diff = renderToolResponse(plain)
-	if diff != "" || !strings.Contains(summary, "replacements") {
-		t.Fatalf("summary = %q, diff = %q", summary, diff)
+	if diff != "" {
+		t.Fatalf("a result with no diff reported one: %q", diff)
+	}
+	if !strings.Contains(summary, "replacement") {
+		t.Errorf("the summary does not say what happened: %q", summary)
+	}
+	// "no change" is the finding when nothing changed, and saying so is the point
+	// — a bare "1 replacement" reads as a change that was made.
+	if !strings.Contains(summary, "no change") {
+		t.Errorf("a no-op edit did not say so: %q", summary)
+	}
+}
+
+// The JSON envelope is the thing being removed, so a test that only looks for
+// the diff would still pass with `{"replacements":1,"diff":"…"}` printed whole.
+// This is the guard that the whole envelope is gone.
+func TestToolResultsAreNotPrintedAsJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		resp map[string]any
+	}{
+		{"grep empty", map[string]any{"matches": "", "offset": float64(0), "returned": float64(0), "total": float64(0), "next_offset": float64(0), "truncated": false}},
+		{"read_file", map[string]any{"content": "package main\n", "total_lines": float64(1), "truncated": false}},
+		{"write_file", map[string]any{"bytes_written": float64(412)}},
+		{"move_file", map[string]any{"from": "/a", "to": "/b"}},
+		{"delete_file", map[string]any{"removed": "/a/b.go"}},
+		{"run_command", map[string]any{"output": "ok\n"}},
+		{"web_search", map[string]any{"query": "q", "hits": []any{map[string]any{"title": "T", "url": "https://e/x"}}}},
+		{"fetch_url", map[string]any{"url": "https://e/x", "content": "hello", "content_type": "text/html", "truncated": false}},
+		{"project_map", map[string]any{"map": "a/\n  b.go", "root": "/r", "languages": "go", "markers": "go.mod", "files": float64(1), "dirs": float64(1), "truncated": false}},
+		{"sub_agent", map[string]any{"report": "found it", "files_read": []any{"a.go"}}},
+		{"todo_set", map[string]any{"plan": "1. [done] x"}},
+		{"switch_mode", map[string]any{"accepted": true, "applied": false, "reason": "queued"}},
+		{"ask_user", map[string]any{"result": "chosen: a"}},
+		{"any error", map[string]any{"error": "refused"}},
+		{"mcp structured", map[string]any{"output": map[string]any{"rows": float64(2), "ok": true}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderToolResult(tc.resp)
+			if strings.ContainsAny(got, "{}") {
+				t.Errorf("the result is printed as JSON: %q", got)
+			}
+			if strings.TrimSpace(got) == "" {
+				t.Error("the result rendered as nothing at all")
+			}
+		})
 	}
 }

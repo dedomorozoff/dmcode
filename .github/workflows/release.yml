@@ -136,11 +136,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # RELEASE_NOTES.md is written by hand, newest release first, and is the
+          # project's own account of what a release is. --generate-notes on its
+          # own produced a body of one link, so the tag's section is lifted out
+          # of that file and the generated commit list is kept with it rather
+          # than instead of it.
+          #
+          # The section is matched on its heading and stops at the next one, so
+          # a release that never wrote itself up falls back to the generated
+          # notes with a warning instead of publishing an empty page.
+          notes="$(mktemp)"
+          awk -v want="${GITHUB_REF_NAME}" '
+            $0 == "# dmCode " want { on = 1; next }
+            /^# dmCode / && on { exit }
+            on { print }
+          ' RELEASE_NOTES.md > "$notes"
+
           # Delete any previous release for this tag so re-tagging rebuilds cleanly.
           gh release delete "$GITHUB_REF_NAME" --yes 2>/dev/null || true
           # Upload every file under dist/ (some packages land in nested dirs,
           # e.g. dist/rpm/RPMS/...), skipping directories.
           mapfile -t assets < <(find dist -type f)
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+
+          if [ -s "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$notes" \
+              --generate-notes
+          else
+            echo "::warning::RELEASE_NOTES.md has no '# dmCode ${GITHUB_REF_NAME}' section; generated notes only"
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi

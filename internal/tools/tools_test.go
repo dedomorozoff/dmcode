@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestEditFileUniqueAndAll(t *testing.T) {
@@ -52,6 +53,14 @@ func TestGrepRecursive(t *testing.T) {
 	}
 }
 
+// TestReadFileOffsetLimit pins the paging contract: offset_line is the number
+// of the first line to return, so it counts from one, and the result says
+// where the page began.
+//
+// The numbering used to be a skip count — offset_line 1 meant "the second
+// line" — which is not what the name says and not what a model means by a
+// line number. A model that asked for line 100 got line 101 and had no way to
+// know: the result carried the file's line count and nothing about the page.
 func TestReadFileOffsetLimit(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")
@@ -60,8 +69,77 @@ func TestReadFileOffsetLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Content != "2\n3" || res.TotalLines != 5 || !res.Truncated {
+	if res.Content != "1\n2" || res.TotalLines != 5 || !res.Truncated {
 		t.Fatalf("unexpected: %+v", res)
+	}
+	if res.StartLine != 1 {
+		t.Errorf("StartLine = %d, want 1", res.StartLine)
+	}
+	if res.NextOffset != 3 {
+		t.Errorf("NextOffset = %d, want 3 (the line after the page)", res.NextOffset)
+	}
+
+	// The same page asked for by its own next_offset lands on the line that
+	// follows it, with no counting in between.
+	next, err := readFile(nil, readFileArgs{Path: p, Offset: res.NextOffset, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Content != "3\n4" {
+		t.Errorf("the next page = %q, want %q", next.Content, "3\n4")
+	}
+	if next.StartLine != 3 {
+		t.Errorf("the next page starts at %d, want 3", next.StartLine)
+	}
+}
+
+// TestReadFileTellsTheModelWhichLineItIsOn: a page that does not say where it
+// began leaves the model unable to name the line it is looking at, and a
+// citation without a line is not a place the user can open.
+func TestReadFileTellsTheModelWhichLineItIsOn(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	os.WriteFile(p, []byte("1\n2\n3\n4\n5\n"), 0o644)
+
+	res, err := readFile(nil, readFileArgs{Path: p, Offset: 3, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Content != "3\n4" {
+		t.Fatalf("the page = %q, want %q", res.Content, "3\n4")
+	}
+	if res.StartLine != 3 {
+		t.Errorf("StartLine = %d, want 3", res.StartLine)
+	}
+	if res.NextOffset != 5 {
+		t.Errorf("NextOffset = %d, want 5", res.NextOffset)
+	}
+}
+
+// TestReadFileCutOnACharacterBoundary: the cap used to cut the page as a
+// string, which can land inside a multi-byte character and leave the model
+// with a replacement character it cannot read past.
+func TestReadFileCutOnACharacterBoundary(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	// A line of multi-byte characters long enough to hit the cap on its own.
+	line := strings.Repeat("я", maxReadBytes)
+	if err := os.WriteFile(p, []byte(line+"\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := readFile(nil, readFileArgs{Path: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Truncated {
+		t.Fatal("a line over the cap must report truncation")
+	}
+	if !utf8.ValidString(res.Content) {
+		t.Error("the cut left half a character in the page")
+	}
+	if !strings.HasPrefix(res.Content, "я") {
+		t.Errorf("the page does not start with the line it should: %q", res.Content[:20])
 	}
 }
 
@@ -109,6 +187,9 @@ func TestReadFilePagesPastTheByteCap(t *testing.T) {
 	}
 	if res.TotalLines != want || !strings.Contains(res.Content, "long line") {
 		t.Errorf("the tail page is wrong: %+v", res)
+	}
+	if res.StartLine != 9000 {
+		t.Errorf("StartLine = %d, want 9000", res.StartLine)
 	}
 }
 

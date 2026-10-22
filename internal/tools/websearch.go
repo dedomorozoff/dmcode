@@ -31,10 +31,10 @@ const (
 )
 
 type searchArgs struct {
-	Query string `json:"query"`
+	Query string `json:"query" jsonschema:"What to search the web for."`
 	// MaxResults is how many hits to return. Five is usually enough; more than
 	// ten and the page stops being an answer.
-	MaxResults int `json:"max_results,omitempty"`
+	MaxResults int `json:"max_results,omitempty" jsonschema:"How many hits to return. Default 5."`
 }
 
 type searchHit struct {

@@ -138,9 +138,14 @@ func TestProxyDialogSetsTheAddress(t *testing.T) {
 	if !s.Active || s.HTTPS != "http://127.0.0.1:3128" {
 		t.Fatalf("the live proxy is %+v, want http://127.0.0.1:3128", s)
 	}
+	// The dialog closes on a valid address, but the address is only kept once it
+	// has answered — the same rule as `/proxy <addr>`, because both write the same
+	// global setting.
+	m.handleProxyVerify(proxyVerifyMsg{})
 	st, err := settings.Load()
 	if err != nil || st.Proxy != "http://127.0.0.1:3128" {
-		t.Errorf("settings.Proxy = %q (err=%v), want http://127.0.0.1:3128", st.Proxy, err)
+		t.Errorf("settings.Proxy = %q (err=%v), want http://127.0.0.1:3128", st.Proxy,
+			err)
 	}
 }
 

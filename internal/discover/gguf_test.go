@@ -130,6 +130,27 @@ func TestGGUFModelNameFallsBackToTheFileStem(t *testing.T) {
 	}
 }
 
+// A loaded llama.cpp server names its slot context under meta, and that is
+// what the provider must carry: it is the cap compaction divides, so losing it
+// here turns compaction off for the model that just finished loading.
+func TestGGUFModelNameCarriesTheSlotContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"qwen-local","meta":{"n_ctx":16384,"n_ctx_train":131072}}]}`))
+	}))
+	defer srv.Close()
+
+	id, ctx := ggufModelName("whatever.gguf", srv.URL)
+	if id != "qwen-local" {
+		t.Errorf("id = %q, want qwen-local", id)
+	}
+	if ctx != 16_384 {
+		t.Errorf("context = %d, want 16384", ctx)
+	}
+	if got := ggufProvider(srv.URL, id, ctx).Context; got != 16_384 {
+		t.Errorf("provider context = %d, want 16384", got)
+	}
+}
+
 // A config carries its paths between machines: a Windows model path must
 // still give a stem on Linux CI, and a Unix one on Windows.
 func TestFileStemSplitsBothSeparatorFlavors(t *testing.T) {

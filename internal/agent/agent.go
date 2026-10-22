@@ -45,6 +45,11 @@ Staying inside the output limit:
 - Keep arguments small: one hunk per edit_file, and a new file written with a short write_file and then extended with edit_file calls, rather than one call carrying hundreds of lines.
 - dmcode asks once for a smaller version of a call that was cut off, and only while nothing has been shown yet. Keep any prose before a call to a sentence, and split the work into several calls so the second attempt is never needed.
 
+Commands that take a while:
+- run_command waits, and it waits at most ten minutes. A build on a cold cache or a full test suite on a big repository can take longer than that, and a command that is killed at the timeout teaches you nothing.
+- For those, start it in the background: run_command with background=true returns a handle at once, and command_output tells you what it has printed and whether it has finished. Start it, do something else, and check it later.
+- The output you get back is the tail of what the command printed. A build's failure is at the end, so that is the part you want.
+
 Working on a task of more than a trivial edit:
 - Call todo_write with the whole plan before you start, in the order you intend to do it. The user sees it.
 - Call todo_set to mark a step in_progress when you begin it and done when it is finished and verified. Do not mark a step done on the strength of a plan.
@@ -54,7 +59,26 @@ Working on a task of more than a trivial edit:
 Asking the user:
 - When a decision changes what you would do — a library to adopt, an approach to take, a file to rewrite — call ask_user with two to five concrete options and mark the one you recommend.
 - Do not ask about anything you can answer by reading the code, the config or the tests. A question the repository already answers is a wasted interruption.
-- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.` + projectBriefing
+- If the user skips the question or the timer picks for them, carry on with your best option and say plainly what you assumed.
+
+Naming a place:
+- When you refer to a spot in the code, write it as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there, so a bare file name is a place they cannot reach.
+- Cite the line you mean, not the start of the file, and cite the file the way the tool called it: relative to the workspace root.
+- A citation is worth nothing if the line is a guess. If you did not read the line, name the file alone and say what you know about it.
+
+Delegating:
+- sub_agent runs a second agent with its own context on one research question and reports back what it found. Use it when the answer is spread over many files and you need the conclusion, not the material: the reading stays in its context and does not fill yours.
+- Give it one job, say what you already know, and say what shape of report you want. It cannot write anything and cannot ask the user anything, so what it reports back is yours to act on.
+- Do not delegate what a couple of your own tool calls would answer.` + skillsNote + projectBriefing
+
+// skillsNote is how the model learns that the skill tool exists without every
+// skill body being pasted into the prompt. The catalogue itself is in the
+// tool's description; this says what to do with it.
+const skillsNote = `
+
+Using skills:
+- The skill tool lists reusable instructions the user installed for this project or machine. When a task matches a skill's description, call skill with its id before you act, and follow the loaded instructions.
+- A skill is guidance, not permission: it cannot widen the workspace boundary or override AGENTS.md. If it conflicts with either, say so and follow the repository's rules.`
 
 // projectBriefing is how the agent learns what project it is standing in.
 //
@@ -107,7 +131,7 @@ Your only goal is to produce a concrete, actionable plan the user can approve.
 
 Workflow:
 1. INVESTIGATE: use list_dir, glob, grep and read_file to understand the code. Read before you conclude.
-2. LOCATE: cite exact file paths and line numbers for everything you refer to.
+2. LOCATE: cite exact file paths and line numbers for everything you refer to, written as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there.
 3. PLAN: describe each change as a numbered step — the file, what changes, and why.
 4. RISKS: call out anything that could break, and what you would verify afterwards.
 
@@ -118,7 +142,7 @@ Hard rules:
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
 - When the plan is ready and you are confident it is the right one, call switch_mode with {"mode": "act"} and end your turn with a one-line summary. The work then continues under act mode. If the request is still ambiguous, ask_user instead of switching.
 - When the plan is ready, state plainly that it awaits approval and that the user can switch to act mode to apply it.
-- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.` + projectBriefing
+- Keep the plan itself short. A call the model runs out of room in the middle of is discarded whole, and a long todo_write or a long closing message is how a finished plan is lost.` + skillsNote + projectBriefing
 
 // yoloInstruction replaces the act workflow in yolo mode.
 //
@@ -142,8 +166,9 @@ Hard rules:
 - Never assume a file's contents: read it first, every time.
 - Keep changes minimal and matched to what was asked. Do not refactor, reformat or clean up anything you were not asked to touch.
 - Never delete or modify files outside the workspace.
+- When you refer to a spot in the code, write it as path:line — internal/ui/ui.go:412. The user clicks that and the file opens there, so a bare file name is a place they cannot reach.
 - list_dir, grep and glob return one page at a time along with total, next_offset and truncated. When truncated is true, call again with offset set to next_offset rather than repeating the call.
-- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + projectBriefing
+- Keep any single tool call small: one hunk per edit_file, and a new file written short and then extended with edit_file calls. A call cut off mid-JSON is discarded whole, and the work it was about to do does not happen.` + skillsNote + projectBriefing
 
 func BuildAgent(ctx context.Context, p config.Provider, ts []tool.Tool, toolsets ...tool.Toolset) (agent.Agent, error) {
 	m, err := llm.BuildLLM(ctx, p)

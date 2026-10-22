@@ -108,6 +108,7 @@ func (m *uiModel) helpRows(inner int) []string {
 	entry("ctrl+n", "new session")
 	entry("ctrl+v", "paste a picture from the clipboard")
 	entry("alt+g", "open the next change at that line")
+	entry("click", "open the file and line a reply names")
 	entry("tab", "plan/act mode")
 	entry("shift+tab", "yolo mode — act without questions")
 	entry("esc", "stop the turn, close a dialog")

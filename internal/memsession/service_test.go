@@ -111,6 +111,31 @@ func getEvents(t *testing.T, s *Service, id string) []*session.Event {
 	return out
 }
 
+// HasCompaction is how the UI learns that older turns were summarized. The
+// summary never passes through runner.Run, so the store is the only witness.
+func TestHasCompactionSeesTheStoredSummary(t *testing.T) {
+	s := newTestService(t)
+	sess := mustCreate(t, s, "s1")
+	appendEvent(t, s, sess, userEvent("a long question"))
+
+	if s.HasCompaction(testApp, testUser, "s1") {
+		t.Fatal("a session with no summary reported one")
+	}
+
+	summary := agentEvent("summary of the earlier turns")
+	summary.Actions.Compaction = &session.EventCompaction{
+		CompactedContent: genai.NewContentFromText("summary of the earlier turns", genai.RoleModel),
+	}
+	appendEvent(t, s, sess, summary)
+
+	if !s.HasCompaction(testApp, testUser, "s1") {
+		t.Fatal("a stored compaction summary was not reported")
+	}
+	if s.HasCompaction(testApp, testUser, "missing") {
+		t.Fatal("an unknown session reported a summary")
+	}
+}
+
 // TestAppendThenGetRoundTrips is the contract the runner depends on: what was
 // appended comes back, in order, with its author and text intact.
 func TestAppendThenGetRoundTrips(t *testing.T) {

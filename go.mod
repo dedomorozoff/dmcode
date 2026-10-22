@@ -9,6 +9,7 @@ require (
 	github.com/UserExistsError/conpty v0.1.4
 	github.com/alecthomas/chroma/v2 v2.27.0
 	github.com/atotto/clipboard v0.1.4
+	github.com/bluekeyes/go-gitdiff v0.9.0
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/creack/pty v1.1.24
@@ -22,6 +23,7 @@ require (
 	golang.org/x/sys v0.48.0
 	google.golang.org/adk/v2 v2.4.0
 	google.golang.org/genai v1.71.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

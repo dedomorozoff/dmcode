@@ -296,14 +296,29 @@ func checkPatternRoot(pattern string) error {
 // call. The zero value is the documented default for each of these.
 
 type readFileArgs struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset_line,omitempty"`
-	Limit  int    `json:"limit_lines,omitempty"`
+	Path   string `json:"path" jsonschema:"The file to read, relative to the workspace root."`
+	Offset int    `json:"offset_line,omitempty" jsonschema:"The number of the first line to return, counting from one. Leave it out to start at the beginning; to carry on, pass the next_offset the last answer gave you."`
+	Limit  int    `json:"limit_lines,omitempty" jsonschema:"How many lines to return at most. Leave it out and the whole file comes back, or as much of it as fits in one page."`
 }
+
+// readFileResult is what the model gets back.
+//
+// StartLine and NextOffset are there so that the model never has to count.
+// The line a page begins at is a fact the tool knows and the model does not,
+// and a page that did not say so left the model unable to say what line number
+// it was looking at — which is a citation without a line, and a citation
+// without a line is not a place the user can open.
 type readFileResult struct {
 	Content    string `json:"content"`
 	TotalLines int    `json:"total_lines"`
 	Truncated  bool   `json:"truncated"`
+	// StartLine is the number of the first line in Content, counted the way
+	// a line is counted everywhere else: from one.
+	StartLine int `json:"start_line"`
+	// NextOffset is the offset_line to pass for the page after this one. It
+	// is absent when there is no next page, and it is a value the model can
+	// hand straight back rather than one it has to work out from a line count.
+	NextOffset int `json:"next_offset,omitempty"`
 }
 
 func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
@@ -325,35 +340,84 @@ func readFile(ctx agent.Context, in readFileArgs) (readFileResult, error) {
 	// "large file" the tool's own description points offset_line at.
 	lines := strings.Split(string(data), "\n")
 	total := len(lines)
-	start := max(in.Offset, 0)
-	if start >= total {
-		return readFileResult{Content: "", TotalLines: total}, nil
+
+	// offset_line is the number of the first line to return, which is how a
+	// model reads a line number. Zero and one both mean the beginning: a
+	// model that has not been told the convention should not have to guess
+	// which of the two the tool wants.
+	start := 0
+	if in.Offset > 1 {
+		start = in.Offset - 1
 	}
+	if start >= total {
+		return readFileResult{Content: "", TotalLines: total, StartLine: total + 1}, nil
+	}
+
 	end := total
-	trunc := false
+	limitHit := false
 	if in.Limit > 0 && start+in.Limit < total {
 		end = start + in.Limit
-		trunc = true
+		limitHit = true
 	}
-	content := strings.Join(lines[start:end], "\n")
-	if len(content) > maxReadBytes {
-		// A single page can still be enormous when the model asks for a wide
-		// window; the cap keeps one response from becoming the whole context
-		// window. It cuts the page, not the file: the next offset_line still
-		// reaches what came after it.
-		content = content[:maxReadBytes]
-		trunc = true
+
+	// The page is put together a line at a time rather than joined and cut
+	// afterwards. Joining first and cutting the string is what left the tool
+	// unable to say how many lines it had actually returned, and it cut a rune
+	// in half when the cap landed inside a multi-byte character.
+	var b strings.Builder
+	returned := 0
+	cut := false
+	for i := start; i < end; i++ {
+		line := lines[i]
+		need := len(line)
+		if returned > 0 {
+			need++ // the newline in front of it
+		}
+		if b.Len()+need > maxReadBytes {
+			cut = true
+			break
+		}
+		if returned > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(line)
+		returned++
 	}
-	return readFileResult{
+	content := b.String()
+	if returned == 0 && start < total {
+		// A single line longer than the cap. What fits is handed over and the
+		// page says it is truncated: there is no way to continue inside a
+		// line, so the next page starts after it.
+		content = cutRunes(lines[start], maxReadBytes)
+		returned = 1
+		cut = true
+	}
+
+	res := readFileResult{
 		Content:    content,
 		TotalLines: total,
-		Truncated:  trunc,
-	}, nil
+		Truncated:  limitHit || cut,
+		StartLine:  start + 1,
+	}
+	if res.Truncated && returned > 0 {
+		res.NextOffset = start + returned + 1
+	}
+	return res, nil
+}
+
+// cutRunes shortens s to at most n bytes without leaving half a character at
+// the end. A rune cut in half is a replacement character in the model's
+// context, and it is the one byte the model cannot read past.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[:n], "")
 }
 
 type writeFileArgs struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path    string `json:"path" jsonschema:"The file to write, relative to the workspace root. Parent directories are created if they are missing."`
+	Content string `json:"content" jsonschema:"The whole new content of the file."`
 }
 type writeFileResult struct {
 	BytesWritten int    `json:"bytes_written"`
@@ -449,21 +513,21 @@ func writeFileAtomic(path string, data []byte) (string, error) {
 // a single edit_file call's old_string/new_string pair, so a model that has
 // learned the simple form already knows the batch form.
 type editItem struct {
-	OldString  string `json:"old_string"`
-	NewString  string `json:"new_string"`
-	ReplaceAll bool   `json:"replace_all,omitempty"`
+	OldString  string `json:"old_string" jsonschema:"The text to replace. It must be unique in the file unless replace_all is true."`
+	NewString  string `json:"new_string" jsonschema:"The text to put in its place."`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"Replace every occurrence instead of insisting the old text is unique."`
 }
 
 type editFileArgs struct {
-	Path       string `json:"path"`
-	OldString  string `json:"old_string,omitempty"`
-	NewString  string `json:"new_string,omitempty"`
-	ReplaceAll bool   `json:"replace_all,omitempty"`
+	Path       string `json:"path" jsonschema:"The file to edit, relative to the workspace root."`
+	OldString  string `json:"old_string,omitempty" jsonschema:"The text to replace. It must be unique in the file unless replace_all is true; if it is not there at all, a whitespace-tolerant match is tried."`
+	NewString  string `json:"new_string,omitempty" jsonschema:"The text to put in its place."`
+	ReplaceAll bool   `json:"replace_all,omitempty" jsonschema:"Replace every occurrence instead of insisting the old text is unique."`
 	// Edits applies several replacements to the file in one call, in order,
 	// and writes once. A model editing five lines of one file spends one round
 	// trip instead of five, and the transcript shows one diff block instead of
 	// five rewrites. When it is set, old_string/new_string are ignored.
-	Edits []editItem `json:"edits,omitempty"`
+	Edits []editItem `json:"edits,omitempty" jsonschema:"Several replacements in one call, applied in order and written once. Use it instead of old_string/new_string when a file needs more than one change; the two are ignored when this is set."`
 }
 type editFileResult struct {
 	Replacements int    `json:"replacements"`
@@ -763,10 +827,10 @@ func pageWindow(n, offset, limit int) (start, end int, p page) {
 }
 
 type listDirArgs struct {
-	Path      string `json:"path,omitempty"`
-	Recursive bool   `json:"recursive,omitempty"`
-	Offset    int    `json:"offset,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Path      string `json:"path,omitempty" jsonschema:"The directory to list, relative to the workspace root. Leave it out for the root itself."`
+	Recursive bool   `json:"recursive,omitempty" jsonschema:"Walk the whole tree and return file paths instead of one directory's entries."`
+	Offset    int    `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit     int    `json:"limit,omitempty" jsonschema:"How many entries to return at most. Default 200."`
 }
 type listDirResult struct {
 	Entries string `json:"entries"`
@@ -837,16 +901,16 @@ func listDir(ctx agent.Context, in listDirArgs) (listDirResult, error) {
 }
 
 type grepArgs struct {
-	Pattern string `json:"pattern"`
-	Path    string `json:"path,omitempty"`
-	Glob    string `json:"glob,omitempty"`
+	Pattern string `json:"pattern" jsonschema:"The regular expression to search for."`
+	Path    string `json:"path,omitempty" jsonschema:"Where to search, relative to the workspace root. Leave it out for the whole workspace."`
+	Glob    string `json:"glob,omitempty" jsonschema:"Only search files whose name matches this pattern, like '*.go'."`
 	// ContextLines asks for that many lines either side of each match. It is
 	// what makes grep an answer rather than a list of line numbers: reading
 	// what surrounds a hit is the whole point, and doing it one read_file per
 	// hit is a round trip per line.
-	ContextLines int `json:"context_lines,omitempty"`
-	Offset       int `json:"offset,omitempty"`
-	Limit        int `json:"limit,omitempty"`
+	ContextLines int `json:"context_lines,omitempty" jsonschema:"How many lines to show either side of each match. Ask for it — the lines around a hit are usually the answer, and a bare line number is not."`
+	Offset       int `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit        int `json:"limit,omitempty" jsonschema:"How many matches to return at most. Default 200."`
 }
 type grepResult struct {
 	Matches string `json:"matches"`
@@ -1048,9 +1112,9 @@ func globToRegex(g string) string {
 }
 
 type globArgs struct {
-	Pattern string `json:"pattern"`
-	Offset  int    `json:"offset,omitempty"`
-	Limit   int    `json:"limit,omitempty"`
+	Pattern string `json:"pattern" jsonschema:"The glob to match, like 'src/*.go' or '**/*.md'."`
+	Offset  int    `json:"offset,omitempty" jsonschema:"Where to start in the result. Pass the next_offset the last answer gave you to carry on."`
+	Limit   int    `json:"limit,omitempty" jsonschema:"How many files to return at most. Default 200."`
 }
 type globResult struct {
 	Files string `json:"files"`
@@ -1157,15 +1221,39 @@ func detectShell() (string, []string) {
 }
 
 type runCommandArgs struct {
-	Command  string `json:"command"`
-	WorkDir  string `json:"work_dir,omitempty"`
-	TimeoutS int    `json:"timeout_seconds,omitempty"`
+	Command  string `json:"command" jsonschema:"The command line to run in the workspace's shell."`
+	WorkDir  string `json:"work_dir,omitempty" jsonschema:"A subdirectory of the workspace to run it in. Leave it out for the root."`
+	TimeoutS int    `json:"timeout_seconds,omitempty" jsonschema:"How long to let it run, in seconds. Default 60, at most 600."`
+	// Background starts the command and returns at once, with a handle to ask
+	// about it later.
+	Background bool `json:"background,omitempty" jsonschema:"Start the command and return at once instead of waiting for it. Use it for a build or a test suite that takes longer than a minute: the answer is a handle, and command_output tells you what it has printed and whether it has finished. A command that is killed at the timeout teaches you nothing."`
 }
+
+// runCommandResult is what the model gets back.
+//
+// A backgrounded command answers under a different shape — a handle and a
+// status instead of an output — and both are the same struct so that the
+// tool has one result type. The fields that do not apply are absent.
 type runCommandResult struct {
-	Output string `json:"output"`
+	Output string `json:"output,omitempty"`
+	// Handle is the name of a command running in the background.
+	Handle string `json:"handle,omitempty"`
+	// Status is "running" for a backgrounded command.
+	Status string `json:"status,omitempty"`
+	// Command is the line that was started, so the handle means something.
+	Command string `json:"command,omitempty"`
+	// Seconds is the ceiling the command runs under.
+	Seconds int `json:"seconds,omitempty"`
 }
 
 func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) {
+	// The gate, before the shell starts. A command that is refused is a
+	// refusal, not a failure, and the answer says what to do instead — a
+	// refusal that only says "no" leaves the model to invent a workaround, and
+	// the workaround is usually worse than the thing that was refused.
+	if r, ok := refuseCommand(in.Command); ok {
+		return runCommandResult{}, fmt.Errorf("dmcode will not run this: %s — %s", r.what, r.instead)
+	}
 	timeout := time.Duration(in.TimeoutS) * time.Second
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -1182,6 +1270,22 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 		return runCommandResult{}, err
 	}
 	shell, flags := detectShell()
+
+	// A backgrounded command returns at once. It is not tied to the turn's
+	// context — that is the whole point of it — and it is tied to dmcode, which
+	// kills what it started on the way out.
+	if in.Background {
+		start, err := startBackground(in.Command, dir, backgroundTimeout(in.TimeoutS))
+		if err != nil {
+			return runCommandResult{}, err
+		}
+		return runCommandResult{
+			Handle:  start.Handle,
+			Status:  start.Status,
+			Command: start.Command,
+			Seconds: start.Seconds,
+		}, nil
+	}
 
 	parentCtx := context.Background()
 	if ctx != nil {
@@ -1217,8 +1321,8 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 }
 
 type moveFileArgs struct {
-	Source      string `json:"source"`
-	Destination string `json:"destination"`
+	Source      string `json:"source" jsonschema:"The file to move, relative to the workspace root."`
+	Destination string `json:"destination" jsonschema:"Where it should end up, relative to the workspace root. It must not already exist — to replace a file, delete it first."`
 }
 type moveFileResult struct {
 	From string `json:"from"`
@@ -1317,7 +1421,7 @@ func copyFile(src, dst string) error {
 }
 
 type deleteFileArgs struct {
-	Path string `json:"path"`
+	Path string `json:"path" jsonschema:"The file to delete, relative to the workspace root. One file, not a folder."`
 }
 type deleteFileResult struct {
 	Removed string `json:"removed"`
@@ -1369,7 +1473,7 @@ const pagingNote = "Results are paginated: pass offset to continue where next_of
 func MakeTools() ([]tool.Tool, error) {
 	readFileTool, err := functiontool.New(functiontool.Config{
 		Name:        "read_file",
-		Description: "Reads a file. offset_line and limit_lines page through large files; when truncated is true, continue from the next line with offset_line. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
+		Description: "Reads a file. offset_line is the number of the first line to return (counting from one) and limit_lines caps how many lines come back. The result carries start_line — the number of the first line you got — and next_offset, the offset_line to pass for the page after this one, so you never have to count lines yourself. A single page is capped at 256 KB. Returns content, total line count and whether it was truncated.",
 	}, readFile)
 	if err != nil {
 		return nil, err
@@ -1410,9 +1514,18 @@ func MakeTools() ([]tool.Tool, error) {
 		return nil, err
 	}
 	runCommandTool, err := functiontool.New(functiontool.Config{
-		Name:        "run_command",
-		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root.",
+		Name: "run_command",
+		Description: "Runs a shell command and returns combined stdout/stderr (truncated). Timeout in seconds, default 60, capped at 600. work_dir runs it in a subdirectory of the workspace instead of the root. " +
+			"Set background=true to start it and return at once with a handle instead of waiting — that is what to do for a build or a test suite that takes longer than a minute, and command_output then tells you what it printed and whether it has finished. " +
+			"The shell is not a sandbox: it can reach anything the user can, so a short list of catastrophic commands is refused outright — a recursive delete of a root directory, a format, a raw write to a device, a force push, a forced clean, a hard reset. A refusal says what to use instead.",
 	}, runCommand)
+	if err != nil {
+		return nil, err
+	}
+	commandOutputTool, err := functiontool.New(functiontool.Config{
+		Name:        "command_output",
+		Description: "Asks about a command that run_command started in the background. Pass the handle it gave you, like \"cmd-1\". The answer says whether the command is still running or has finished, and what it has printed — which is where a build's failure is. The output is the tail: a long build prints thousands of lines, and the end is the part worth reading.",
+	}, commandOutput)
 	if err != nil {
 		return nil, err
 	}
@@ -1442,6 +1555,30 @@ func MakeTools() ([]tool.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
+	readFilesTool, err := makeReadFilesTool()
+	if err != nil {
+		return nil, err
+	}
+	applyPatchTool, err := makeApplyPatchTool()
+	if err != nil {
+		return nil, err
+	}
+	gitStatusTool, err := makeGitStatusTool()
+	if err != nil {
+		return nil, err
+	}
+	gitDiffTool, err := makeGitDiffTool()
+	if err != nil {
+		return nil, err
+	}
+	ragIndexTool, err := makeRAGIndexTool()
+	if err != nil {
+		return nil, err
+	}
+	ragSearchTool, err := makeRAGSearchTool()
+	if err != nil {
+		return nil, err
+	}
 	// The plan tools live in their own package but belong to the same set: the
 	// agent publishes a plan through them and the user reads it with /todo, so
 	// one without the other would show a user a plan the agent cannot keep.
@@ -1451,8 +1588,10 @@ func MakeTools() ([]tool.Tool, error) {
 	}
 	out := []tool.Tool{
 		readFileTool, writeFileTool, editFileTool, listDirTool,
-		grepTool, globTool2, runCommandTool, moveFileTool, deleteFileTool,
+		grepTool, globTool2, runCommandTool, commandOutputTool, moveFileTool, deleteFileTool,
 		webSearchTool, fetchURLTool, projectMapTool,
+		readFilesTool, applyPatchTool, gitStatusTool, gitDiffTool,
+		ragIndexTool, ragSearchTool,
 	}
 	return append(out, todoTools...), nil
 }
@@ -1470,17 +1609,28 @@ func MakeTools() ([]tool.Tool, error) {
 // web_search and fetch_url are the two instruments that reach past the
 // workspace boundary on purpose — a search engine, a page it found — and both
 // only ever read, so they belong in a planning turn too.
+//
+// command_output is here for the same reason: it reads what a command printed
+// and starts nothing. A build that was started in act mode can still be
+// asked about in plan mode, which is the moment the plan is written from
+// what the build said.
 var readOnlyNames = map[string]bool{
-	"read_file":   true,
-	"list_dir":    true,
-	"project_map": true,
-	"grep":        true,
-	"glob":        true,
-	"web_search":  true,
-	"fetch_url":   true,
-	"todo_write":  true,
-	"todo_set":    true,
-	"todo_read":   true,
+	"read_file":      true,
+	"read_files":     true,
+	"list_dir":       true,
+	"project_map":    true,
+	"grep":           true,
+	"glob":           true,
+	"web_search":     true,
+	"fetch_url":      true,
+	"git_status":     true,
+	"git_diff":       true,
+	"rag_index":      true,
+	"rag_search":     true,
+	"todo_write":     true,
+	"todo_set":       true,
+	"todo_read":      true,
+	"command_output": true,
 }
 
 // MakeReadOnlyTools returns the subset MakeTools builds that only inspects the

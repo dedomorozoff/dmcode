@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	dmagent "github.com/dedomorozoff/dmcode/internal/agent"
 	"github.com/dedomorozoff/dmcode/internal/ask"
@@ -87,6 +88,13 @@ func (m *uiModel) openAsk(msg askRequestMsg) tea.Cmd {
 	if msg.wait > 0 {
 		m.ask.deadline = time.Now().Add(msg.wait)
 	}
+	// The prompt is suspended while the question is up, so a command list left
+	// open over it would be a picker that no key can reach. The rows the
+	// question takes come out of the transcript, so the viewport is resized
+	// before it is re-synced — the same order the pending-image strip uses.
+	m.suggest = nil
+	m.layout()
+	m.followVP()
 	m.statusText = i18n.T("waiting for your answer")
 	// The countdown only ticks when there is a deadline: with the timer off a
 	// tick would wake the event loop once a second for nothing.
@@ -103,7 +111,15 @@ func (m *uiModel) openAsk(msg askRequestMsg) tea.Cmd {
 // hang the event loop instead of the turn.
 func (m *uiModel) answer(a ask.Answer) {
 	reply := m.ask.reply
+	wasOpen := m.ask.open
 	m.ask = askState{}
+	if wasOpen {
+		// The question's rows go back to the transcript, so the viewport is
+		// resized before it is re-synced — the reverse of opening, and for the
+		// same reason.
+		m.layout()
+		m.followVP()
+	}
 	if reply != nil {
 		select {
 		case reply <- a:
@@ -153,8 +169,23 @@ func (m *uiModel) customRow() int {
 	return -1
 }
 
+// refitAsk resizes the viewport when the question's own height has changed. A
+// typed custom answer can wrap onto another row, and the panel is measured from
+// what is drawn: without this the frame would grow past the terminal one wrapped
+// row at a time while the user types.
+func (m *uiModel) refitAsk() {
+	if !m.ask.open {
+		return
+	}
+	if m.transcriptRows() != m.vp.Height() {
+		m.layout()
+		m.followVP()
+	}
+}
+
 // askKey drives the overlay.
 func (m *uiModel) askKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	defer m.refitAsk()
 	opts := m.ask.req.Options
 	cr := m.customRow()
 	last := len(opts) - 1
@@ -265,6 +296,8 @@ func (m *uiModel) handleAskTick() tea.Cmd {
 		fmt.Sprintf("%s: %s", i18n.T("no answer in time, chose"), chosen)})
 	m.historyDirty = true
 	m.ask = askState{}
+	m.layout()
+	m.followVP()
 	return nil
 }
 
@@ -282,10 +315,40 @@ func (m *uiModel) askRemaining() time.Duration {
 	return left.Truncate(time.Second) + time.Second
 }
 
+// askHeight is the number of rows the question takes at the bottom of the
+// frame. Zero when it is closed.
+//
+// It is measured from the rendered box rather than counted from the options,
+// because an option's note wraps and the head wraps on a narrow terminal; a
+// count taken before wrapping is not the count that reaches the screen, and a
+// frame one row short pushes the bottom border off it.
+func (m *uiModel) askHeight() int {
+	if !m.ask.open {
+		return 0
+	}
+	return lipgloss.Height(m.askBox())
+}
+
+// askMaxHeight is every row the question may take: the terminal, less the
+// header when it is up, the chat panel's own borders, and one transcript row.
+// The last row is the point — a question that swallowed the whole conversation
+// would be the overlay this replaced, and the user is answering a question
+// about that conversation.
+func (m *uiModel) askMaxHeight() int {
+	top := 0
+	if m.headerVisible() {
+		top = headerHeight
+	}
+	return max(m.height-top-panelBorder-minViewRows, 3)
+}
+
 // askBox renders the question: the options with their notes, the custom row, and
-// the hint line with the countdown.
+// the hint line with the countdown. It is the terminal's full width, like the
+// input box it stands in for, so it reads as the bottom of the chat rather than
+// as a dialog pasted over it.
 func (m *uiModel) askBox() string {
-	inner := m.floatingWidth() - panelBorder
+	width := max(m.width, 24)
+	inner := max(width-panelBorder, 8)
 	var entries [][]string
 	style := func(i int, marker, text string) []string {
 		rows := wrapIndent(text, inner, marker, "     ")
@@ -341,7 +404,10 @@ func (m *uiModel) askBox() string {
 	}
 	title := header
 	if q := strings.TrimSpace(m.ask.req.Question); q != "" {
-		title += "\n" + q
+		// The space matches the one the header line carries: the style pads the
+		// whole string, not each line, so without it the question starts on the
+		// border while every other row starts a cell in.
+		title += "\n " + q
 	}
-	return m.floatingPanel(title, hints, entries, &listView{sel: m.ask.cursor})
+	return m.floatingPanelAt(width, m.askMaxHeight(), title, hints, entries, &listView{sel: m.ask.cursor})
 }

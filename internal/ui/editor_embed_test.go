@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,9 +13,10 @@ import (
 )
 
 // TestEditorToggleKeepsTheWorkspace pins the two-mode contract: ctrl+e (the
-// /editor command) starts the workspace in editor mode with the tabs for the
-// files the agent changed; the same command returns to the chat, where the
-// chrome — tab bar, tree, status bar — stays up around the transcript.
+// /editor command) starts the workspace in editor mode on an empty editor — a
+// changed file opens a tab when the user picks it, not on the way in; the same
+// command returns to the chat, where the chrome — tab bar, tree, status bar —
+// stays up around the transcript.
 func TestEditorToggleKeepsTheWorkspace(t *testing.T) {
 	m := newTurnModel(t)
 	m.workDir = editorWorkDir(t)
@@ -151,18 +153,26 @@ func TestCtrlQQuitsFromTheChat(t *testing.T) {
 }
 
 // TestNewSessionDropsTheEditorsTabs pins what /new does to the workspace:
-// the tabs the previous session's edits opened do not come back on the next
-// ctrl+e — a new conversation does not start from the old one's files.
+// the tabs the previous session opened do not survive into the next one — a new
+// conversation does not start from the old one's files.
 func TestNewSessionDropsTheEditorsTabs(t *testing.T) {
 	m := newSessionModel(t)
 	m.workDir = t.TempDir()
 
-	// The agent changed a file; entering the editor opens a tab for it.
-	dmtools.RecordChange(filepath.Join(m.workDir, "a.txt"), "x\n", "y\n")
+	// The agent changed a file and the user opened it: that is the only way a
+	// tab gets there now.
+	path := filepath.Join(m.workDir, "a.txt")
+	if err := os.WriteFile(path, []byte("y\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dmtools.RecordChange(path, "x\n", "y\n")
 	t.Cleanup(dmtools.ResetChanges)
 	_ = m.openEditor()
+	if !m.ed.OpenAt(path, 1) {
+		t.Fatal("the changed file must open when asked")
+	}
 	if v := m.View(); !strings.Contains(v.Content, "a.txt") {
-		t.Fatalf("the changed file must have a tab, got:\n%.200s", v.Content)
+		t.Fatalf("the opened file must have a tab, got:\n%.200s", v.Content)
 	}
 
 	// A new session resets the tally and drops the tabs with it.
@@ -170,6 +180,36 @@ func TestNewSessionDropsTheEditorsTabs(t *testing.T) {
 	_ = m.openEditor()
 	if v := m.View(); strings.Contains(v.Content, "a.txt") {
 		t.Fatalf("the previous session's tabs must not survive /new, got:\n%.200s", v.Content)
+	}
+}
+
+// TestEnteringTheEditorOpensNoChangedFiles pins the change this file exists
+// around: the CHANGES list is a menu, not a to-do list. Entering the editor with
+// two files changed must leave the editor empty — a tab is opened by clicking a
+// row, and opening both would put the user on whichever one happened to come
+// last instead of the one they asked for.
+func TestEnteringTheEditorOpensNoChangedFiles(t *testing.T) {
+	m := newSessionModel(t)
+	m.workDir = t.TempDir()
+
+	for _, name := range []string{"alpha.txt", "beta.txt"} {
+		path := filepath.Join(m.workDir, name)
+		if err := os.WriteFile(path, []byte("new\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dmtools.RecordChange(path, "old\n", "new\n")
+	}
+	t.Cleanup(dmtools.ResetChanges)
+
+	_ = m.openEditor()
+	v := m.View()
+	for _, name := range []string{"alpha.txt", "beta.txt"} {
+		if strings.Contains(v.Content, name) {
+			t.Fatalf("entering the editor must not open %s, got:\n%.200s", name, v.Content)
+		}
+	}
+	if !strings.Contains(v.Content, "no file open") {
+		t.Fatalf("the editor must start with no file open, got:\n%.200s", v.Content)
 	}
 }
 

@@ -35,10 +35,10 @@ const (
 )
 
 type fetchURLArgs struct {
-	URL string `json:"url"`
+	URL string `json:"url" jsonschema:"The page to read."`
 	// MaxChars caps the returned text. Twenty thousand characters is already a
 	// long page; a model rarely needs all of one.
-	MaxChars int `json:"max_chars,omitempty"`
+	MaxChars int `json:"max_chars,omitempty" jsonschema:"How much of the page to return, in characters. Default 20000."`
 }
 
 type fetchURLResult struct {

@@ -114,6 +114,11 @@ func (m *uiModel) rewind() {
 	// The recall list offered the prompt as something already sent; offering it
 	// again straight after an undo would walk the user in circles.
 	m.dropLastPrompt()
+	// A turn that triggered compaction took its summary with it: the summary
+	// is stored after the prompt being cut. Ask the store directly rather than
+	// through noteCompaction, so the note stays truthful even when the current
+	// provider has no known window and compaction is off.
+	m.compacted = m.sessions.HasCompaction(sessionApp, sessionUser, m.sessionID)
 
 	m.input.SetValue(prompt)
 	m.input.CursorEnd()
@@ -208,6 +213,7 @@ func (m *uiModel) newSession(title string) {
 	m.sessionID = newSessionID()
 	m.turnCount = 0
 	m.toolCallCount = 0
+	m.compacted = false
 	m.promptMarks = nil
 	// The jump key's walk is a position in this session's transcript, and a new
 	// session has a different one. Carried over it would start the walk halfway
@@ -283,6 +289,7 @@ func (m *uiModel) switchSession(id string) {
 	m.pending = nil
 	m.turnCount = 0
 	m.toolCallCount = 0
+	m.compacted = false
 	m.lastTool = ""
 	// The workspace's tabs belong to the conversation that opened them; a
 	// resumed one starts from its own files, not the previous session's.
@@ -311,6 +318,7 @@ func (m *uiModel) summariseSession(id string) {
 		m.followVP()
 		return
 	}
+	m.compacted = m.sessions.HasCompaction(sessionApp, sessionUser, id)
 	if tr.Title != "" {
 		m.history = append(m.history, line{kindSys, "— " + tr.Title + " —"})
 	}
@@ -334,6 +342,18 @@ func (m *uiModel) summariseSession(id string) {
 	m.followVP()
 }
 
+// noteCompaction asks the store whether this session has produced a summary.
+// The summary is appended by ADK's compaction processor, not yielded through
+// runner.Run, so the turn's own event stream cannot say it happened. Once the
+// answer is yes it stays yes until a rewind removes the summary, so this asks
+// only while it is still false.
+func (m *uiModel) noteCompaction() {
+	if m.compacted || m.sessions == nil {
+		return
+	}
+	m.compacted = m.sessions.HasCompaction(sessionApp, sessionUser, m.sessionID)
+}
+
 // printTurn draws one restored turn.
 //
 // Every entry is drawn, and through the same functions the live turn draws them:
@@ -351,7 +371,7 @@ func (m *uiModel) printTurn(t memsession.Turn) {
 			if e.Call == nil {
 				continue
 			}
-			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, toolArgs(e.Call.Args))})
+			m.history = append(m.history, line{kindTool, toolLine(e.Call.Name, e.Call.Args)})
 		case memsession.EntryToolResult:
 			if e.Result == nil {
 				continue

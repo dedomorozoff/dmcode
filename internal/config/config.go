@@ -89,6 +89,24 @@ func SessionsDir() string {
 	return filepath.Join(home, ".dmcode", "sessions")
 }
 
+// RagDir is where the local retrieval index is kept, defaulting to
+// ~/.dmcode/rag. DMCODE_RAG_DIR overrides it for tests and for a user who wants
+// the index beside a project rather than in their home directory.
+//
+// The index is a cache, not history: losing it costs a rebuild, never a
+// conversation. An unresolvable home therefore falls back to the system
+// temporary directory rather than disabling RAG outright.
+func RagDir() string {
+	if p := os.Getenv("DMCODE_RAG_DIR"); p != "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "dmcode-rag")
+	}
+	return filepath.Join(home, ".dmcode", "rag")
+}
+
 // Version is the dmcode build version, stamped by main from the -ldflags
 // value and read by the sidebar's brand block. A plain "go build" leaves it
 // at "dev", which is the honest answer for a binary nobody tagged.
@@ -283,6 +301,15 @@ func fetchServedModels(baseURL, apiKey string, timeout time.Duration) ([]servedM
 			MaxModelLen      int    `json:"max_model_len"`
 			ContextLength    int    `json:"context_length"`
 			MaxContextLength int    `json:"max_context_length"`
+			// llama.cpp reports its context sizes under meta: n_ctx is the
+			// slot context the server actually runs with, n_ctx_train is the
+			// model's training cap. A server started with a small -c names the
+			// small number here and nowhere else, so a parser that only reads
+			// the top-level aliases sees no window and disables compaction.
+			Meta struct {
+				NCtx      int `json:"n_ctx"`
+				NCtxTrain int `json:"n_ctx_train"`
+			} `json:"meta"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
@@ -292,7 +319,15 @@ func fetchServedModels(baseURL, apiKey string, timeout time.Duration) ([]servedM
 	for _, m := range body.Data {
 		ctx := m.MaxModelLen
 		if ctx <= 0 {
+			// The slot context is the cap the server enforces, so it wins over
+			// the training context when both are present.
+			ctx = m.Meta.NCtx
+		}
+		if ctx <= 0 {
 			ctx = m.ContextLength
+		}
+		if ctx <= 0 {
+			ctx = m.Meta.NCtxTrain
 		}
 		if ctx <= 0 {
 			ctx = m.MaxContextLength

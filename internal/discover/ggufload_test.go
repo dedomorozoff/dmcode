@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -29,6 +30,16 @@ func TestMain(m *testing.M) {
 	case "fail":
 		fmt.Fprintln(os.Stderr, "llama_model_loader: failed to load model")
 		os.Exit(1)
+	case "dump":
+		// A stand-in whose only job is to record the command line it was
+		// spawned with, so a test can assert what llama-server would have been
+		// started with — the args are assembled in-process, but the proof that
+		// they reach the exec is a real child reading them.
+		dump := os.Getenv("DMCODE_ARG_DUMP")
+		if dump != "" {
+			os.WriteFile(dump, []byte(strings.Join(os.Args, "\n")), 0o644)
+		}
+		os.Exit(0)
 	}
 	os.Exit(m.Run())
 }

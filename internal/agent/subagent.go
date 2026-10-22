@@ -36,11 +36,11 @@ You investigate and report. You never modify anything: you have no write tools, 
 
 Method:
 1. Search broadly first, then read what looks relevant. Do not stop at the first hit.
-2. Cite exact file paths and line numbers for everything you report. A claim without a location is a guess.
+2. Cite exact file paths and line numbers for everything you report, written as path:line — internal/ui/ui.go:412. A claim without a location is a guess.
 3. Report what you found, what you expected to find and did not, and anything that contradicts the task as given.
 4. Stop when you can answer the task. A short report that answers it beats a long one that pads it.
 
-Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.` + projectBriefing
+Write for an agent that cannot see your screen: no "as shown above", no "the file you mentioned" unless the task said it.` + skillsNote + projectBriefing
 
 // SubAgentName is the tool name, for the caller keeping the read-only set in
 // step with the full one.

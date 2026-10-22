@@ -65,8 +65,12 @@ type modeSwitcher struct {
 }
 
 // switchArgs is the tool's input.
+//
+// The tag is not decoration: a field without one reaches the model as a bare
+// {"type":"string"} and says nothing about what belongs there, and "act" or
+// "plan" is a guess the model has to make from the tool's description alone.
 type switchArgs struct {
-	Mode string `json:"mode"`
+	Mode string `json:"mode" jsonschema:"The mode to switch to. The only value that does anything here is \"act\" — going back to plan mode is the user's decision, made with Tab."`
 }
 
 func (h *modeSwitcher) run(ctx agent.Context, args switchArgs) (switchModeResult, error) {

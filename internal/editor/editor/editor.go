@@ -549,7 +549,7 @@ func New(paths ...string) Model { return newModel(false, paths...) }
 // NewEmbedded builds the editor for a host program — dmcode's workspace. The
 // editor's own session file does not apply: a fresh dmcode start opens on a
 // bare editor rather than the last run's tabs, and which files are open is
-// the host's business (OpenChangedTabs on entering the editor, CloseAllTabs
+// the host's business (a clicked change opens a tab; CloseAllTabs drops them
 // when the conversation changes).
 func NewEmbedded(paths ...string) Model { return newModel(true, paths...) }
 
@@ -2055,9 +2055,6 @@ type Host struct {
 	// View renders the main area at the editor's geometry: main-area width
 	// and height, without the chrome.
 	View func(width, height int) []string
-	// ChangedFiles lists the files the agent edited, so entering the editor
-	// opens a tab for each one the workspace does not show yet.
-	ChangedFiles func() []string
 }
 
 // OwnsMsg reports whether the message is one of the editor's own lifecycle
@@ -2080,20 +2077,6 @@ func OwnsMsg(msg tea.Msg) bool {
 // the top-left cell of the main area on the physical screen.
 func (m Model) MainArea() (x, y, w, h int) {
 	return m.leftRailWidth(), 1, m.editorAreaWidth(), m.viewHeight()
-}
-
-// OpenChangedTabs opens a tab for every file the host reports the agent as
-// changed, focusing the one already open. It is called on entering the editor
-// from the chat, so the workspace shows what the last turns touched.
-func (m *Model) OpenChangedTabs() {
-	if m.Host == nil || m.Host.ChangedFiles == nil {
-		return
-	}
-	for _, p := range m.Host.ChangedFiles() {
-		if p != "" {
-			m.focusOrOpen(p)
-		}
-	}
 }
 
 // OpenAt focuses rawPath and puts its cursor on the given 1-based line,

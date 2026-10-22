@@ -11,11 +11,17 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 GOFLAGS  := -trimpath
 
-# GOOS/GOARCH per target, so build-<os>-<arch> works for the whole matrix.
+# GOOS/GOARCH per target: build-<os>-<arch> covers the whole matrix, and a
+# single-part build-<os> borrows the machine's own GOARCH (make build-windows
+# on an amd64 laptop builds the amd64 exe). The -s on the arch cut matters:
+# without it GNU cut passes a line through whole when it holds no delimiter,
+# so the stem "windows" left arch=windows and the build died on the
+# unsupported pair windows/windows.
 build-%:
 	@mkdir -p $(DIST)
 	@os=$$(echo $* | cut -d- -f1); \
-	arch=$$(echo $* | cut -d- -f2); \
+	arch=$$(echo $* | cut -s -d- -f2); \
+	if [ -z "$$arch" ]; then arch=$$(go env GOARCH); fi; \
 	case "$$os" in windows) ext=".exe";; *) ext="";; esac; \
 	echo "building $(BINARY)-$* $(VERSION)"; \
 	GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" \

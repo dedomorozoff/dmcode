@@ -187,6 +187,41 @@ func TestCompactionFollowsTheWindow(t *testing.T) {
 	}
 }
 
+// A local model reports its own window through Provider.Context, and that is
+// the number a runner built around it has to compact against.
+func TestAnEndpointWindowEnablesCompaction(t *testing.T) {
+	m := &uiModel{}
+	p := config.Provider{Model: "Qwen2.5-Coder-7B-Q4_K_M", Context: 16_384}
+	m.applyWindow(p)
+	if m.exactWindow != 16_384 {
+		t.Fatalf("exactWindow = %d, want 16384", m.exactWindow)
+	}
+	// The runner config is what actually reaches ADK. Checking the helper it
+	// calls would leave the path that builds the runner untested, which is
+	// exactly where compaction went missing.
+	c := m.runnerConfig(nil).Compaction
+	if c == nil {
+		t.Fatal("an endpoint-reported window got no compaction")
+	}
+	if want := 16_384 * 7 / 10; c.TokenThreshold != want {
+		t.Errorf("TokenThreshold = %d, want %d", c.TokenThreshold, want)
+	}
+}
+
+// A provider swap has to re-read the window before building the runner. The
+// GGUF model that just finished loading is the case this exists for: the
+// provider carrying its slot context arrives after startup, and a runner built
+// from the old zero window cannot compact.
+func TestAProviderSwapReappliesTheWindow(t *testing.T) {
+	m := &uiModel{}
+	// BuildAgent may fail here (there is no endpoint), which is fine: the
+	// window is applied before it, and that is the ordering under test.
+	m.rebuildRunnerFor(config.Provider{Model: "gpt-4o", Context: 16_384})
+	if m.exactWindow != 16_384 {
+		t.Fatalf("exactWindow = %d, want 16384", m.exactWindow)
+	}
+}
+
 // A meter without a denominator answers nothing: "32 000 tokens" leaves the
 // reader to guess the window. An unrecognised model used to produce exactly
 // that, which is what "out of how much?" was about.

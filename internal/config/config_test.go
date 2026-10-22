@@ -95,6 +95,26 @@ func TestModelContextReadsTheServersOwnFigure(t *testing.T) {
 	}
 }
 
+// A llama.cpp model reports its slot context under meta, and that is the
+// number the server enforces. ModelContext has to read it or a model switch
+// loses the window the meter and compaction were built around.
+func TestModelContextReadsLlamaCppMeta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[
+			{"id":"slot","meta":{"n_ctx":16384,"n_ctx_train":131072}},
+			{"id":"train-only","meta":{"n_ctx_train":32768}}
+		]}`)
+	}))
+	defer srv.Close()
+
+	if got := ModelContext(srv.URL, "", "slot"); got != 16_384 {
+		t.Errorf("ModelContext(slot) = %d, want 16384 (the slot context)", got)
+	}
+	if got := ModelContext(srv.URL, "", "train-only"); got != 32_768 {
+		t.Errorf("ModelContext(train-only) = %d, want 32768 (the training cap)", got)
+	}
+}
+
 func TestProviderWireDefaultsToResponses(t *testing.T) {
 	if got := (Provider{}).Wire(); got != APIResponses {
 		t.Errorf("empty provider should default to responses, got %q", got)

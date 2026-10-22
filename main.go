@@ -26,6 +26,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/i18n"
 	dmmcp "github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
+	"github.com/dedomorozoff/dmcode/internal/skills"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
 	"google.golang.org/adk/v2/tool"
@@ -194,6 +195,11 @@ func run(dir string, want resumeFlag) error {
 	// deferred call covers quitting during the load as well as after it, which is
 	// the case that used to leave an orphan holding a large model in memory.
 	defer discover.StopGGUF()
+	// A command the agent started in the background must not outlive the
+	// session that started it: a build nobody is waiting for is a process
+	// holding a machine's worth of CPU, and on Windows a child does not die
+	// with its parent.
+	defer tools.StopBackground()
 
 	agentTools, err := tools.MakeTools()
 	if err != nil {
@@ -216,6 +222,19 @@ func run(dir string, want resumeFlag) error {
 	}
 	agentTools = append(agentTools, askTool)
 	readOnlyTools = append(readOnlyTools, askTool)
+
+	// Skills are instructions, not instruments: the tool only reads a file the
+	// user installed. It belongs in both sets for the same reason the question
+	// tool does — loading a skill is not an edit, and plan mode is exactly
+	// where a release checklist or a review rubric is wanted.
+	catalog := skills.Discover(mustGetwd())
+	skillTool, err := skills.MakeTool(catalog)
+	if err != nil {
+		return err
+	}
+	agentTools = append(agentTools, skillTool)
+	readOnlyTools = append(readOnlyTools, skillTool)
+	skillNotes := append([]string(nil), catalog.Notes...)
 
 	// The delegation tool is built against the read-only set: a sub-agent that
 	// could write would be a second agent editing the workspace while the user
@@ -248,6 +267,7 @@ func run(dir string, want resumeFlag) error {
 	}
 
 	mcpServers, mcpNotes := dmmcp.Load(mustGetwd())
+	mcpNotes = append(mcpNotes, skillNotes...)
 	mcpToolsets := dmmcp.Toolsets(mcpServers)
 	// One eager pass per server, and the sidebar's MCP section is built from the
 	// same result the tool names come from: a second listing would be a second
@@ -272,12 +292,26 @@ func run(dir string, want resumeFlag) error {
 	for _, st := range mcpStates {
 		toolNames = append(toolNames, st.Tools...)
 	}
+	skillLines := make([]string, 0, len(catalog.Skills))
+	for _, s := range catalog.Skills {
+		line := s.ID
+		if s.Name != "" && s.Name != s.ID {
+			line += " — " + s.Name
+		}
+		if desc := strings.Join(strings.Fields(s.Description), " "); desc != "" {
+			line += ": " + desc
+		}
+		if !s.AutoInvoke {
+			line += " (manual)"
+		}
+		skillLines = append(skillLines, line)
+	}
 	// When the user configured an endpoint the pool holds just that one: the
 	// free endpoints join it later, and only if it fails, so a working key
 	// never pays for a probe of candidates it does not need.
 	// A GGUF load is still running when the interface appears; the UI shows it
 	// loading and swaps the provider in when it answers.
-	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, mcpToolsets, mcpStates, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
+	return ui.RunTUI(ctx, pool[0], pool, agentTools, readOnlyTools, toolNames, skillLines, mcpToolsets, mcpStates, mcpNotes, broker, bindSubNotifier, yoloTools, ui.Resume{Asked: want.Asked, ID: want.ID}, session.Loading)
 }
 
 // mustGetwd returns the current directory, or "." when the platform refuses to
