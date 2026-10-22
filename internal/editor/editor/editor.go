@@ -25,6 +25,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/editor/vcs"
 	"github.com/dedomorozoff/dmcode/internal/editor/watcher"
 	"github.com/dedomorozoff/dmcode/internal/pathnorm"
+	"github.com/dedomorozoff/dmcode/internal/theme"
 )
 
 type tab struct {
@@ -554,6 +555,7 @@ func New(paths ...string) Model { return newModel(false, paths...) }
 func NewEmbedded(paths ...string) Model { return newModel(true, paths...) }
 
 func newModel(embed bool, paths ...string) Model {
+	ApplyTheme(theme.Current())
 	fe := make(chan string, 16)
 	m := Model{
 		g:                     unicodeGlyphs,

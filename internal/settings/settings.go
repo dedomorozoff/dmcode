@@ -33,6 +33,11 @@ type S struct {
 	GGUFPath    string `json:"gguf_path,omitempty"`
 	LlamaServer string `json:"llama_server,omitempty"`
 	LlamaArgs   string `json:"llama_args,omitempty"`
+	// Theme and Wallpaper are the interface's look. Theme is a stable palette
+	// id; Wallpaper is the image replacing the terminal background, or empty
+	// for none. Both are global preferences, like the language.
+	Theme     string `json:"theme,omitempty"`
+	Wallpaper string `json:"wallpaper,omitempty"`
 }
 
 var (

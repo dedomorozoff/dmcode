@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -35,6 +37,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/llm"
 	"github.com/dedomorozoff/dmcode/internal/mcp"
 	"github.com/dedomorozoff/dmcode/internal/memsession"
+	"github.com/dedomorozoff/dmcode/internal/theme"
 	"github.com/dedomorozoff/dmcode/internal/todo"
 	dmtools "github.com/dedomorozoff/dmcode/internal/tools"
 
@@ -121,6 +124,9 @@ var (
 	styleHeader  = lipgloss.NewStyle().Bold(true).Foreground(cAccent)
 	styleHint    = lipgloss.NewStyle().Foreground(cDim)
 	styleSuggest = lipgloss.NewStyle().Bold(true).Foreground(cTool)
+	// styleSelect is the highlighted row of a list. Shared so a theme switch
+	// moves every picker at once.
+	styleSelect = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 	// The change tally. Additions and removals are coloured apart because a
 	// signed count read at a glance is the whole point of showing them, and
 	// "+12 -3" in one colour is just a number pair.
@@ -438,7 +444,10 @@ type uiModel struct {
 	picker        modelPicker
 	setup         setupState
 	lang          langState
-	suggest       []suggestion
+	// themePick is the /theme list. Like /lang it is a fixed, short set, so
+	// it needs a highlight and nothing else.
+	themePick themePickState
+	suggest   []suggestion
 	// suggestSel is the highlighted row of the command list. It is reset on every
 	// keystroke, so a narrowed list always starts at the top.
 	suggestSel int
@@ -570,6 +579,27 @@ type uiModel struct {
 	// image preview is drawn. It is recorded rather than asked for at draw time
 	// because the renderer is the only thing that knows it.
 	profile colorprofile.Profile
+	// wallpaper is the decoded picture drawn behind the whole interface. It is
+	// kept decoded rather than as a path so a frame never touches the disk, and
+	// the sampled grid is cached against a generation counter so a resize is the
+	// only thing that re-samples it.
+	wallpaper     image.Image
+	wallpaperPath string
+	wallpaperGen  int
+	// A wallpaper is a file or a generated effect. A GIF keeps its frames and
+	// per-frame delays; an effect is drawn from time and needs no frames. Both
+	// animate through the same tick, and wallTickGen is what stops a tick from a
+	// wallpaper that has since been replaced.
+	wallFrames  []image.Image
+	wallDelays  []time.Duration
+	wallFrame   int
+	wallFx      string
+	wallStart   time.Time
+	wallTickGen int
+	wallGrid    []color.RGBA
+	wallGridW   int
+	wallGridH   int
+	wallGridGen int
 	// synDiff is the diff block's highlighter, created lazily when the first
 	// change block is drawn. The editor's own highlighter is preferred — same
 	// theme the user already reads code in — and survives even if the editor
@@ -1172,6 +1202,8 @@ func (m *uiModel) overlayWheel(msg tea.MouseWheelMsg) bool {
 		sel, n = &m.setup.list.sel, len(config.SetupOptions())
 	case m.lang.open:
 		sel, n = &m.lang.selected, len(i18n.Langs)
+	case m.themePick.open:
+		sel, n = &m.themePick.selected, len(theme.Names())
 	default:
 		return false
 	}
@@ -1300,6 +1332,12 @@ func (m *uiModel) commands() []command {
 		{name: "lang", desc: i18n.T("interface language"), run: func(m *uiModel) tea.Cmd {
 			return m.openLangPicker()
 		}},
+		{name: "theme", desc: i18n.T("colour theme: background, text and bold text"), run: func(m *uiModel) tea.Cmd {
+			return m.openThemePicker()
+		}},
+		{name: "wallpaper", takesArg: true, desc: i18n.T("draw a picture or a generated effect behind the interface (/wallpaper <path|effect>, list, off)"), run: func(m *uiModel) tea.Cmd {
+			return m.setWallpaper("")
+		}},
 		{name: "help", desc: i18n.T("show the hotkeys"), run: func(m *uiModel) tea.Cmd {
 			m.history = append(m.history,
 				line{kindSys, i18n.T("ctrl+p — commands · ctrl+b — panel · ctrl+y — copy reply · ctrl+l — clear · ctrl+n — new session")},
@@ -1310,7 +1348,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, fmt.Sprintf(i18n.T("click a change or a path:line in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /new [name], /sessions, /rewind, /compact, /skills, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /theme, /wallpaper, /new [name], /sessions, /rewind, /compact, /skills, /clear, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -1425,6 +1463,13 @@ func InitialModel(r *runner.Runner, svc session.Service, p config.Provider, tool
 		// Starting in yolo would be a session the user never asked for.
 		beforeYolo: modeAct,
 	}
+	// The saved wallpaper rides in through the boot value because main reads
+	// settings before the UI exists. It is taken once: a second model in the same
+	// process (tests, a re-run) should not inherit a picture the first one owned.
+	if bootWallpaper != nil {
+		m.applyWallpaper(bootWallpaper)
+		bootWallpaper = nil
+	}
 	// The repository facts for the first frame, read here rather than by the
 	// refresh command: the program does not exist yet, so a message could not be
 	// delivered, and a panel that opens with no GIT section and gains one a
@@ -1462,7 +1507,7 @@ func (m *uiModel) Init() tea.Cmd {
 	// The workspace exists from the first frame — the terminal, the tree and
 	// the git panel are one key (or one status-bar icon) away — but every
 	// panel starts closed: the first screen is the chat, not furniture.
-	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd(), m.gitStatusCmd())
+	return tea.Batch(textinput.Blink, m.spin.Tick, tea.RequestWindowSize, m.toolCheckCmd(), m.ensureEditor(), m.ggufLoadCmd(), m.gitStatusCmd(), m.wallpaperTickCmd())
 }
 
 // ggufLoadCmd waits for the background model load and reports the outcome.
@@ -1829,6 +1874,9 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.langKey(msg)
 			return model, cmd
 		}
+		if m.themePick.open {
+			return m.themeKey(msg)
+		}
 		if m.sessionsList.open {
 			model, cmd := m.sessionsKey(msg)
 			return model, cmd
@@ -2118,6 +2166,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
+			case "/theme":
+				return m, m.openThemePicker()
+			case "/wallpaper":
+				return m, m.setWallpaper("")
 			case "/models":
 				if m.busy {
 					return m, nil
@@ -2219,6 +2271,14 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// busy: a user who has just been shown a failure mid-turn is
 				// exactly the user who wants to try a different picture next.
 				return m, m.attachImageCmd(arg)
+			}
+			// The space after the name is deliberate: "/themes" is a prompt, not
+			// /theme with an argument named "s".
+			if arg, ok := strings.CutPrefix(text, "/theme "); ok {
+				return m, m.chooseTheme(strings.TrimSpace(arg))
+			}
+			if arg, ok := strings.CutPrefix(text, "/wallpaper "); ok {
+				return m, m.setWallpaper(strings.TrimSpace(arg))
 			}
 			if arg, ok := strings.CutPrefix(text, "/debug"); ok {
 				// Cut by prefix rather than by HasPrefix, so "/debugger" is a prompt
@@ -2340,6 +2400,10 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case imageErrMsg:
 		m.reportImage(i18n.T("clipboard"), msg.err)
 		return m, nil
+	case wallpaperMsg:
+		return m, m.handleWallpaper(msg)
+	case wallpaperTickMsg:
+		return m, m.wallpaperTick(msg)
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
@@ -2897,6 +2961,19 @@ func (m *uiModel) updateSuggest() {
 // statement the user is still editing: delete the path and the picture must go
 // with it, or the strip goes on showing something they have taken back.
 func (m *uiModel) watchInputImage() tea.Cmd {
+	// A path in /wallpaper is an argument, not an attachment. Without this the
+	// picture being chosen as the background also sits in the attachment strip
+	// and would be sent to the model with the next prompt.
+	if isWallpaperCommand(m.input.Value()) {
+		if m.watchedPath != "" {
+			m.watchedPath = ""
+			if m.dropInputPending() {
+				m.layout()
+				m.followVP()
+			}
+		}
+		return nil
+	}
 	cand := ""
 	for _, tok := range splitTokens(m.input.Value()) {
 		if looksLikeImage(tok.text) {
@@ -4180,6 +4257,8 @@ func (m *uiModel) pasteTarget() *string {
 	// The language list has no text field, so a paste has nowhere to go. It is
 	// checked first so it cannot be shadowed by a stale overlay flag.
 	case m.lang.open:
+		return nil
+	case m.themePick.open:
 		return nil
 	// The GGUF browser has no text field either; a paste aimed at it must not
 	// silently land in the path prompt underneath.
@@ -5781,7 +5860,7 @@ func (m *uiModel) suggestBox() string {
 	// instead of stretching under the sidebar or floating free of both.
 	width := max(min(m.chatBoxWidth(), floatingBoxMaxWidth), 24)
 	inner := width - panelBorder
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+	styleSel := styleSelect
 
 	// The title names the keys, and the commands follow directly: a blank spacer
 	// row here is a row the list cannot use, and on a short terminal it is the
@@ -5960,7 +6039,7 @@ func (m *uiModel) floatingList(head []string, entries [][]string, lv *listView) 
 // full-screen case; the question uses it to fill the terminal's width while
 // taking only the rows the transcript can spare.
 func (m *uiModel) panelBox(width, maxHeight int, head []string, entries [][]string, lv *listView) string {
-	styleSel := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
+	styleSel := styleSelect
 
 	// The head is measured rather than counted. The title shares its row with
 	// the "esc — close" hint, so a narrow box wraps it onto two rows; a head
@@ -6348,10 +6427,10 @@ func (m *uiModel) View() tea.View {
 	// The editor's own altscreen flag and mouse mode ride on the View it
 	// returns.
 	if m.ed != nil {
-		return m.ed.View()
+		return m.personalizeView(m.ed.View())
 	}
 	if m.width == 0 {
-		return tea.NewView(i18n.T("dmcode is starting…"))
+		return m.personalizeView(tea.NewView(i18n.T("dmcode is starting…")))
 	}
 	v := tea.NewView(m.buildFrame())
 	v.AltScreen = true
@@ -6365,7 +6444,7 @@ func (m *uiModel) View() tea.View {
 	} else {
 		v.MouseMode = tea.MouseModeNone
 	}
-	return v
+	return m.personalizeView(v)
 }
 
 // modalUp reports whether one of the stacked boxes owns the whole frame: with
@@ -6380,7 +6459,7 @@ func (m *uiModel) modalUp() bool {
 // and keeps its rows. It still owns the keyboard (modalUp) — an answer is
 // required before the turn can carry on — but it does not own the frame.
 func (m *uiModel) otherModalUp() bool {
-	return m.picker.open || m.palette.open || m.setup.open || m.lang.open ||
+	return m.picker.open || m.palette.open || m.setup.open || m.lang.open || m.themePick.open ||
 		m.proxy.open || m.sessionsList.open || m.dirPick.open ||
 		m.help.open || m.ctxPick.open
 }
@@ -6409,6 +6488,8 @@ func (m *uiModel) buildFrame() string {
 			box = m.setupBox()
 		case m.lang.open:
 			box = m.langBox()
+		case m.themePick.open:
+			box = m.themeBox()
 		case m.proxy.open:
 			box = m.proxyBox()
 		case m.sessionsList.open:

@@ -342,6 +342,42 @@ English by default. Run `/lang` to switch to Russian; the choice is saved to
 `~/.dmcode/settings.json` and restored on the next start. `DMCODE_LANG=ru`
 overrides it for a single run.
 
+## Themes and wallpapers
+
+`/theme` opens a palette picker; `/theme <id>` applies one directly. The
+palettes are `dmcode` (the historic look, and the default), `midnight`,
+`graphite`, `light`, `nord` and `solarized`. A theme recolours the background,
+prose, bold text, bars, borders, badges and the editor chrome. `dmcode` leaves
+the terminal's own background and foreground alone; every other theme paints
+them. The choice is saved to `~/.dmcode/settings.json` and restored on start.
+
+`/wallpaper` puts a picture or a generated effect behind the whole interface —
+the chat and the editor alike. Prose is drawn in a darker shell so it stays
+readable, while badges, diff blocks and selected rows keep the backgrounds that
+carry meaning.
+
+```bash
+/wallpaper ~/Pictures/desk.jpg     # a file; ~ and relative paths work
+/wallpaper "shots/my desk.png"     # quotes keep a path with spaces together
+/wallpaper ./assets/loop.gif       # GIF: the frames animate
+/wallpaper bubbles                 # generated: bubbles, fire, waves, aurora, stars
+/wallpaper fx:fire                 # force the effect even if a file named fire exists
+/wallpaper list                    # the generated effects and the current choice
+/wallpaper off                     # back to the theme's plain background
+```
+
+A relative path is resolved against the working folder, not the shell's current
+directory. A bare effect name wins only when no file of that name exists; the
+`fx:` prefix is the unambiguous spelling. PNG, JPEG and GIF are the formats
+users reach for, and anything `internal/imgprev` can decode works. A GIF keeps
+at most 60 frames and is scaled to fit 1280×720 — enough for the cell grid, and
+small enough not to hold a session's memory. Still pictures are sampled once per
+size; GIFs and effects repaint on a timer, and the tick chain stops by itself
+when the wallpaper is cleared or replaced.
+
+The choice is saved as a path (or `fx:<id>`) in
+`~/.dmcode/settings.json` under `wallpaper`; the picture itself is not copied.
+
 ## Working directory
 
 dmcode works in the directory it was started in. To point it somewhere else
@@ -738,7 +774,7 @@ refresh (the start, the end of a turn, a `/cd`, leaving the editor), read off
 the frame rather than on it, so an unreadable tree says `status unavailable`
 instead of printing zeros about a clean tree nobody checked.
 
-Commands: `/setup` `/models` `/model <id>` `/tools` `/skills` `/history` `/lang` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/compact` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/model <id>` `/tools` `/skills` `/history` `/lang` `/theme` `/wallpaper` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/compact` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
 ## Commands
 
@@ -954,8 +990,9 @@ internal/mcp         external MCP servers and their config
 internal/memsession  the session store and its JSONL persistence
 internal/pathnorm    one spelling of a path, so two names for one file compare equal
 internal/rag         the local BM25 index and its session-history loader
-internal/settings    ~/.dmcode/settings.json — saved provider, model, proxy, language
+internal/settings    ~/.dmcode/settings.json — saved provider, model, proxy, language, theme, wallpaper
 internal/skills      OpenCode-compatible skill discovery and the skill tool
+internal/theme       the colour palettes and the one in effect
 internal/todo        the agent's plan
 internal/tools       the workspace tools, the boundary they are confined to,
                      the change tally and the turn journal ctrl+z reads

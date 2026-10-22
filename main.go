@@ -184,6 +184,11 @@ func run(dir string, want resumeFlag) error {
 	config.Version = version
 	// Before anything renders, so even the setup wizard speaks the saved language.
 	i18n.Init()
+	// The saved theme and wallpaper are part of the first frame, so they are
+	// applied before the UI is built. A missing picture is reported and skipped.
+	for _, note := range ui.LoadPersonalization() {
+		fmt.Fprintln(os.Stderr, "dmcode: "+note)
+	}
 	ctx := context.Background()
 
 	session, err := discover.DetectProviders()
