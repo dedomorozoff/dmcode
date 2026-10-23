@@ -8,7 +8,11 @@ BINARY   := dmcode
 DIST     := dist
 VERSION  ?= dev
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS  := -s -w -X main.version=$(VERSION)
+# The branch a build came from, and the tag it was cut at when there is no
+# branch — a release is built from a detached HEAD, and "HEAD" is not a name a
+# person can file a bug against. The tag is the honest answer there.
+GIT_BRANCH := $(shell git symbolic-ref --quiet --short HEAD 2>/dev/null || git describe --tags --exact-match 2>/dev/null || echo unknown)
+LDFLAGS  := -s -w -X main.version=$(VERSION) -X main.branch=$(GIT_BRANCH) -X main.commit=$(GIT_COMMIT)
 GOFLAGS  := -trimpath
 
 # GOOS/GOARCH per target: build-<os>-<arch> covers the whole matrix, and a

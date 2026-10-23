@@ -56,6 +56,11 @@
 > - skills, RAG and `/compact` have unit and wire-shape tests, but no live model
 >   has called `skill` or `rag_search`, and `/compact` has not been driven
 >   through a real TUI turn against an endpoint;
+> - `/update` has never installed a real release. `internal/update`'s tests
+>   install into a temporary directory against an `httptest` server, so the live
+>   GitHub asset list, a real `sha256sums.txt`, and the Windows rename-aside
+>   have not been exercised by an actual `/update`; `/version` likewise has only
+>   been seen with stamps a test supplied.
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
@@ -98,6 +103,11 @@
   - `internal/todo`: the agent's plan — the store behind `todo_write`/`todo_set`/`todo_read` and the `/todo` view.
   - `internal/ask`: the broker between the `ask_user` tool and the question overlay. Its own package because `tools` cannot import `ui` and `ui` does not build tools; the `Broker` is the seam.
   - `internal/i18n`: user-facing strings; English is the source language, `catalog_ru.go` holds the Russian one.
+  - `internal/update`: the release check and the installer behind `/version`,
+    `/update` and `/changelog`. `Client.Latest` reads GitHub's release API;
+    `Install` downloads the asset for this platform, verifies it against the
+    release's `sha256sums.txt`, and renames it over the running binary. The
+    asset names are the ones `install.sh` fetches.
   - `internal/imgprev`: turns image bytes into a picture in the terminal and into
     the reduced bytes that go on the wire. Two outputs from one input, in that
     order, so what is drawn is what is sent. `Load` does all of it. `Render` and
@@ -557,6 +567,48 @@ next. `retryable()` answers "is another host worth trying" and so allows a 401;
 `sameEndpointRetryable()` answers "is asking this host again worth it" and does
 not. Keeping them separate is the point — a rejected key is another endpoint's
 problem, not a reason to repeat the same request twice.
+
+### Version and updates
+
+`/version`, `/update` and `/changelog` live in `internal/ui/update.go` over
+`internal/update`. Six things about them are not obvious:
+
+- **The branch is stamped into the binary, not read from the tree at run
+  time.** A checkout and a release can carry the same version number, and the
+  only thing that tells them apart is the branch and commit they were built
+  from. The Makefile asks git for the branch, falling back to an exact tag and
+  then to `unknown`, and passes `-X main.branch`/`-X main.commit` beside
+  `-X main.version`; a plain `go build` leaves all three empty, and `/version`
+  prints "unknown" rather than a number nobody stamped.
+- **The checksum is verified before the rename, not after.** A download that
+  does not match leaves the working binary untouched. A release with no
+  `sha256sums.txt` is installed with the unverified status said out loud rather
+  than refused: the file is a nicety the release workflow happens to publish,
+  and a self-updater that cannot update is worse than one that says what it
+  could not check.
+- **Windows cannot overwrite a running executable.** `replaceFile` renames the
+  old binary to `<path>.old`, moves the new one in, and `update.CleanupStale`
+  — called from `main` at startup — removes the leftover. On Unix the rename is
+  the whole of it.
+- **`/update check` and `/update` differ by one word, and a second word that is
+  neither is refused.** "tell me" must not silently become "do it", so
+  `/update now` prints the usage line instead of starting an install. Bare
+  `/update` installs because that is the thing a user typing it wants.
+- **A build with no release number is never replaced.** `isReleaseVersion`
+  accepts only a leading decimal number, so `dev` from a plain `make build` and
+  empty from a bare `go build` are reported as a local build and left as they
+  are. The checkout is the user's own code and a self-updater cannot put it
+  back — the same "say what happened instead of doing the surprising thing"
+  rule as the unverified-checksum case.
+- **`update.New` is behind the `newUpdateClient` variable in `internal/ui`.** A
+  test that reached github.com would be slow, rate-limited and dependent on
+  what was released today; the variable lets a test serve an `httptest` handler
+  instead. `internal/update`'s own tests install into a temporary directory and
+  never touch the running binary — a test that overwrites the binary it is
+  running from is a test that destroys the machine it runs on.
+
+A cancelled update is reported as "stopped", never as "update failed: context
+canceled" (§4's rule about a cancelled load, applied to a download).
 
 ### A local model loads behind the interface
 

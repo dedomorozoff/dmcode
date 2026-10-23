@@ -774,7 +774,7 @@ refresh (the start, the end of a turn, a `/cd`, leaving the editor), read off
 the frame rather than on it, so an unreadable tree says `status unavailable`
 instead of printing zeros about a clean tree nobody checked.
 
-Commands: `/setup` `/models` `/model <id>` `/tools` `/skills` `/history` `/lang` `/theme` `/wallpaper` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/compact` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
+Commands: `/setup` `/models` `/model <id>` `/tools` `/skills` `/history` `/lang` `/theme` `/wallpaper` `/mode` `/cd` `/mouse` `/proxy` `/new` `/sessions` `/resume` `/rewind` `/compact` `/todo` `/changes` `/editor` `/image` `/unimage` `/stats` `/version` `/update` `/changelog` `/clear` `/copy` `/sidebar` `/debug` `/help` `/quit`
 
 ## Commands
 
@@ -794,6 +794,40 @@ what a single `enter` takes, so it is the one most likely meant — `/md` gives
 dispatcher, named in this file, and in neither the `/` list nor `ctrl+p`. The
 list of commands and the set of commands being two different sets is how a
 command hides.
+
+## Version and updates
+
+`/version` prints what is running: the version, the branch and the commit it was
+built from, where the binary sits, and the project it came from. The version
+alone cannot answer "am I running the release or my checkout" — both can say
+`v0.1.1` — so the Makefile stamps the branch and the commit into the binary
+next to it (a release built from a tag shows the tag, since a detached HEAD has
+no branch). `dmcode -version` prints the same two on the command line.
+
+`/update` asks GitHub for the newest release, downloads the binary for this OS
+and architecture, checks it against the release's `sha256sums.txt`, and writes
+it over the running binary. `/update check` only says whether there is a newer
+one. `Esc` stops a download; a restart is what puts the new binary to work.
+
+A build nobody tagged — `make build` without `VERSION`, or a plain `go build` —
+is never replaced: the checkout is the user's own code, and no self-updater can
+put it back. `/update` reports the release it found and leaves the binary
+alone.
+
+Three details worth knowing. The checksum is checked *before* the file is put in
+place, so a broken download leaves the working binary alone. The new binary is
+written beside the old one and renamed into place, which is atomic — a copy
+would leave a moment where the path holds half a program. And Windows will not
+overwrite a running executable, so the old binary is renamed aside, the new one
+takes its place, and the leftover is removed on the next start.
+
+`/changelog` prints the newest release's notes — the same text as the release
+page — so "what changed?" does not mean leaving the chat for a browser.
+
+The release is the one `install.sh` fetches, down to the asset names, so a copy
+installed by the script and one updated from inside dmcode are the same file.
+An anonymous call to GitHub's API has a small rate limit; `GITHUB_TOKEN` in the
+environment is used when it is set.
 
 ## HTTP proxy
 

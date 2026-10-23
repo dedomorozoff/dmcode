@@ -89,7 +89,7 @@ func TestTheFirstKeystrokeLeavesTheListOpen(t *testing.T) {
 	for _, tc := range []struct{ needle, first string }{
 		{"p", "/proxy"}, {"c", "/cd"}, {"s", "/setup"}, {"m", "/mode"},
 		{"n", "/new"}, {"h", "/help"}, {"t", "/todo"}, {"r", "/resume"},
-		{"l", "/lang"}, {"i", "/image"}, {"u", "/unimage"}, {"e", "/editor"},
+		{"l", "/lang"}, {"i", "/image"}, {"u", "/update"}, {"e", "/editor"},
 		{"d", "/debug"},
 	} {
 		got := suggestTexts(t, m, "/"+tc.needle)
@@ -230,7 +230,7 @@ func TestEveryCommandThatWorksIsOffered(t *testing.T) {
 		"debug", "new", "todo", "rewind", "resume", "sessions", "cd", "image",
 		"mode", "proxy", "setup", "models", "history", "mouse", "sidebar",
 		"clear", "copy", "help", "quit", "editor", "lang", "tools", "unimage",
-		"changes",
+		"changes", "version", "update", "changelog",
 	} {
 		if !offered[name] {
 			t.Errorf("/%s works but is not offered", name)

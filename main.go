@@ -29,6 +29,7 @@ import (
 	"github.com/dedomorozoff/dmcode/internal/skills"
 	"github.com/dedomorozoff/dmcode/internal/tools"
 	"github.com/dedomorozoff/dmcode/internal/ui"
+	"github.com/dedomorozoff/dmcode/internal/update"
 	"google.golang.org/adk/v2/tool"
 )
 
@@ -38,6 +39,17 @@ import (
 // dev is the honest default: it says the binary was not stamped by a release,
 // which is what a build someone made to try a change should say about itself.
 var version = "dev"
+
+// branch and commit say which build this is. They are stamped next to the
+// version because the version alone cannot answer "am I running the code I
+// am editing": a release and a checkout can carry the same version, and only
+// one of them is the branch the user pushed to.
+//
+// A build from a tree that is not a git checkout has neither, and says so.
+var (
+	branch = "unknown"
+	commit = "unknown"
+)
 
 // subSend is how a delegation reaches the event loop. The tool is built before
 // the program exists, so the sender is attached afterwards; a turn cannot start
@@ -86,7 +98,11 @@ func main() {
 	os.Args = append([]string{os.Args[0]}, rest...)
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("dmcode", version)
+		line := "dmcode " + version
+		if info := buildInfo(); info != "" {
+			line += " (" + info + ")"
+		}
+		fmt.Println(line)
 		return
 	}
 	if *edit {
@@ -98,6 +114,21 @@ func main() {
 	if err := run(*dir, want); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// buildInfo is the branch and the commit of this build in one line.
+//
+// "unknown" is left out: a build made outside a git checkout has nothing to
+// say about itself, and a line of "unknown" says less than no line at all.
+func buildInfo() string {
+	var parts []string
+	if branch != "" && branch != "unknown" {
+		parts = append(parts, "branch "+branch)
+	}
+	if commit != "" && commit != "unknown" {
+		parts = append(parts, "commit "+commit)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // resumeFlag is what -s asked for. Asked and ID are separate because the two
@@ -180,8 +211,18 @@ func run(dir string, want resumeFlag) error {
 	config.LoadSettings()
 	// The sidebar's brand block shows the version; it lives in config because
 	// the UI cannot reach into package main, and main is the only place the
-	// linker-stamped value exists.
+	// linker-stamped value exists. The branch and the commit go with it: they
+	// are the same fact about the same build, and /version prints all three.
 	config.Version = version
+	config.Branch = branch
+	config.Commit = commit
+	// An update on Windows cannot delete the binary it replaced while it is
+	// running, so it leaves the old one beside the new one for the next start
+	// to remove. It is removed here rather than by the update itself: a
+	// program cannot delete the file it is running from.
+	if exe, err := os.Executable(); err == nil {
+		update.CleanupStale(exe)
+	}
 	// Before anything renders, so even the setup wizard speaks the saved language.
 	i18n.Init()
 	// The saved theme and wallpaper are part of the first frame, so they are

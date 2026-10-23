@@ -112,6 +112,17 @@ func RagDir() string {
 // at "dev", which is the honest answer for a binary nobody tagged.
 var Version = "dev"
 
+// Branch and Commit say which build this is — the branch it came from, and
+// the commit it was made at.
+//
+// They are stamped by main for the same reason the version is: the UI cannot
+// reach into package main, and the linker-stamped values live nowhere else.
+// "unknown" is the honest answer for a build made outside a git checkout.
+var (
+	Branch = "unknown"
+	Commit = "unknown"
+)
+
 // ContextWindow is how many prompt tokens the model will accept, which is the
 // number a compaction threshold and a usage bar are both fractions of.
 //

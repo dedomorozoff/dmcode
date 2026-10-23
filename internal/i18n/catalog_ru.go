@@ -401,6 +401,31 @@ var catalog = map[Lang]map[string]string{
 		"write your own answer":                                      "вписать свой вариант",
 		"(recommended)":                                              "(рекомендуется)",
 
+		// Version and updates. The command names stay in Latin script, as they
+		// are typed; the words around them are translated.
+		"version, branch and commit":                                          "версия, ветка и коммит",
+		"install the newest release from GitHub (/update check to look only)": "установить последний релиз с GitHub (/update check — только проверить)",
+		"what changed in the newest release":                                  "что изменилось в последнем релизе",
+		"checking for updates…":                                               "проверяю обновления…",
+		"downloading update…":                                                 "скачиваю обновление…",
+		"fetching the release notes…":                                         "загружаю заметки к релизу…",
+		"stopping…":                                                           "останавливаю…",
+		"timed out":                                                           "истекло время ожидания",
+		"update failed: ":                                                     "обновление не удалось: ",
+		"changelog: ":                                                         "заметки к релизу: ",
+		"cannot find the running binary: ":                                    "не удалось найти запущенный файл: ",
+		"usage: /update, /update check":                                       "usage: /update, /update check",
+		"dmcode %s is the latest release":                                     "dmcode %s — последний релиз",
+		"this build (%s) is newer than the latest release (%s)":               "эта сборка (%s) новее последнего релиза (%s)",
+		"this is a local build (%s) — the newest release is %s; /update leaves it alone": "это локальная сборка (%s) — последний релиз %s; /update её не трогает",
+		"version %s is available — you run %s":                                           "доступна версия %s — у вас %s",
+		"installed %s at %s — restart dmcode to use it":                                  "установлена %s в %s — перезапустите dmcode, чтобы её использовать",
+		"the release publishes no checksum file, so the download was not verified":       "в релизе нет файла контрольных сумм, поэтому загрузка не проверена",
+		"the previous binary is still on disk and will be removed at the next start":     "прежний файл ещё на диске и будет удалён при следующем запуске",
+		"release %s — notes":                                    "релиз %s — заметки",
+		"this release has no notes":                             "у этого релиза нет заметок",
+		"install the newest release — /update check only looks": "установить последний релиз — /update check только проверяет",
+
 		// Pictures.
 		"attach a picture to the next message (/image <path>)":     "прикрепить картинку к следующему сообщению (/image <путь>)",
 		"drop the last attached picture":                           "убрать последнюю прикреплённую картинку",

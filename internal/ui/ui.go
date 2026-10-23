@@ -465,8 +465,13 @@ type uiModel struct {
 	draft         string
 
 	// UX & state components
-	showSidebar   bool
-	cancelTurn    context.CancelFunc
+	showSidebar bool
+	cancelTurn  context.CancelFunc
+	// cancelUpdate stops a /update in flight. It is separate from cancelTurn
+	// because an update is not a turn: it can run while a turn does, and Esc
+	// must be able to stop whichever of the two is the thing the user is
+	// waiting on without clobbering the other's cancel function.
+	cancelUpdate  context.CancelFunc
 	turnCount     int
 	toolCallCount int
 	lastTool      string
@@ -1348,7 +1353,7 @@ func (m *uiModel) commands() []command {
 				line{kindSys, fmt.Sprintf(i18n.T("click a change or a path:line in the transcript, or %s, to open the file at that line"), jumpKey.Help().Key)},
 				line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 				line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /theme, /wallpaper, /new [name], /sessions, /rewind, /compact, /skills, /clear, /quit"})
+				line{kindSys, "/setup, /models, /model <id>, /history, /copy, /sidebar, /lang, /theme, /wallpaper, /new [name], /sessions, /rewind, /compact, /skills, /clear, /version, /update, /changelog, /quit"})
 			m.historyDirty = true
 			return nil
 		}},
@@ -1381,6 +1386,16 @@ func (m *uiModel) commands() []command {
 		}},
 		{name: "proxy", desc: i18n.T("set up the HTTP proxy (a dialog: on, off, bypass)"), run: func(m *uiModel) tea.Cmd {
 			return m.openProxy()
+		}},
+		{name: "version", desc: i18n.T("version, branch and commit"), run: func(m *uiModel) tea.Cmd {
+			m.showVersion()
+			return nil
+		}},
+		{name: "update", desc: i18n.T("install the newest release from GitHub (/update check to look only)"), run: func(m *uiModel) tea.Cmd {
+			return m.updateCmd(false)
+		}},
+		{name: "changelog", desc: i18n.T("what changed in the newest release"), run: func(m *uiModel) tea.Cmd {
+			return m.changelogCmd()
 		}},
 		{name: "quit", desc: i18n.T("quit"), run: func(m *uiModel) tea.Cmd { return m.quitCmd() }},
 	}
@@ -1952,6 +1967,16 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.ggufLoad != nil {
 				return m, m.cancelGGUFLoad()
 			}
+			// A download is the other wait escape can end: the user started it,
+			// it has no keyboard of its own, and a transfer that cannot be left
+			// is the same complaint as a load that could not be. The report is
+			// left to the message the cancelled command sends back, so the
+			// transcript says it once.
+			if m.cancelUpdate != nil {
+				m.forgetUpdate()
+				m.statusText = i18n.T("stopping…")
+				return m, nil
+			}
 		case "ctrl+c":
 			if m.busy {
 				if m.cancelTurn != nil {
@@ -2128,7 +2153,7 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					line{kindSys, i18n.T("ctrl+e — the editor; inside it F1 — editor keys, ctrl+e or ctrl+q — back here")},
 					line{kindSys, i18n.T("proxy: /proxy opens a dialog · /proxy <url> sets it directly · /proxy off stops it")},
 					line{kindSys, i18n.T("image: /image <path> attaches a picture · a dropped path is taken from the prompt · ctrl+v pastes one from the clipboard · /unimage drops the last")},
-					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /compact, /skills, /quit"})
+					line{kindSys, "/setup, /models, /model <id>, /history, /copy, /editor, /sidebar, /mode, /cd <path>, /new [name], /sessions, /resume <id>, /rewind, /compact, /skills, /version, /update, /changelog, /quit"})
 				m.historyDirty = true
 				m.followVP()
 				return m, nil
@@ -2148,6 +2173,13 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "/proxy":
 				return m, m.openProxy()
+			case "/version":
+				m.showVersion()
+				return m, nil
+			case "/update":
+				return m, m.updateCmd(false)
+			case "/changelog":
+				return m, m.changelogCmd()
 			case "/sidebar":
 				m.showSidebar = !m.showSidebar
 				m.layout()
@@ -2188,6 +2220,18 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// they are tested outside the switch: a case here would have to
 			// enumerate every spelling, and "/new" would swallow "/newer" as
 			// itself.
+			//
+			// "/update check" only looks; the switch above ran the bare form,
+			// which installs. The one word is the whole difference between
+			// "tell me" and "do it", so a typo is refused rather than quietly
+			// installing something.
+			if arg, ok := strings.CutPrefix(text, "/update "); ok {
+				if strings.TrimSpace(arg) != "check" {
+					m.statusText = i18n.T("usage: /update, /update check")
+					return m, nil
+				}
+				return m, m.updateCmd(true)
+			}
 			//
 			// The old session is kept rather than wiped: /sessions brings it
 			// back, so a /new pressed by mistake costs one keypress, not a
@@ -2618,6 +2662,12 @@ func (m *uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = append(m.history, line{kindErr, i18n.T("compaction error: ") + msg.err.Error()})
 		}
 		m.historyDirty = true
+	case updateCheckMsg:
+		extra = m.handleUpdateCheck(msg)
+	case updateDoneMsg:
+		m.handleUpdateDone(msg)
+	case changelogMsg:
+		m.handleChangelog(msg)
 	case errMsg:
 		m.busy = false
 		m.statusText = i18n.T("error")
@@ -5520,11 +5570,7 @@ func (m *uiModel) sidebarView(height int) string {
 		// "vdev" would be a version of nothing. It is pushed to the panel's
 		// right edge, under the tail of the art rather than its head, and cut
 		// when a version string outruns the panel.
-		v := config.Version
-		if v != "dev" {
-			v = "v" + v
-		}
-		v = truncate(v, sbInner)
+		v := truncate(versionLabel(config.Version), sbInner)
 		row(styleVersion, strings.Repeat(" ", sbInner-ansi.StringWidth(v))+v)
 		blank()
 
