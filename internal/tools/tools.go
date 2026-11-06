@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1220,6 +1221,52 @@ func detectShell() (string, []string) {
 	return "sh", []string{"-c"}
 }
 
+// killGrace is how long a cancelled command may take to close its output pipes
+// after the tree was killed.
+//
+// An orphan that inherited the write end of the pipe keeps CombinedOutput
+// reading for ever — the kill lands on the process but not on the wait. The
+// grace makes the wait bounded: five seconds is more than any process needs
+// to die once it has been signalled, and less than anyone will wait before
+// concluding the cancel worked.
+const killGrace = 5 * time.Second
+
+// shellCommand builds the command run_command runs: the line inside the
+// detected shell, wired so that cancelling the context kills the whole process
+// tree rather than only the shell.
+//
+// exec.CommandContext alone kills the shell; its children survive on Windows
+// and keep the output pipes open on every platform, which is how a cancelled
+// build used to finish on its own schedule before the turn learned anything.
+// Cancel does the tree kill, and WaitDelay bounds the wait when a killed
+// descendant still holds a pipe.
+func shellCommand(ctx context.Context, command, dir string) *exec.Cmd {
+	shell, flags := detectShell()
+	args := append(append([]string{}, flags...), command)
+	cmd := exec.CommandContext(ctx, shell, args...)
+	cmd.Dir = dir
+	processTree(cmd)
+	cmd.Cancel = func() error { return killTree(cmd) }
+	cmd.WaitDelay = killGrace
+	return cmd
+}
+
+// collectOutput is CombinedOutput with room to attach the kill-job between the
+// start and the wait — a job needs a pid, and CombinedOutput keeps its Start
+// to itself.
+func collectOutput(cmd *exec.Cmd) ([]byte, error) {
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return buf.Bytes(), err
+	}
+	attachKillJob(cmd)
+	err := cmd.Wait()
+	releaseKillJob(cmd)
+	return buf.Bytes(), err
+}
+
 type runCommandArgs struct {
 	Command  string `json:"command" jsonschema:"The command line to run in the workspace's shell."`
 	WorkDir  string `json:"work_dir,omitempty" jsonschema:"A subdirectory of the workspace to run it in. Leave it out for the root."`
@@ -1269,7 +1316,6 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	if err != nil {
 		return runCommandResult{}, err
 	}
-	shell, flags := detectShell()
 
 	// A backgrounded command returns at once. It is not tied to the turn's
 	// context — that is the whole point of it — and it is tied to dmcode, which
@@ -1294,16 +1340,14 @@ func runCommand(ctx agent.Context, in runCommandArgs) (runCommandResult, error) 
 	cmdCtx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 
-	args := append(append([]string{}, flags...), in.Command)
 	// The command runs inside commandEffect rather than directly, so the tree is
 	// compared either side of it and anything it changed reaches the tally. This
 	// is the only instrument that could change the workspace without saying so,
 	// and before it the panel reported what it was told rather than what
 	// happened — which for `sed -i` is nothing at all.
-	cmd := exec.CommandContext(cmdCtx, shell, args...)
-	cmd.Dir = dir
+	cmd := shellCommand(cmdCtx, in.Command, dir)
 	out, err := commandEffect(Root(), func() ([]byte, error) {
-		return cmd.CombinedOutput()
+		return collectOutput(cmd)
 	})
 	result := runCommandResult{Output: truncate(string(out), 20000)}
 	if cmdCtx.Err() != nil {

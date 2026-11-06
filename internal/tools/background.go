@@ -1,9 +1,9 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,28 +158,34 @@ type backgroundStatus struct {
 
 // startBackground launches a command and returns without waiting for it.
 func startBackground(command, dir string, timeout time.Duration) (backgroundStart, error) {
-	shell, flags := detectShell()
-	args := append(append([]string{}, flags...), command)
-	cmd := exec.Command(shell, args...)
-	cmd.Dir = dir
+	// Its own cancelable context, never the turn's: killing this command — by
+	// its ceiling or by dmcode exiting — goes through the same tree-kill and
+	// wait-delay wiring a cancelled run_command uses, rather than leaving the
+	// wait blocked on a pipe an orphan still holds open.
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := shellCommand(ctx, command, dir)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		cancel()
 		return backgroundStart{}, err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		cancel()
 		return backgroundStart{}, err
 	}
 	if err := cmd.Start(); err != nil {
+		cancel()
 		return backgroundStart{}, err
 	}
+	attachKillJob(cmd)
 
 	run := &backgroundRun{
 		out:     newTailBuffer(backgroundOutputCap),
 		done:    make(chan struct{}),
 		started: time.Now(),
-		kill:    func() { _ = cmd.Process.Kill() },
+		kill:    cancel,
 	}
 
 	bgMu.Lock()
@@ -199,6 +205,8 @@ func startBackground(command, dir string, timeout time.Duration) (backgroundStar
 	go func() {
 		pipes.Wait()
 		err := cmd.Wait()
+		releaseKillJob(cmd)
+		cancel()
 		run.mu.Lock()
 		run.err = err
 		run.ended = time.Now()

@@ -9,6 +9,8 @@ import (
 
 	"github.com/UserExistsError/conpty"
 	"golang.org/x/sys/windows"
+
+	"github.com/dedomorozoff/dmcode/internal/proctree"
 )
 
 func start(opts Options) (*Terminal, error) {
@@ -31,6 +33,11 @@ func start(opts Options) (*Terminal, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The kill-on-close job is what makes Close end what the *shell*
+	// started, not only the shell — the same orphan rule the chat's
+	// run_command follows, and for the same reason: the parent chain on
+	// Windows lies about Git Bash children, and a job object does not.
+	proctree.Attach(cpty.Pid())
 	return &Terminal{
 		rw: cpty, resize: cpty.Resize,
 		wait:  func() error { _, err := cpty.Wait(context.Background()); return err },
@@ -38,8 +45,8 @@ func start(opts Options) (*Terminal, error) {
 	}, nil
 }
 
-// closeSession ends the session: the child first, then the pseudo console and
-// the handles.
+// closeSession ends the session: the tree first, then the shell's own exit,
+// then the pseudo console and the handles.
 //
 // cpty.Close on its own does not end it, and the reason is a comment in the
 // library that is wrong. ClosePseudoConsole signals the console and returns;
@@ -52,12 +59,17 @@ func start(opts Options) (*Terminal, error) {
 // "the process cannot access the file because it is being used by another
 // process", which says nothing at all about the shell that is still in it.
 //
-// Terminating by pid and waiting for the exit is the only part that makes Close
-// mean what a caller closing a terminal expects. The wait is bounded: a child
-// that somehow refuses to die must not hang the UI on shutdown, and a leftover
-// process is a smaller failure than a frozen one.
+// Terminating the tree is the job object's, and by pid it would be the
+// shell's alone: a `sleep 60 &` started inside the terminal outlived the
+// tab otherwise, which is the same orphan run_command used to leave. The
+// shell's own wait stays because the directory must be released by the time
+// Close returns, not eventually — a child that somehow refuses to die is
+// bounded by the job's termination, not by a grace nobody set.
 func closeSession(cpty *conpty.ConPty) error {
-	terminateChild(cpty.Pid())
+	pid := cpty.Pid()
+	_ = proctree.Kill(pid)
+	terminateChild(pid)
+	proctree.Release(pid)
 	return cpty.Close()
 }
 

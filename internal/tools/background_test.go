@@ -185,7 +185,10 @@ func TestTheBackgroundCommandRunsInTheWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(dir, "here.txt")
-	start, err := startBackground("echo hi > "+marker, dir, time.Minute)
+	// Forward slashes: bash eats backslashes in a bare redirect target, and
+	// whether detectShell picks bash or PowerShell is the machine's business,
+	// not the test's.
+	start, err := startBackground("echo hi > "+filepath.ToSlash(marker), dir, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
