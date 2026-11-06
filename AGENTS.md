@@ -56,13 +56,22 @@
 > - skills, RAG and `/compact` have unit and wire-shape tests, but no live model
 >   has called `skill` or `rag_search`, and `/compact` has not been driven
 >   through a real TUI turn against an endpoint;
+> - the Linux/macOS clipboard image ladder (`clipimg` on `wl-paste`/`xclip`/
+>   `osascript`) is unit-tested through the injected-command seam and compiles
+>   for both platforms, but no real Wayland, X11 or macOS clipboard has ever
+>   answered it — which on this machine is untestable, not an oversight;
 >
 > Also untested on Windows: the session file's permission mode, which `os.Chmod`
 > cannot express there, so `TestSessionFileIsNotWorldReadable` skips itself.
 >
-> Known gaps, deliberately left and documented in the code: a rewind does not
-> rewrite `~/.dmcode/history.jsonl`; cancellation reaches the context but not the
-> process; the workspace boundary is lexical and a symlink can escape it.
+> Known gaps, deliberately left and documented in the code: the workspace
+> boundary is lexical and a symlink can escape it, and the turn journal is
+> memory-only, so a resumed session has nothing to undo. (A rewind erases the
+> prompt from both halves of the input history now — memory and
+> `~/.dmcode/history.jsonl`. Process trees are killed everywhere too: a
+> cancelled turn takes down what `run_command` started and interrupts a
+> sub-agent's model call, and closing an editor terminal takes down the tree
+> its shell started — see §4.)
 
 ---
 
@@ -86,7 +95,9 @@
   - `internal/rag`: the local retrieval index. A JSON file under `~/.dmcode/rag` (override `DMCODE_RAG_DIR`), one per workspace, containing line-numbered chunks and a BM25 index derived on load. `Build` walks text files and optionally saved conversations; `Search` never rebuilds. The index is a cache, not history.
   - `internal/compact`: manual `/compact`. It calls the same public `compaction.NewLLMSummarizer` ADK's tail-retention path uses, summarizes all but the newest eight events, and appends a `session.Event` carrying `Actions.Compaction.CompactedContent`. It works even when automatic compaction is off.
   - `internal/mcp`: external MCP servers — config from `~/.dmcode/mcp.json` and the workspace `.mcp.json` (the common `mcpServers` format, a stdio `command` or a `url`), one lazy `mcptoolset` per server, wired through `llmagent.Config.Toolsets` so a dead server costs nothing until a turn needs it. `States` is the one eager pass: what each server offered, or why it could not be asked.
-  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, layout, status bar),
+  - `internal/ui`: the Bubble Tea TUI — `ui.go` (event loop, status bar, turn
+    plumbing), `frame.go` (frame geometry, assembly, selection paint),
+    `render.go` (row rendering, `rowStyle`, `renderHistory`, cell wrapping),
     `markdown.go` (reply rendering), `mode.go` (plan/act, and the pending
     agent-requested switch), `history.go` (prompt history, `/cd`), `rewind.go`
     (ctrl+z, session switching), `jump.go` (clicking a change opens the file at that line),
@@ -806,10 +817,23 @@ If you are asked to fix or improve `dmcode`, be aware of these known architectur
   **When you add or change a tool's arguments, this is the file that will tell
   you the model cannot use them.**
 - **Workspace boundary is lexical at resolve time:** `tools.resolve` must decide before the file is touched, so a path that does not exist yet cannot be dereferenced. Tools that actually open something close the gap themselves: `read_file`, `edit_file` and `write_file` re-check the path after following symlinks (`withinRootAfterLinks`), `write_file` checks the deepest existing ancestor of the target directory, and `grep` skips entries that are symlinks rather than reading through them. See `internal/tools/tools.go` and `internal/tools/symlink_test.go`.
-- **Cancellation reaches the context, not the process:** `startTurn` runs the turn
-  on a cancellable context and `Esc`/`Ctrl+C` cancel it, but a tool that ignores
-  its context — `run_command` on a child process, a sub-agent mid-model-call —
-  finishes on its own schedule first.
+- **Cancellation reaches the context, the process tree `run_command` starts,
+  and a sub-agent's in-flight model call:** `startTurn` runs the turn on a
+  cancellable context and `Esc`/`Ctrl+C` cancel it. A killed turn now kills
+  what the shell spawned: on Unix `Setpgid` plus a group `SIGKILL`, on Windows
+  a kill-on-close job object — Git Bash and Cygwin re-parent external
+  processes, so `taskkill /T` cannot see the grandchildren and a job object is
+  the only mechanism that holds (`internal/proctree`, used by
+  `internal/tools/proc.go`, `kill_tree_test.go`). Background commands are
+  covered the same way, and `StopBackground` still reaps them at exit.
+  A delegation already mid-model-call is interrupted too: the sub-agent's HTTP
+  request is built with `http.NewRequestWithContext`, so cancelling the parent
+  turn drops the live stream (`internal/agent/subagent_cancel_e2e_test.go`
+  proves exactly this — the sub endpoint sees the hang-up). The editor's PTY
+  is on the same seam: `proctree.Attach` at ConPTY start and
+  `proctree.Kill` in `Close` take down the shell's whole tree, not only the
+  shell (`ptyterm_tree_windows_test.go` measures the child, the same bounded
+  way the run_command tests do).
 - **An oversized picture is a lost turn, not a slow one.** The session store reads
   JSONL with `bufio.Scanner` capped at `maxLineBytes` (8 MB) and *skips* a line it
   cannot scan (`readLines`, `store.go:377`). Base64 of a 6 MB screenshot does not
@@ -838,7 +862,7 @@ Already fixed, and worth not regressing:
 
 - **Cancellation:** `startTurn` runs the turn on a `context.WithCancel` it stores in `m.cancelTurn`; `Esc` and `Ctrl+C` cancel the running LLM/tool call instead of killing the process.
 - **Model Switching Context Bug:** `switchModelCmd` reuses the session service and `modelSwitchedMsg` handling preserves `m.sessionID`, so a model switch keeps the conversation. A regression test covers it (`internal/ui/model_switch_test.go`).
-- **Render History Performance:** `renderHistory()` keeps a per-line cache (`m.cachedRows`, `cachedLine` in `internal/ui/ui.go`) that is index-aligned with the history. A streamed token re-renders only the line whose text changed; the cache is compared against a full rebuild in `internal/ui/render_cache_test.go`.
+- **Render History Performance:** `renderHistory()` keeps a per-line cache (`m.cachedRows`, `cachedLine` in `internal/ui/render.go`) that is index-aligned with the history. A streamed token re-renders only the line whose text changed; the cache is compared against a full rebuild in `internal/ui/render_cache_test.go`.
 - Monolithic `package main` — split into `internal/*` (see §1).
 - No path confinement — `tools.SetRoot`/`tools.resolve`.
 - `edit_file` rigidity — a whitespace-tolerant match was added.

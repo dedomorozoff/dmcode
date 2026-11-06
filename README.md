@@ -577,7 +577,7 @@ the agent is not going to ask before they stop watching.
 | `ctrl+z` | undo the last message, and the files it changed (rewind) |
 | `ctrl+l` | clear the screen (the conversation is kept — `/new` is what starts one) |
 | `ctrl+n` | new session |
-| `ctrl+v` | paste — text, or the clipboard's picture when it holds one (Windows) |
+| `ctrl+v` | paste — text, or the clipboard's picture when it holds one (Windows, Linux, macOS) |
 | `alt+g` | open the next change the agent made, in the editor (repeat to walk them) |
 | `ctrl+q` | quit dmcode (in the editor it returns to the chat first) |
 | `f1` | the full key and command reference |
@@ -678,7 +678,8 @@ and the wheel, `↑`/`↓` and `pgup`/`pgdn` scroll a picture taller than the pa
 If a file is *named* like a picture but is not one — a `.png` holding text — it
 opens as that text with the reason on the status line, and a picture overwritten
 with text reloads as text rather than going on showing the frame of a file that
-is no longer there. WebP has no decoder in this build and says so by name.
+is no longer there. PNG, JPEG, GIF, BMP and WebP all decode; anything else is
+named in the message.
 
 ## Selecting with the mouse
 
@@ -862,16 +863,18 @@ yours.
 
 ## Known limitations
 
-Stated plainly, not hidden: a rewind does not rewrite `~/.dmcode/history.jsonl`,
-so an undone prompt is still offered by `/history` until the next start, and it
-cannot put back a file a *command* changed — those paths are named on the rewind
-line and left alone rather than restored from a guess. Cancellation reaches the
-context but not the process, so a running `run_command` finishes on its own
-schedule. The workspace boundary is a lexical check at resolve time; the tools
+Stated plainly, not hidden: a rewind cannot put back a file a *command*
+changed — those paths are named on the rewind
+line and left alone rather than restored from a guess. A cancelled turn kills
+what `run_command` started — the shell and everything it spawned — and
+interrupts a sub-agent's model call mid-stream; closing an editor terminal
+takes down its shell's tree too. The workspace
+boundary is a lexical check at resolve time; the tools
 that open files close the symlink gap themselves, but `grep` skipping symlinks
 means it will not follow one to a file outside the tree. Pictures reach only
-providers on the `/chat/completions` wire, and `ctrl+v` reads the clipboard's
-image on Windows alone — on Linux and macOS it pastes text, as it always did. A
+providers on the `/chat/completions` wire, and `ctrl+v` pastes the clipboard's
+image on Windows, Linux (via `wl-clipboard` or `xclip`) and macOS (via
+`osascript`) — with no such tool installed it pastes text, as it always did. A
 pasted DIB is read at 24 or 32 bits; a palettised or compressed one is refused
 with a message saying so rather than guessed at.
 
@@ -941,7 +944,7 @@ plus `.deb`, `.rpm`, an Arch package and a Windows zip.
 main.go              chains the packages together, nothing else
 internal/agent       the agent, its instructions, sub-agents, the mode switch
 internal/ask         the ask_user broker and its timer
-internal/clipimg     reads a picture off the system clipboard (Windows)
+internal/clipimg     reads a picture off the system clipboard (Windows DIB; wl-paste/xclip on Linux; osascript on macOS)
 internal/compact     manual /compact: summarize older events and append the summary
 internal/config      endpoints, the provider presets, the setup wizard, the proxy
 internal/discover    finds the providers that actually answer, starts llama-server
