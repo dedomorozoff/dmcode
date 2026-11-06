@@ -42,6 +42,79 @@ func TestPromptHistoryRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRemoveLastPromptHistoryErasesOnlyItsOwnPrompt: a rewind takes the prompt
+// out of the on-disk history as well as the recall list, but the guard against
+// a second session's newer entry must never eat that entry.
+func TestRemoveLastPromptHistoryErasesOnlyItsOwnPrompt(t *testing.T) {
+	withTempHistory(t)
+	appendPromptHistory("мой промпт")
+	appendPromptHistory("чужой промпт")
+
+	// Mismatch: the last line belongs to somebody else, so nothing is erased.
+	removeLastPromptHistory("мой промпт")
+	got := loadPromptHistory()
+	if len(got) != 2 || got[1] != "чужой промпт" {
+		t.Fatalf("mismatch guard failed, history = %v", got)
+	}
+
+	// Match: the tail is erased, the older entry survives.
+	removeLastPromptHistory("чужой промпт")
+	got = loadPromptHistory()
+	if len(got) != 1 || got[0] != "мой промпт" {
+		t.Errorf("after erase history = %v, want [мой промпт]", got)
+	}
+}
+
+// TestRemoveLastPromptHistoryToleratesLegacyLines: the eraser reads a line the
+// way the loader does, so a hand-written plain-text entry can still be undone.
+func TestRemoveLastPromptHistoryToleratesLegacyLines(t *testing.T) {
+	p := withTempHistory(t)
+	if err := os.WriteFile(p, []byte("старая строка\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeLastPromptHistory("старая строка")
+	if got := loadPromptHistory(); len(got) != 0 {
+		t.Errorf("legacy line survived the erase: %v", got)
+	}
+}
+
+// TestRemoveLastPromptHistoryLeavesARefusedFileAlone: rewriting is only for
+// the erase that matched; a refused one must not touch the file at all.
+func TestRemoveLastPromptHistoryLeavesARefusedFileAlone(t *testing.T) {
+	p := withTempHistory(t)
+	if err := os.WriteFile(p, []byte("{\"text\":\"промпт\"}\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removeLastPromptHistory("другой")
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{\"text\":\"промпт\"}\n\n" {
+		t.Errorf("a refused erase rewrote the file: %q", data)
+	}
+}
+
+// TestRewindTakesThePromptOffDisk is the half the old behaviour got wrong: the
+// recall list forgot the prompt, the file remembered it, and the next start
+// offered an undo back.
+func TestRewindTakesThePromptOffDisk(t *testing.T) {
+	m := newSessionModel(t)
+	sendTurn(t, m, "первый")
+	sendTurn(t, m, "второй")
+	m.rewind()
+
+	got := loadPromptHistory()
+	for _, p := range got {
+		if p == "второй" {
+			t.Errorf("the rewound prompt is still on disk: %v", got)
+		}
+	}
+	if len(got) != 1 || got[0] != "первый" {
+		t.Errorf("history = %v, want [первый]", got)
+	}
+}
+
 // TestPromptHistoryCapsAtLimit: a long history trims to the most recent
 // entries, so the recall buffer and the file stay bounded.
 func TestPromptHistoryCapsAtLimit(t *testing.T) {

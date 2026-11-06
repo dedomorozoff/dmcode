@@ -112,8 +112,10 @@ func (m *uiModel) rewind() {
 	}
 	m.turnCount--
 	// The recall list offered the prompt as something already sent; offering it
-	// again straight after an undo would walk the user in circles.
-	m.dropLastPrompt()
+	// again straight after an undo would walk the user in circles — on disk as
+	// much as in memory, or the prompt would come back at the next start.
+	// mark.text, not the store's copy, is what savePrompt appended to the file.
+	m.dropLastPrompt(mark.text)
 	// A turn that triggered compaction took its summary with it: the summary
 	// is stored after the prompt being cut. Ask the store directly rather than
 	// through noteCompaction, so the note stays truthful even when the current
@@ -172,19 +174,24 @@ func shortPath(p string) string {
 	return filepath.Base(p)
 }
 
-// dropLastPrompt removes the most recent prompt from the in-memory recall list.
+// dropLastPrompt removes the most recent prompt from both halves of the recall
+// list: the in-memory slice ↑/↓ walks, and the on-disk file the next start
+// loads.
 //
-// The on-disk history is deliberately left alone: rewriting an append-only
-// jsonl to erase one line is a different operation from appending to it, and a
-// prompt the user rewound once is still a prompt they sent. The cost is that
-// /history and ↑ can still offer it until the next start.
-func (m *uiModel) dropLastPrompt() {
+// The two used to disagree — the file was deliberately left alone, so a
+// rewound prompt vanished for the session and came back with the next one.
+// That made an undo half-permanent depending on a fact the user cannot see.
+// The disk erase is guarded (see removeLastPromptHistory): a second session's
+// newer entry is never eaten, and if the file cannot be rewritten, the memory
+// drop still stands.
+func (m *uiModel) dropLastPrompt(text string) {
 	if n := len(m.promptHistory); n > 0 {
 		m.promptHistory = m.promptHistory[:n-1]
 	}
 	if m.histPos > len(m.promptHistory) {
 		m.histPos = len(m.promptHistory)
 	}
+	removeLastPromptHistory(text)
 }
 
 // clearScreen empties the transcript.

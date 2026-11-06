@@ -57,15 +57,9 @@ func loadPromptHistory() []string {
 		if l == "" {
 			continue
 		}
-		text := l
-		if strings.HasPrefix(l, "{") {
-			var rec struct {
-				Text string `json:"text"`
-			}
-			if json.Unmarshal([]byte(l), &rec) != nil || rec.Text == "" {
-				continue
-			}
-			text = rec.Text
+		text := historyLineText(l)
+		if text == "" {
+			continue
 		}
 		out = append(out, text)
 	}
@@ -117,6 +111,97 @@ func appendPromptHistory(text string) {
 	}
 	defer f.Close()
 	f.Write(append(rec, '\n'))
+}
+
+// historyLineText is the one rule for what a line of the history file means:
+// a JSON record contributes its "text", anything else is taken verbatim, and
+// a record that parses to nothing contributes nothing. loadPromptHistory
+// parses with it and removeLastPromptHistory compares with it, so a line the
+// loader understands is a line the eraser can recognise — a rule written
+// twice is a rule that drifts.
+func historyLineText(l string) string {
+	if !strings.HasPrefix(l, "{") {
+		return l
+	}
+	var rec struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal([]byte(l), &rec) != nil {
+		return ""
+	}
+	return rec.Text
+}
+
+// removeLastPromptHistory erases the last entry of the on-disk history, but
+// only when it is the prompt the user just rewound.
+//
+// The tail-match guard is what makes this safe on a shared file: two dmcode
+// sessions append to the same history.jsonl, and rewinding in one of them
+// must not eat the other's newer prompt. When the last line names something
+// else, the file keeps it and the memory stays the only place the rewind
+// happened — which is exactly the old behaviour, and it is now the exception
+// rather than the rule.
+//
+// The rewrite is temp-file-plus-rename for the same reason the session store's
+// is: a crash halfway through must not leave a truncated history. Failures are
+// silent, because appendPromptHistory's rule holds in reverse too — a rewind
+// has already succeeded, and nothing about the history file may take that back.
+func removeLastPromptHistory(text string) {
+	path, err := promptHistoryPath()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+	last := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) != "" {
+			last = i
+			break
+		}
+	}
+	if last < 0 || historyLineText(strings.TrimSpace(lines[last])) != text {
+		return
+	}
+
+	var out strings.Builder
+	for _, l := range lines[:last] {
+		out.WriteString(l)
+		out.WriteByte('\n')
+	}
+	// A live append that landed between the read and this write would sit after
+	// the erased line; keeping it preserves the file's tail instead of quietly
+	// deleting somebody else's prompt.
+	for _, l := range lines[last+1:] {
+		if strings.TrimSpace(l) == "" {
+			continue
+		}
+		out.WriteString(l)
+		out.WriteByte('\n')
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".history-*.tmp")
+	if err != nil {
+		return
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write([]byte(out.String())); err != nil {
+		tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return
+	}
+	// On Windows the file's permissions come from its directory and Chmod is a
+	// no-op, so a rename here does not widen anything; on Unix the temp file is
+	// created 0600 by CreateTemp anyway, and the Chmod states the intent.
+	_ = os.Rename(tmp.Name(), path)
 }
 
 // shortenPath trims a path from the left so it fits n cells, marking the cut
