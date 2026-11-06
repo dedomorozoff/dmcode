@@ -47,14 +47,14 @@ var imageExtensions = map[string]bool{
 	".jpg":  true,
 	".jpeg": true,
 	".gif":  true,
+	".bmp":  true,
 	".webp": true,
 }
 
 // looksLikeImage reports whether a token could be a picture worth opening.
 //
-// webp is in the list even though imgprev cannot decode it: recognising it gets
-// the user a named "this build reads png, jpeg and gif" instead of a filename
-// being silently treated as prose.
+// The extension is only the cheap first question; the decoder decides. A .png
+// that does not decode is reported with its reason, not silently kept as prose.
 func looksLikeImage(path string) bool {
 	return imageExtensions[strings.ToLower(filepath.Ext(path))]
 }

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"image"
@@ -362,19 +363,38 @@ func TestAnUnreadableImageStaysInThePrompt(t *testing.T) {
 	}
 }
 
-// TestAnUnsupportedFormatIsNamedRatherThanIgnored: a webp the user has every
-// reason to send should get an error that says what this build reads.
+// TestAnUnsupportedFormatIsNamedRatherThanIgnored: a file whose name says
+// picture and whose bytes are not one should get an error that says what this
+// build reads, not a silent no-op.
 func TestAnUnsupportedFormatIsNamedRatherThanIgnored(t *testing.T) {
 	m := imageModel(t)
 	p := filepath.Join(t.TempDir(), "photo.webp")
-	if err := os.WriteFile(p, append([]byte("RIFF\x00\x00\x00\x00WEBPVP8 "), make([]byte, 16)...), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte("this is a sentence, not a picture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	if _, err := m.attachImage(p); err == nil {
-		t.Fatal("a webp was accepted")
+		t.Fatal("a non-picture was accepted")
 	} else if !strings.Contains(err.Error(), "png") {
 		t.Errorf("error = %v, want one naming the formats that are read", err)
+	}
+}
+
+// TestWebPAttaches pins the decoder registration at the UI's door: webp is in
+// the extension list, so a real webp must attach rather than be reported as a
+// format this build cannot read.
+func TestWebPAttaches(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString("UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := imageModel(t)
+	p := filepath.Join(t.TempDir(), "photo.webp")
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.attachImage(p); err != nil {
+		t.Errorf("a real webp was refused: %v", err)
 	}
 }
 

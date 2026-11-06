@@ -24,15 +24,21 @@ import (
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
+
+	// The formats dmcode decodes are a list nobody duplicates: this import is
+	// the registration mechanism for BMP and WebP (and for the standard ones),
+	// and clipimg consults the same package when it decides which clipboard
+	// tool's answer decodes.
+	_ "github.com/dedomorozoff/dmcode/internal/imagedec"
 )
 
-// The blank imports register the formats dmcode accepts: image.Decode dispatches
-// on what those register, so the import is the whole mechanism — there is no
+// The imports above plus these register the formats dmcode accepts: there is no
 // registry to consult and no sniff to write.
 //
-// WebP is absent on purpose: it needs golang.org/x/image, and a decoder is a
-// dependency kept alive for as long as this feature exists. A user with a WebP
-// gets a named error rather than a silent no-op.
+// WebP and BMP are decode-only — x/image encodes neither — so they go on the
+// wire as their original bytes under their own MIME type, and a picture over
+// maxEdge is reduced and re-encoded as PNG or JPEG, which every vision
+// endpoint takes.
 var (
 	_ = png.Decode
 	_ = jpeg.Decode
@@ -356,7 +362,7 @@ func unsupported(format string, err error) error {
 		// DecodeConfig failed before it could name a format, so the bytes are
 		// not an image this build reads. Saying so beats passing the decoder's
 		// "unknown format" up as-is, which does not name dmcode as the limit.
-		return fmt.Errorf("%w: this build reads png, jpeg and gif", ErrUnsupportedImage)
+		return fmt.Errorf("%w: this build reads png, jpeg, gif, webp and bmp", ErrUnsupportedImage)
 	}
 	return fmt.Errorf("%w: %s", ErrUnsupportedImage, format)
 }
@@ -369,6 +375,10 @@ func mimeFor(format string) string {
 		return "image/jpeg"
 	case "gif":
 		return "image/gif"
+	case "webp":
+		return "image/webp"
+	case "bmp":
+		return "image/bmp"
 	}
 	return ""
 }

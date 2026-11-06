@@ -2,6 +2,7 @@ package imgprev
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"image"
 	"image/color"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
+	"golang.org/x/image/bmp"
 )
 
 // solid builds a one-colour PNG of the given size.
@@ -556,6 +558,53 @@ func TestUnsupportedFormatsAreNamed(t *testing.T) {
 		if !strings.Contains(err.Error(), "image") && !strings.Contains(err.Error(), "empty") {
 			t.Errorf("%s: error = %v, want one that names the problem", tc.name, err)
 		}
+	}
+}
+
+// TestWebPAndBMPAreDecoded pins the x/image registration. Both extensions are
+// named in the UI's and the editor's lists, so a build without a decoder would
+// open them as text and name a reason that is a lie about this build.
+func TestWebPAndBMPAreDecoded(t *testing.T) {
+	webpBytes, err := base64.StdEncoding.DecodeString("UklGRiQAAABXRUJQVlA4IBgAAAAwAQCdASoBAAEAAwA0JaQAA3AA/vuUAAA=")
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	a, err := Load(webpBytes, "pixel.webp", 8, 0, colorprofile.TrueColor)
+	if err != nil {
+		t.Fatalf("webp: %v", err)
+	}
+	if a.MIME != "image/webp" {
+		t.Errorf("webp MIME = %q, want image/webp", a.MIME)
+	}
+	if !bytes.Equal(a.Data, webpBytes) {
+		t.Error("a small webp was re-encoded; it must go on the wire as its own bytes")
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	for y := 0; y < 2; y++ {
+		for x := 0; x < 2; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := bmp.Encode(&buf, img); err != nil {
+		t.Fatalf("bmp fixture: %v", err)
+	}
+	b, err := Load(buf.Bytes(), "red.bmp", 8, 0, colorprofile.TrueColor)
+	if err != nil {
+		t.Fatalf("bmp: %v", err)
+	}
+	if b.MIME != "image/bmp" {
+		t.Errorf("bmp MIME = %q, want image/bmp", b.MIME)
+	}
+
+	// The editor's half goes through Decode, not Load; a registration that only
+	// reached one of the two would draw chat pictures and open text tabs.
+	if _, err := Decode(webpBytes); err != nil {
+		t.Errorf("Decode(webp) = %v", err)
+	}
+	if _, err := Decode(buf.Bytes()); err != nil {
+		t.Errorf("Decode(bmp) = %v", err)
 	}
 }
 
