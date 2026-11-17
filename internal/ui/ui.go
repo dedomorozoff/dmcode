@@ -320,6 +320,10 @@ type setupCheckMsg struct {
 	vars map[string]string
 	opt  config.SetupOption
 	err  error
+	// models is what the endpoint said it serves — the same request that
+	// probes the key, so a model-less option can offer the list as a picker
+	// instead of asking for an id the user may not know.
+	models []string
 	// forced is set when the user asked to save despite a failed check, for
 	// endpoints that do not implement /models and cannot be probed.
 	forced bool
@@ -709,6 +713,11 @@ const (
 	setupKey
 	setupURL
 	setupModel
+	// setupChoose picks a model from the list the endpoint said it serves.
+	// It sits after the probe and before any commit: an option without a
+	// preset model id has no typed prompt of its own — the picker is the
+	// prompt, and esc falls back to typing.
+	setupChoose
 	setupGGUF
 )
 
@@ -730,6 +739,11 @@ type setupState struct {
 	// stage and the model text would arrive in its place — which is exactly why
 	// the probe used to reject a good key and ask for it a second time.
 	key string
+	// vars and models carry the probe's answer to the picker: the vars are what
+	// a successful check commits, the models are what the endpoint said it
+	// serves. Both are empty until a probe has succeeded.
+	vars   map[string]string
+	models []string
 	// gguf is the file browser behind the GGUF path prompt. reset() wipes it
 	// along with the wizard, so a cancelled /setup never leaves the dialog up.
 	gguf ggufPickState
@@ -3565,6 +3579,14 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	switch msg.String() {
 	case "esc":
+		// The picker's esc falls back to a typed id rather than tearing the
+		// wizard down: a list that cannot name the model the user wants is a
+		// detour, not a cancellation.
+		if m.setup.stage == setupChoose {
+			m.setup.stage = setupModel
+			m.setup.buf = ""
+			return m, nil
+		}
 		m.setup.reset()
 		m.statusText = i18n.T("setup cancelled")
 		return m, nil
@@ -3624,11 +3646,9 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.setup.buf = ""
 				return m, nil
 			}
-			if m.setup.opt.Model == "" {
-				m.setup.stage = setupModel
-				m.setup.buf = ""
-				return m, nil
-			}
+			// A model-less option (Unsloth) has no typed model prompt of its
+			// own: the probe asks the endpoint what it serves and the picker
+			// stages the answer. applySetup carries the key from state.
 			return m, m.applySetup()
 		case "backspace":
 			if r := []rune(m.setup.buf); len(r) > 0 {
@@ -3670,6 +3690,28 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case setupChoose:
+		switch msg.String() {
+		case "up":
+			if m.setup.list.sel > 0 {
+				m.setup.list.sel--
+			}
+			return m, nil
+		case "down":
+			if m.setup.list.sel < len(m.setup.models)-1 {
+				m.setup.list.sel++
+			}
+			return m, nil
+		case "enter":
+			if m.setup.list.sel >= len(m.setup.models) {
+				return m, nil
+			}
+			m.setup.opt.Model = m.setup.models[m.setup.list.sel]
+			return m, m.commitSetup(m.setup.opt, m.setup.vars)
+		}
+		// esc never reaches this case: the top of the handler sends the
+		// picker's esc to the typed model prompt instead of resetting.
 
 	case setupGGUF:
 		switch msg.String() {
@@ -3852,8 +3894,8 @@ func (m *uiModel) applySetup() tea.Cmd {
 		API:     opt.API,
 	}
 	return func() tea.Msg {
-		_, err := config.ListModels(probe)
-		return setupCheckMsg{vars: vars, opt: opt, err: err}
+		ids, err := config.ListModels(probe)
+		return setupCheckMsg{vars: vars, opt: opt, models: ids, err: err}
 	}
 }
 
@@ -3862,6 +3904,25 @@ func (m *uiModel) applySetup() tea.Cmd {
 // instead of discovering later that the working one is gone.
 func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 	if msg.err == nil {
+		// A model-less option offers what the endpoint serves instead of
+		// committing: the ids came with the very request that checked the key,
+		// so committing here would write a config with no model in it. An
+		// endpoint that serves nothing yet falls back to the typed prompt.
+		if msg.opt.Model == "" && !msg.opt.GGUF {
+			if len(msg.models) > 0 {
+				m.setup.vars, m.setup.models = msg.vars, msg.models
+				m.setup.list = listView{}
+				m.setup.stage = setupChoose
+				m.historyDirty = true
+				return nil
+			}
+			m.setup.stage = setupModel
+			m.setup.buf = ""
+			m.statusText = i18n.T("the endpoint serves no models yet")
+			m.historyDirty = true
+			m.followVP()
+			return nil
+		}
 		return m.commitSetup(msg.opt, msg.vars)
 	}
 
@@ -3870,8 +3931,14 @@ func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 		line{kindErr, i18n.T("the endpoint rejected the key: ") + name + " — " + msg.err.Error()},
 		line{kindSys, i18n.T(".env was left unchanged.")})
 	// Back to the key prompt, cleared, so the rejected key is not resubmitted by
-	// accident on the next attempt.
-	m.setup.stage = setupKey
+	// accident on the next attempt. A model-less row lands on the typed model
+	// prompt instead: the endpoint may simply be off, and the key is already in
+	// state — the retry commits without retyping it.
+	if msg.opt.Model == "" && !msg.opt.GGUF {
+		m.setup.stage = setupModel
+	} else {
+		m.setup.stage = setupKey
+	}
 	m.setup.buf = ""
 	m.setup.force = true
 	m.statusText = i18n.T("key rejected")
@@ -4019,6 +4086,14 @@ func (m *uiModel) handleGGUFReady(msg ggufReadyMsg) tea.Cmd {
 
 // commitSetup writes the validated provider to .env and rebuilds the agent.
 func (m *uiModel) commitSetup(opt config.SetupOption, vars map[string]string) tea.Cmd {
+	// No path may write a config without a model in it: the field is sent on
+	// every request, and an empty one is a turn that answers about nothing.
+	// GGUF is exempt — its model id is decided when llama-server reports what
+	// it loaded.
+	if opt.Model == "" && !opt.GGUF {
+		m.statusText = i18n.T("no model chosen")
+		return nil
+	}
 	status, err := m.persistSetup(vars)
 	if err != nil {
 		m.statusText = status
@@ -5521,6 +5596,24 @@ func (m *uiModel) setupBox() string {
 		rows := [][]string{{styleHint.Render(i18n.T("model id on this endpoint"))},
 			{m.setup.buf + "█"}}
 		return m.floatingPanel(i18n.T("? model"), "", rows, &listView{})
+
+	case setupChoose:
+		var entries [][]string
+		for i, id := range m.setup.models {
+			marker, st := "    ", lipgloss.NewStyle()
+			if i == m.setup.list.sel {
+				marker, st = " ▸ ", styleTool
+			}
+			rows := wrapIndent(id, inner, marker, "     ")
+			if i != m.setup.list.sel {
+				for j := range rows {
+					rows[j] = st.Render(rows[j])
+				}
+			}
+			entries = append(entries, rows)
+		}
+		entries = append(entries, []string{styleHint.Render(i18n.T("enter — choose, esc — type an id instead"))})
+		return m.floatingPanel(i18n.T("? model on this endpoint"), "", entries, &m.setup.list)
 
 	case setupGGUF:
 		rows := [][]string{{styleHint.Render(i18n.T("path to the .gguf file — ctrl+o or enter on empty browses the disk"))},

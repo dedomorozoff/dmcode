@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -373,6 +374,57 @@ func TestUnslothAsksForKeyAndModel(t *testing.T) {
 	// .env should not be created — all config goes to settings.json.
 	if _, serr := os.Stat(".env"); serr == nil {
 		t.Error(".env was created; all config should go to settings.json")
+	}
+}
+
+// TestUnslothPicksFromTheServedList drives the stdin wizard's model choice.
+// The fetch goes through the fetchModels seam, so no request leaves the
+// machine; the picker mirrors the TUI's: a number picks a row, enter takes the
+// first, and an endpoint that serves nothing falls back to the typed prompt.
+func TestUnslothPicksFromTheServedList(t *testing.T) {
+	inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
+	opts := SetupOptions()
+	idx := 0
+	for i, o := range opts {
+		if strings.Contains(o.Label, "Unsloth") {
+			idx = i + 1
+		}
+	}
+	if idx == 0 {
+		t.Fatal("Unsloth is not in the option list")
+	}
+	ids := []string{"unsloth/Qwen3-Coder-30B", "unsloth/Qwen3-VL-32B"}
+	fetchModels = func(Provider) ([]string, error) { return ids, nil }
+	t.Cleanup(func() { fetchModels = ListModels })
+
+	// A number picks that row of the served list.
+	var out strings.Builder
+	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n2\n", idx)), &out); err != nil {
+		t.Fatalf("a served list was rejected: %v", err)
+	}
+	if st, err := settings.Load(); err != nil || st.Model != ids[1] {
+		t.Errorf("model = %q (%v), want %q — the row the number named", st.Model, err, ids[1])
+	}
+	if !strings.Contains(out.String(), ids[0]) {
+		t.Errorf("the wizard did not show the served ids:\n%s", out.String())
+	}
+
+	// enter on the choice takes the first row, the way the TUI picker does.
+	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\n", idx)), &strings.Builder{}); err != nil {
+		t.Fatalf("enter on the served list was rejected: %v", err)
+	}
+	if st, err := settings.Load(); err != nil || st.Model != ids[0] {
+		t.Errorf("model = %q (%v), want %q — the highlighted row", st.Model, err, ids[0])
+	}
+
+	// An endpoint that answers nothing falls back to the typed prompt.
+	fetchModels = func(Provider) ([]string, error) { return nil, errors.New("connection refused") }
+	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
+		t.Fatalf("the typed fallback was rejected: %v", err)
+	}
+	if st, err := settings.Load(); err != nil || st.Model != "qwen3-27b" {
+		t.Errorf("model = %q (%v), want the typed qwen3-27b", st.Model, err)
 	}
 }
 

@@ -127,11 +127,13 @@ func TestPollinationsDoesNotOutrankAFreeTier(t *testing.T) {
 	}
 }
 
-// Unsloth speaks OpenAI at /v1/chat/completions but authenticates every request
-// and binds a port it prints at run time, so it can only be offered as a choice
-// the user fills in. Two mistakes are easy to make here and both produce a
-// broken option: listing it as keyless, or giving it a guessed default port.
-func TestUnslothIsOfferedAsAUserSuppliedEndpoint(t *testing.T) {
+// Unsloth speaks OpenAI at /v1/chat/completions and authenticates every
+// request, but it is a local server like Ollama or LM Studio, so its endpoint
+// is the documented localhost:8888 default rather than a guess: their
+// quickstart runs the studio on that port. Two mistakes are easy to make here
+// and both produce a broken option: listing it as keyless, or presetting a
+// model id for a catalogue only the user's own install knows.
+func TestUnslothIsOfferedWithItsDocumentedEndpoint(t *testing.T) {
 	var opt config.SetupOption
 	found := 0
 	for _, o := range config.SetupOptions() {
@@ -145,11 +147,14 @@ func TestUnslothIsOfferedAsAUserSuppliedEndpoint(t *testing.T) {
 	if opt.Keyless {
 		t.Error("Unsloth is marked keyless, but it rejects unauthenticated requests")
 	}
-	if opt.EnvKey == "" {
-		t.Error("Unsloth needs somewhere to keep its sk-unsloth-… key")
+	if opt.EnvKey != "UNSLOTH_API_KEY" {
+		t.Errorf("Unsloth keeps its key in %q, want UNSLOTH_API_KEY — its own docs' name, so configuring it cannot overwrite a working OPENAI_API_KEY", opt.EnvKey)
 	}
-	if opt.BaseURL != "" {
-		t.Errorf("Unsloth has a preset endpoint %q, but the port is chosen at run time", opt.BaseURL)
+	if opt.BaseURL != "http://localhost:8888/v1" {
+		t.Errorf("Unsloth endpoint = %q, want the documented localhost:8888 default", opt.BaseURL)
+	}
+	if opt.Model != "" {
+		t.Errorf("Unsloth presets model %q, but the catalogue is whatever the user downloaded — the wizard asks the server", opt.Model)
 	}
 	if opt.Signup == "" {
 		t.Error("Unsloth should point at its API docs, since the key is created in-app")

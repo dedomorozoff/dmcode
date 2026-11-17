@@ -200,6 +200,13 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 				t.Errorf("row %d (%s) is not drawn:\n%s", i, want.Label, view)
 			}
 
+			// What the wizard claims to offer has to be what it wrote to
+			// settings.json: an option with no preset endpoint was asked for
+			// its own, and an option with a pinned endpoint but no preset
+			// model is offered the served list instead. Keyless and GGUF
+			// options keep their presets untouched.
+			wantURL, wantModel := want.BaseURL, want.Model
+
 			// Keyless options apply at once; keyed ones ask for a secret first.
 			// A GGUF pick is keyless too, but it first asks for the file to run.
 			if want.GGUF {
@@ -220,34 +227,39 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 				// committing an empty one probes nothing while reporting the
 				// key as rejected.
 				if want.BaseURL == "" {
+					wantURL = "http://127.0.0.1:8888/v1"
 					d = d.type_("http://127.0.0.1:8888/v1").enter()
 				}
-				// An option whose model is not preset (Unsloth) is asked for
-				// one; committing without a model would send an empty model
-				// field on every request.
-				if m.setup.opt.Model == "" {
-					d = d.type_("test-model").enter()
+				if want.Model == "" && want.BaseURL != "" {
+					// The probe ran against a dead loopback port, so its
+					// answer is fed the way every other test feeds it.
+					_, _ = m.Update(setupCheckMsg{
+						vars:   config.SetupVars(m.setup.opt, "sk-test-123"),
+						opt:    m.setup.opt,
+						models: []string{"unsloth/Qwen3-Coder-30B"},
+					})
+					if m.setup.stage != setupChoose {
+						t.Fatalf("choosing %q skipped the model picker (stage=%d)", want.Label, m.setup.stage)
+					}
+					wantModel = "unsloth/Qwen3-Coder-30B"
+					d = d.enter()
+				} else {
+					if m.setup.opt.Model == "" {
+						wantModel = "test-model"
+						d = d.type_("test-model").enter()
+					}
+					_, _ = m.Update(setupCheckMsg{
+						vars: config.SetupVars(m.setup.opt, "sk-test-123"),
+						opt:  m.setup.opt,
+					})
 				}
-				_, _ = m.Update(setupCheckMsg{
-					vars: config.SetupVars(m.setup.opt, "sk-test-123"),
-					opt:  m.setup.opt,
-				})
 			}
 			if m.setup.open {
 				t.Fatalf("wizard stayed open after choosing %q", want.Label)
 			}
 
-			// What the wizard claims to offer has to be what it wrote to settings.json.
-			// An option with no preset endpoint was asked for its own, and an
-			// option with no preset model was asked for one, so the expectation
-			// is what the wizard just collected.
-			wantURL, wantModel := want.BaseURL, want.Model
-			if want.BaseURL == "" && !want.Keyless && !want.GGUF {
-				wantURL = "http://127.0.0.1:8888/v1"
-			}
-			if want.Model == "" && !want.Keyless && !want.GGUF {
-				wantModel = "test-model"
-			}
+			// The keyed branches above already computed what the wizard was
+			// expected to write; nothing to adjust here.
 			st, err := settings.Load()
 			if err != nil {
 				t.Fatalf("settings.Load: %v", err)
@@ -305,7 +317,7 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 
 // TestUnslothGoesFromKeyToTheModelStage drives the TUI wizard down the Unsloth
 // row, whose endpoint is pinned to the documented localhost:8888 default: after
-// the key the next prompt is the model, and no URL stage sits between them.
+// the key the wizard probes the endpoint, and the served ids become the picker.
 func TestUnslothGoesFromKeyToTheModelStage(t *testing.T) {
 	dir := inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
@@ -317,23 +329,85 @@ func TestUnslothGoesFromKeyToTheModelStage(t *testing.T) {
 	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
 		type_("sk-unsloth-abc").enter()
 
-	if m.setup.stage != setupModel {
-		t.Fatalf("after the key the wizard sits at stage %d, want the model prompt", m.setup.stage)
+	// The key prompt's enter runs the live probe (a dead loopback port in
+	// tests); the commit is fed the way the other tests feed it, so no request
+	// leaves the machine. The probe's answer carries what the server serves.
+	_, _ = m.Update(setupCheckMsg{
+		vars:   config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
+		opt:    m.setup.opt,
+		models: []string{"unsloth/Qwen3-Coder-30B", "unsloth/Qwen3-VL-32B"},
+	})
+	if m.setup.stage != setupChoose {
+		t.Fatalf("after the probe the wizard sits at stage %d, want the model picker", m.setup.stage)
 	}
-	setupKeys{m: m}.type_("qwen3-27b").enter()
+	setupKeys{m: m}.down().enter()
 
-	// The model prompt's enter runs the live probe; the commit is fed the way
-	// the other tests feed it, so no request leaves the machine.
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	if st.Model != "unsloth/Qwen3-VL-32B" {
+		t.Errorf("settings.Model = %q, want the row the picker highlighted", st.Model)
+	}
+	if st.APIKey != "sk-unsloth-abc" {
+		t.Errorf("settings.APIKey = %q, want the key typed once", st.APIKey)
+	}
+	if st.BaseURL != "http://localhost:8888/v1" {
+		t.Errorf("settings.BaseURL = %q, want the pinned URL", st.BaseURL)
+	}
+}
+
+// TestAnEmptyModelListFallsBackToTyping — a server that is up but serves
+// nothing must not show an empty picker or commit a model-less config.
+func TestAnEmptyModelListFallsBackToTyping(t *testing.T) {
+	dir := inTempDir(t)
+	path := filepath.Join(dir, "settings.json")
+	t.Setenv("DMCODE_SETTINGS_PATH", path)
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter()
+
 	_, _ = m.Update(setupCheckMsg{
 		vars: config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
 		opt:  m.setup.opt,
 	})
-	if m.setup.open {
-		t.Fatal("the wizard stayed open after a complete Unsloth answer")
+	if m.setup.stage != setupModel {
+		t.Fatalf("an empty served list left stage %d, want the typed model prompt", m.setup.stage)
 	}
-	if m.prov.BaseURL != "http://localhost:8888/v1" || m.prov.Model != "qwen3-27b" {
-		t.Errorf("live provider is %q/%q, want the pinned URL and the typed model",
-			m.prov.BaseURL, m.prov.Model)
+	if _, err := os.Stat(path); err == nil {
+		t.Error("settings.json was written without a model")
+	}
+}
+
+// TestARejectedKeyOnAModelLessRowLeadsToTyping — a probe error on a model-less
+// row lands on the typed model stage, not back on the key prompt: the local
+// server may simply be off, and the key does not need retyping to get through.
+func TestARejectedKeyOnAModelLessRowLeadsToTyping(t *testing.T) {
+	dir := inTempDir(t)
+	path := filepath.Join(dir, "settings.json")
+	t.Setenv("DMCODE_SETTINGS_PATH", path)
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter()
+
+	_, _ = m.Update(setupCheckMsg{
+		vars: config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
+		opt:  m.setup.opt,
+		err:  errors.New("connection refused"),
+	})
+	if m.setup.stage != setupModel {
+		t.Fatalf("a rejected check left stage %d, want the typed model prompt", m.setup.stage)
+	}
+	if m.setup.key != "sk-unsloth-abc" {
+		t.Errorf("the key was lost on the way to the model prompt: %q", m.setup.key)
 	}
 }
 
@@ -387,7 +461,8 @@ func TestTheWizardCarriesTheKeyToTheProbe(t *testing.T) {
 
 // TestTheUnslothKeyReachesTheProbe pins the same thing for the row whose
 // stages the URL pin collapsed: the key typed once must be what the probe
-// carries, under the variable Unsloth's own docs name.
+// carries, under the variable Unsloth's own docs name — and the picker's
+// commit must carry the same key, so nothing on the pinned path retypes it.
 func TestTheUnslothKeyReachesTheProbe(t *testing.T) {
 	dir := inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
@@ -397,16 +472,32 @@ func TestTheUnslothKeyReachesTheProbe(t *testing.T) {
 		return strings.Contains(o.Label, "Unsloth")
 	})
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
-		type_("sk-unsloth-abc").enter().
-		type_("test-model").enter()
+		type_("sk-unsloth-abc").enter()
 
+	// The key stage's enter goes straight to the probe on a pinned row.
 	msg := d.cmd()
 	check, ok := msg.(setupCheckMsg)
 	if !ok {
-		t.Fatalf("the model stage produced %T, want setupCheckMsg", msg)
+		t.Fatalf("the key stage produced %T, want setupCheckMsg", msg)
 	}
 	if got := check.vars["UNSLOTH_API_KEY"]; got != "sk-unsloth-abc" {
 		t.Errorf("the probe would send the key %q, want sk-unsloth-abc", got)
+	}
+
+	// The probe answers with the served ids; the picker's commit carries the
+	// same key without a second prompt.
+	_, _ = m.Update(setupCheckMsg{
+		vars:   check.vars,
+		opt:    check.opt,
+		models: []string{"unsloth/Qwen3-Coder-30B"},
+	})
+	setupKeys{m: m}.down().enter()
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("settings.Load: %v", err)
+	}
+	if st.APIKey != "sk-unsloth-abc" {
+		t.Errorf("settings.APIKey = %q, want the key typed once", st.APIKey)
 	}
 }
 

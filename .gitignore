@@ -23,3 +23,4 @@ model/*.gguf
 tmp/
 i18n.new
 .dmcode-editor-session.json
+.superpowers/

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dedomorozoff/dmcode/internal/i18n"
@@ -235,6 +236,12 @@ func SetupVars(opt SetupOption, key string) map[string]string {
 	return vars
 }
 
+// fetchModels asks an endpoint what it serves. A package var so the stdin
+// wizard's numbered choice can be driven by a test without a live endpoint —
+// the clipimg lesson: an injection point, plus a test that fails when the
+// injection point is bypassed.
+var fetchModels = ListModels
+
 // SetupWizard asks for a provider on the terminal and returns it.
 //
 // It returns the provider rather than only an error because the caller needs
@@ -319,11 +326,32 @@ func SetupWizardWith(r io.Reader, w io.Writer) (Provider, error) {
 			}
 		}
 		if opt.Model == "" {
-			fmt.Fprint(w, i18n.T("model: "))
-			mLine, _ := reader.ReadString('\n')
-			opt.Model = strings.TrimSpace(mLine)
+			// The endpoint knows its own catalogue: ask it, and let the user
+			// pick a row. An endpoint that answers nothing — off, or without
+			// /models — falls through to the typed prompt.
+			ids, ferr := fetchModels(Provider{BaseURL: opt.BaseURL, APIKey: key, API: opt.API})
+			if ferr == nil && len(ids) > 0 {
+				fmt.Fprintf(w, "%s", i18n.T("models this endpoint serves:\n"))
+				for i, id := range ids {
+					fmt.Fprintf(w, "  %d) %s\n", i+1, id)
+				}
+				fmt.Fprint(w, i18n.T("number (enter = 1): "))
+				choiceLine, _ := reader.ReadString('\n')
+				choice := strings.TrimSpace(choiceLine)
+				switch n, aerr := strconv.Atoi(choice); {
+				case choice == "":
+					opt.Model = ids[0]
+				case aerr == nil && n >= 1 && n <= len(ids):
+					opt.Model = ids[n-1]
+				}
+			}
 			if opt.Model == "" {
-				return Provider{}, fmt.Errorf("%s", i18n.T("no model entered"))
+				fmt.Fprint(w, i18n.T("model: "))
+				mLine, _ := reader.ReadString('\n')
+				opt.Model = strings.TrimSpace(mLine)
+				if opt.Model == "" {
+					return Provider{}, fmt.Errorf("%s", i18n.T("no model entered"))
+				}
 			}
 		}
 	}
