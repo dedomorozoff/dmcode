@@ -3605,6 +3605,16 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.statusText = i18n.T("no key entered")
 				return m, nil
 			}
+			// An option that carries a key but no preset endpoint (Unsloth, a
+			// custom URL) still needs the URL and the model the stdin wizard
+			// asks for. applySetup probes the URL, so applying straight from
+			// the key prompt probed an empty base URL and reported every key
+			// as rejected; the URL stage chains on to the model stage itself.
+			if m.setup.opt.BaseURL == "" {
+				m.setup.stage = setupURL
+				m.setup.buf = ""
+				return m, nil
+			}
 			return m, m.applySetup()
 		case "backspace":
 			if r := []rune(m.setup.buf); len(r) > 0 {

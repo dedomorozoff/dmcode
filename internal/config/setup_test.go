@@ -123,6 +123,38 @@ func TestDotEnvPair(t *testing.T) {
 	}
 }
 
+// TestSetupPinsTheMeasuredEndpoints pins the provider facts the live audit of
+// 2026-11-17 measured, where a wrong entry breaks the provider outright rather
+// than degrading it. GitHub Models serves only /chat/completions — its
+// /responses path answers 404 (microsoft/apm#605 says the same) — so a
+// responses wire would 404 every turn. Groq retired qwen/qwen3-32b in August
+// 2026 and recommends openai/gpt-oss-120b in its place. Cline's gateway spells
+// Claude ids with a dot: the live catalogue serves anthropic/claude-sonnet-4.6
+// and has no claude-sonnet-4-6. When one of these fails, re-measure the
+// endpoint first and update the pin together with the preset in
+// internal/discover — the drift test holds the two lists together.
+func TestSetupPinsTheMeasuredEndpoints(t *testing.T) {
+	byLabel := func(prefix string) SetupOption {
+		t.Helper()
+		for _, o := range SetupOptions() {
+			if strings.HasPrefix(o.Label, prefix) {
+				return o
+			}
+		}
+		t.Fatalf("no /setup option starting with %q", prefix)
+		return SetupOption{}
+	}
+	if o := byLabel("GitHub Models"); o.API != APIChat {
+		t.Errorf("GitHub Models wire = %q, want %q: the endpoint answers 404 to /responses", o.API, APIChat)
+	}
+	if o := byLabel("Groq"); o.Model != "openai/gpt-oss-120b" {
+		t.Errorf("Groq model = %q, want openai/gpt-oss-120b: qwen/qwen3-32b was retired in August 2026", o.Model)
+	}
+	if o := byLabel("Cline"); o.Model != "anthropic/claude-sonnet-4.6" {
+		t.Errorf("Cline model = %q, want anthropic/claude-sonnet-4.6: the catalogue spells Claude ids with a dot", o.Model)
+	}
+}
+
 // Every option the wizard offers must have somewhere to put its key, unless it
 // is explicitly keyless.
 func TestSetupOptionsAreWellFormed(t *testing.T) {

@@ -207,12 +207,20 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			} else if want.Keyless {
 				d = d.enter()
 			} else {
-				d = d.enter().type_("sk-test-123").enter()
+				d = d.enter()
 				if m.setup.stage != setupKey {
 					t.Fatalf("choosing %q skipped the key stage (stage=%d)", want.Label, m.setup.stage)
 				}
 				if got := m.setup.opt.Label; got != want.Label {
 					t.Fatalf("row %d holds %q, want %q", i, got, want.Label)
+				}
+				d = d.type_("sk-test-123").enter()
+				// An option with no preset endpoint (Unsloth, the custom row)
+				// still has to be asked where it lives and what it serves:
+				// applySetup probes that URL, and committing an empty one
+				// probes nothing while reporting the key as rejected.
+				if want.BaseURL == "" {
+					d = d.type_("http://127.0.0.1:8888/v1").enter().type_("test-model").enter()
 				}
 				_, _ = m.Update(setupCheckMsg{
 					vars: config.SetupVars(m.setup.opt, "sk-test-123"),
@@ -224,15 +232,21 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			}
 
 			// What the wizard claims to offer has to be what it wrote to settings.json.
+			// An option with no preset endpoint was asked for its own, so the
+			// expectation is what the wizard just collected.
+			wantURL, wantModel := want.BaseURL, want.Model
+			if want.BaseURL == "" && !want.Keyless && !want.GGUF {
+				wantURL, wantModel = "http://127.0.0.1:8888/v1", "test-model"
+			}
 			st, err := settings.Load()
 			if err != nil {
 				t.Fatalf("settings.Load: %v", err)
 			}
-			if want.BaseURL != "" && st.BaseURL != want.BaseURL {
-				t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, want.BaseURL)
+			if wantURL != "" && st.BaseURL != wantURL {
+				t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, wantURL)
 			}
-			if want.Model != "" && st.Model != want.Model {
-				t.Errorf("settings.Model = %q, want %q", st.Model, want.Model)
+			if wantModel != "" && st.Model != wantModel {
+				t.Errorf("settings.Model = %q, want %q", st.Model, wantModel)
 			}
 			if st.API != want.API {
 				t.Errorf("settings.API = %q, want %q", st.API, want.API)
@@ -245,8 +259,11 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 				t.Errorf(".env was created; all config should go to settings.json")
 			}
 			// The running session has to move too, not just the file on disk.
-			if want.BaseURL != "" && m.prov.BaseURL != want.BaseURL {
-				t.Errorf("the live provider is %q, want %q", m.prov.BaseURL, want.BaseURL)
+			if wantURL != "" && m.prov.BaseURL != wantURL {
+				t.Errorf("the live provider is %q, want %q", m.prov.BaseURL, wantURL)
+			}
+			if wantModel != "" && m.prov.Model != wantModel {
+				t.Errorf("the live model is %q, want %q", m.prov.Model, wantModel)
 			}
 			if m.prov.Wire() != want.API {
 				t.Errorf("the live wire is %q, want %q", m.prov.Wire(), want.API)
@@ -273,6 +290,48 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	st, _ := settings.Load()
 	if st.APIKey != "" {
 		t.Errorf("settings.APIKey = %q after empty key, want empty", st.APIKey)
+	}
+}
+
+// TestUnslothAsksForURLAndModelInTheWizard drives the TUI wizard down the
+// Unsloth row, which carries a key but no preset endpoint. The stage machine
+// used to send every keyed row straight from the key prompt to applySetup, so
+// Unsloth was committed with an empty BaseURL — and /models then failed with
+// "unsupported protocol scheme", which read as a rejected key. The stdin
+// wizard asks for the URL and the model (TestUnslothPromptsForKeyAndEndpoint
+// in internal/config); this pins the same answers out of the TUI one.
+func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
+	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter()
+
+	if m.setup.stage != setupURL {
+		t.Fatalf("after the key the wizard sits at stage %d, want the URL prompt", m.setup.stage)
+	}
+	d = d.type_("http://127.0.0.1:8888/v1").enter()
+	if m.setup.stage != setupModel {
+		t.Fatalf("after the URL the wizard sits at stage %d, want the model prompt", m.setup.stage)
+	}
+	d = d.type_("qwen3-27b").enter()
+
+	// The model prompt's enter runs the live probe; the commit is fed the way
+	// the other tests feed it, so no request leaves the machine.
+	_, _ = m.Update(setupCheckMsg{
+		vars: config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
+		opt:  m.setup.opt,
+	})
+	if m.setup.open {
+		t.Fatal("the wizard stayed open after a complete Unsloth answer")
+	}
+	if m.prov.BaseURL != "http://127.0.0.1:8888/v1" || m.prov.Model != "qwen3-27b" {
+		t.Errorf("live provider is %q/%q, want the URL and model the wizard collected",
+			m.prov.BaseURL, m.prov.Model)
 	}
 }
 

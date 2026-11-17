@@ -52,9 +52,10 @@ type keyedPreset struct {
 func keyedPresets() []keyedPreset {
 	return []keyedPreset{
 		{"OPENCODE_API_KEY", "https://opencode.ai/zen/v1", "big-pickle", config.APIResponses, "OpenCode Zen"},
-		{"CLINE_API_KEY", "https://api.cline.bot/api/v1", "anthropic/claude-sonnet-4-6", config.APIChat, "Cline"},
-		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "qwen/qwen3-32b", config.APIResponses, "Groq"},
-		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIResponses, "GitHub Models"},
+		{"CLINE_API_KEY", "https://api.cline.bot/api/v1", "anthropic/claude-sonnet-4.6", config.APIChat, "Cline"},
+		{"GROQ_API_KEY", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b", config.APIResponses, "Groq"},
+		// GitHub Models serves only /chat/completions — /responses answers 404.
+		{"GITHUB_TOKEN", "https://models.github.ai/inference", "openai/gpt-4.1-mini", config.APIChat, "GitHub Models"},
 		{"MISTRAL_API_KEY", "https://api.mistral.ai/v1", "codestral-latest", config.APIResponses, "Mistral"},
 		{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "deepseek/deepseek-chat-v3.1:free", config.APIChat, "OpenRouter"},
 		{"KILO_API_KEY", "https://api.kilo.ai/api/gateway", "kilo-auto/free", config.APIChat, "Kilo"},

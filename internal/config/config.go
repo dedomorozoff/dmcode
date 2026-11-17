@@ -17,8 +17,8 @@ import (
 
 // api selects which OpenAI-compatible wire protocol the endpoint speaks.
 const (
-	APIResponses = "responses" // /v1/responses — OpenAI, OpenCode Zen, GitHub Models
-	APIChat      = "chat"      // /chat/completions — Ollama, LM Studio, Pollinations
+	APIResponses = "responses" // /v1/responses — OpenAI, OpenCode Zen, Groq, Mistral
+	APIChat      = "chat"      // /chat/completions — Ollama, LM Studio, Pollinations, GitHub Models
 )
 
 type Provider struct {
