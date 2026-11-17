@@ -3648,7 +3648,10 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			// A model-less option (Unsloth) has no typed model prompt of its
 			// own: the probe asks the endpoint what it serves and the picker
-			// stages the answer. applySetup carries the key from state.
+			// stages the answer. applySetup carries the key from state; the
+			// buffer is cleared with it, so the key text does not sit hidden
+			// behind the picker.
+			m.setup.buf = ""
 			return m, m.applySetup()
 		case "backspace":
 			if r := []rune(m.setup.buf); len(r) > 0 {
@@ -3735,7 +3738,7 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if len(msg.Text) > 0 && m.setup.stage != setupPick {
+	if len(msg.Text) > 0 && m.setup.stage != setupPick && m.setup.stage != setupChoose {
 		m.setup.buf += msg.Text
 	}
 	return m, nil
@@ -3886,6 +3889,17 @@ func (m *uiModel) applySetup() tea.Cmd {
 		return m.commitSetup(opt, vars)
 	}
 
+	// A probe that already succeeded for this option left its vars in state
+	// (the picker keeps them): the picker's fallbacks — esc to a typed id, or
+	// an endpoint that serves nothing — land here with the key verified, and
+	// probing again would trade the endpoint's uptime for the user's patience
+	// and, on a transient failure, strand a verified key at the key prompt.
+	// reset() clears the vars with the wizard, so they cannot leak into the
+	// next run.
+	if m.setup.vars != nil {
+		return m.commitSetup(opt, vars)
+	}
+
 	m.statusText = i18n.T("checking the key…")
 	probe := config.Provider{
 		BaseURL: vars["OPENAI_BASE_URL"],
@@ -3913,6 +3927,7 @@ func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 				m.setup.vars, m.setup.models = msg.vars, msg.models
 				m.setup.list = listView{}
 				m.setup.stage = setupChoose
+				m.statusText = i18n.T("choose the model the endpoint serves")
 				m.historyDirty = true
 				return nil
 			}
@@ -3945,7 +3960,15 @@ func (m *uiModel) handleSetupCheck(msg setupCheckMsg) tea.Cmd {
 	if msg.opt.Signup != "" {
 		m.history = append(m.history, line{kindSys, i18n.T("Get a key here: ") + msg.opt.Signup})
 	}
-	m.history = append(m.history, line{kindSys, i18n.T("press enter on an empty field to save it anyway")})
+	// The hint names what actually saves from wherever the landing put the
+	// user: on the key prompt an empty field says "save anyway", on the model
+	// prompt a typed model does — an empty field there is just a refused
+	// commit.
+	if m.setup.stage == setupModel {
+		m.history = append(m.history, line{kindSys, i18n.T("type the model and press enter to save anyway")})
+	} else {
+		m.history = append(m.history, line{kindSys, i18n.T("press enter on an empty field to save it anyway")})
+	}
 	m.historyDirty = true
 	m.followVP()
 	return nil

@@ -124,6 +124,8 @@ var catalog = map[Lang]map[string]string{
 		"the endpoint rejected the key: ":                  "endpoint отклонил ключ: ",
 		".env was left unchanged.":                         ".env остался без изменений.",
 		"press enter on an empty field to save it anyway":  "нажми enter на пустом поле, чтобы всё равно сохранить",
+		"type the model and press enter to save anyway":    "впиши модель и нажми enter, чтобы всё равно сохранить",
+		"choose the model the endpoint serves":             "выбери модель, которую отдаёт endpoint",
 		"Custom endpoint":                                  "Свой endpoint",
 		"key (input hidden, paste or ctrl+v, then enter):": "ключ (ввод скрыт, вставь или ctrl+v, затем enter):",
 		"base URL, e.g. http://localhost:1234/v1":          "base URL, напр. http://localhost:1234/v1",

@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/dedomorozoff/dmcode/internal/config"
+	"github.com/dedomorozoff/dmcode/internal/i18n"
 	"github.com/dedomorozoff/dmcode/internal/settings"
 )
 
@@ -39,6 +40,7 @@ func (d setupKeys) type_(text string) setupKeys {
 func (d setupKeys) enter() setupKeys { return d.send(tea.KeyPressMsg{Code: tea.KeyEnter}) }
 func (d setupKeys) down() setupKeys  { return d.send(tea.KeyPressMsg{Code: tea.KeyDown}) }
 func (d setupKeys) up() setupKeys    { return d.send(tea.KeyPressMsg{Code: tea.KeyUp}) }
+func (d setupKeys) esc() setupKeys   { return d.send(tea.KeyPressMsg{Code: tea.KeyEscape}) }
 
 // walkTo drives the cursor from the top of the wizard list down to index i, the
 // way a user arrows through it. Going via the top rather than sending i+1 downs
@@ -340,6 +342,9 @@ func TestUnslothGoesFromKeyToTheModelStage(t *testing.T) {
 	if m.setup.stage != setupChoose {
 		t.Fatalf("after the probe the wizard sits at stage %d, want the model picker", m.setup.stage)
 	}
+	if want := i18n.T("choose the model the endpoint serves"); m.statusText != want {
+		t.Errorf("status bar says %q while the picker is up, want %q", m.statusText, want)
+	}
 	setupKeys{m: m}.down().enter()
 
 	st, err := settings.Load()
@@ -383,9 +388,70 @@ func TestAnEmptyModelListFallsBackToTyping(t *testing.T) {
 	}
 }
 
+// TestTheTypedFallbackCommitsWithoutASecondProbe — esc from the picker to a
+// typed id must not re-probe: the probe succeeded a moment ago, and a second
+// one trades the endpoint's uptime for the user's patience — a transient
+// failure there would strand an already-verified key at the key prompt.
+func TestTheTypedFallbackCommitsWithoutASecondProbe(t *testing.T) {
+	dir := inTempDir(t)
+	path := filepath.Join(dir, "settings.json")
+	t.Setenv("DMCODE_SETTINGS_PATH", path)
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter()
+
+	_, _ = m.Update(setupCheckMsg{
+		vars:   config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
+		opt:    m.setup.opt,
+		models: []string{"unsloth/Qwen3-Coder-30B"},
+	})
+	setupKeys{m: m}.esc().type_("my-renamed-model").enter()
+
+	st, err := settings.Load()
+	if err != nil {
+		t.Fatalf("the fallback commit never reached settings.json: %v", err)
+	}
+	if st.Model != "my-renamed-model" {
+		t.Errorf("settings.Model = %q, want the typed id", st.Model)
+	}
+	if st.APIKey != "sk-unsloth-abc" {
+		t.Errorf("settings.APIKey = %q, want the verified key", st.APIKey)
+	}
+}
+
+// TestKeysTypedAtThePickerGoNowhere — the picker has no text field, so keys
+// typed or pasted while it is up must not accumulate in an invisible buffer.
+func TestKeysTypedAtThePickerGoNowhere(t *testing.T) {
+	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter()
+	_, _ = m.Update(setupCheckMsg{
+		vars:   config.SetupVars(m.setup.opt, "sk-unsloth-abc"),
+		opt:    m.setup.opt,
+		models: []string{"unsloth/Qwen3-Coder-30B"},
+	})
+	setupKeys{m: m}.type_("accidental paste")
+
+	if m.setup.buf != "" {
+		t.Errorf("keys typed at the picker accumulated in the hidden buffer: %q", m.setup.buf)
+	}
+}
+
 // TestARejectedKeyOnAModelLessRowLeadsToTyping — a probe error on a model-less
 // row lands on the typed model stage, not back on the key prompt: the local
 // server may simply be off, and the key does not need retyping to get through.
+// The hint that goes with the landing must describe what actually saves: a
+// typed model and enter, not an empty field.
 func TestARejectedKeyOnAModelLessRowLeadsToTyping(t *testing.T) {
 	dir := inTempDir(t)
 	path := filepath.Join(dir, "settings.json")
@@ -408,6 +474,17 @@ func TestARejectedKeyOnAModelLessRowLeadsToTyping(t *testing.T) {
 	}
 	if m.setup.key != "sk-unsloth-abc" {
 		t.Errorf("the key was lost on the way to the model prompt: %q", m.setup.key)
+	}
+	var prose strings.Builder
+	for _, l := range m.history {
+		prose.WriteString(l.text)
+		prose.WriteString("\n")
+	}
+	if !strings.Contains(prose.String(), "type the model and press enter to save anyway") {
+		t.Errorf("the rejection hint does not describe the model stage:\n%s", prose.String())
+	}
+	if strings.Contains(prose.String(), "press enter on an empty field") {
+		t.Errorf("the empty-field hint survived a model-stage landing:\n%s", prose.String())
 	}
 }
 

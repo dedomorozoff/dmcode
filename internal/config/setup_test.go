@@ -339,6 +339,12 @@ func TestUnslothAsksForKeyAndModel(t *testing.T) {
 	if idx == 0 {
 		t.Fatal("Unsloth is not in the option list")
 	}
+	// The wizard's fetch goes through the seam, so no request leaves the
+	// machine — even on a box where Unsloth Studio is actually listening on
+	// 8888, where a live probe would answer the blank-model case itself and
+	// desynchronise every input line below.
+	fetchModels = func(Provider) ([]string, error) { return nil, errors.New("connection refused") }
+	t.Cleanup(func() { fetchModels = ListModels })
 
 	// key, then blank model: rejected. There is no URL prompt to be blank at.
 	_, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\n", idx)), &strings.Builder{})
