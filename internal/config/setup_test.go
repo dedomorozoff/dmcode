@@ -153,6 +153,10 @@ func TestSetupPinsTheMeasuredEndpoints(t *testing.T) {
 	if o := byLabel("Cline"); o.Model != "anthropic/claude-sonnet-4.6" {
 		t.Errorf("Cline model = %q, want anthropic/claude-sonnet-4.6: the catalogue spells Claude ids with a dot", o.Model)
 	}
+	if o := byLabel("Unsloth"); o.BaseURL != "http://localhost:8888/v1" || o.EnvKey != "UNSLOTH_API_KEY" || o.Model != "" {
+		t.Errorf("Unsloth row = %q/%s/%q, want the documented localhost:8888 endpoint, its own key variable, and no model (the wizard picks one from what the server serves)",
+			o.BaseURL, o.EnvKey, o.Model)
+	}
 }
 
 // Every option the wizard offers must have somewhere to put its key, unless it
@@ -179,10 +183,13 @@ func TestSetupOptionsAreWellFormed(t *testing.T) {
 			// real key the user already had, with nothing useful in its place.
 			t.Errorf("%q needs no key but would still write %s", o.Label, o.EnvKey)
 		}
-		if o.BaseURL != "" && o.Model == "" {
-			// A preset endpoint that names no model would send an empty model
-			// field, because the wizard only prompts when baseURL is empty.
-			t.Errorf("%q has a baseURL but no model", o.Label)
+		// A preset endpoint that names no model may not send an empty model
+		// field — unless the endpoint is this machine, whose model list the
+		// wizard fetches instead of guessing an id. A remote catalogue with no
+		// default id is the shape the provider audit showed roubles a provider
+		// outright, so it stays an error.
+		if o.BaseURL != "" && o.Model == "" && !isLoopback(o.BaseURL) {
+			t.Errorf("%q has a baseURL but no model, and it is not local", o.Label)
 		}
 		if o.BaseURL != "" && !strings.HasPrefix(o.BaseURL, "http") {
 			t.Errorf("%q has a malformed baseURL %q", o.Label, o.BaseURL)
@@ -315,9 +322,10 @@ func TestReadDotEnvMissingFile(t *testing.T) {
 	_ = filepath.Join(dir, ".env")
 }
 
-// Picking Unsloth has to ask for a key and an endpoint, and a blank answer to
-// either must not be written out as a working config.
-func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
+// Picking Unsloth has to ask for a key and then a model — the endpoint is the
+// documented localhost:8888 default and is never asked for — and a blank model
+// must not be written out as a working config.
+func TestUnslothAsksForKeyAndModel(t *testing.T) {
 	inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(t.TempDir(), "settings.json"))
 	opts := SetupOptions()
@@ -331,38 +339,30 @@ func TestUnslothPromptsForKeyAndEndpoint(t *testing.T) {
 		t.Fatal("Unsloth is not in the option list")
 	}
 
-	// key, then blank endpoint: rejected.
-	_, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\nmodel-x\n", idx)), &strings.Builder{})
-	if err == nil || !strings.Contains(err.Error(), "base URL") {
-		t.Errorf("a blank endpoint gave %v, want a complaint about the URL", err)
-	}
-	if _, serr := os.Stat(".env"); serr == nil {
-		t.Error(".env was written despite the missing endpoint")
-	}
-
-	// key, endpoint, blank Model: rejected.
-	_, err = SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\n\n", idx)), &strings.Builder{})
+	// key, then blank model: rejected. There is no URL prompt to be blank at.
+	_, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\n\n", idx)), &strings.Builder{})
 	if err == nil || !strings.Contains(err.Error(), "model") {
 		t.Errorf("a blank model gave %v, want a complaint about the model", err)
 	}
+	if _, serr := os.Stat(".env"); serr == nil {
+		t.Error(".env was written despite the missing model")
+	}
 
-	// All three supplied: persisted exactly as given, which is the whole point
-	// of asking, since Unsloth's port and model id are not guessable.
-	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nhttp://127.0.0.1:8888/v1\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
+	// key and model: persisted, with the key under the name Unsloth's own docs
+	// use — so configuring Unsloth cannot overwrite a working OPENAI_API_KEY
+	// some other option already wrote.
+	if _, err := SetupWizardWith(strings.NewReader(fmt.Sprintf("%d\nsk-unsloth-abc\nqwen3-27b\n", idx)), &strings.Builder{}); err != nil {
 		t.Fatalf("a complete Unsloth answer was rejected: %v", err)
 	}
-	// Check settings.json has all the values.
 	st, err := settings.Load()
 	if err != nil {
 		t.Fatalf("settings.Load: %v", err)
 	}
-	for _, want := range []string{"sk-unsloth-abc", "http://127.0.0.1:8888/v1"} {
-		if want == "sk-unsloth-abc" && st.APIKey != want {
-			t.Errorf("settings.APIKey = %q, want %q", st.APIKey, want)
-		}
-		if want == "http://127.0.0.1:8888/v1" && st.BaseURL != want {
-			t.Errorf("settings.BaseURL = %q, want %q", st.BaseURL, want)
-		}
+	if st.APIKey != "sk-unsloth-abc" {
+		t.Errorf("settings.APIKey = %q, want sk-unsloth-abc", st.APIKey)
+	}
+	if st.BaseURL != "http://localhost:8888/v1" {
+		t.Errorf("settings.BaseURL = %q, want the documented default", st.BaseURL)
 	}
 	if st.Model != "qwen3-27b" {
 		t.Errorf("settings.Model = %q, want qwen3-27b", st.Model)

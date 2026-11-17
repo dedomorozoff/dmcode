@@ -3613,13 +3613,19 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			// The key goes to state, not to the buffer: the URL and model stages
 			// below reuse the buffer for their own answers.
 			m.setup.key = strings.TrimSpace(m.setup.buf)
-			// An option that carries a key but no preset endpoint (Unsloth, a
-			// custom URL) still needs the URL and the model the stdin wizard
-			// asks for. applySetup probes the URL, so applying straight from
-			// the key prompt probed an empty base URL and reported every key
-			// as rejected; the URL stage chains on to the model stage itself.
+			// An option that carries a key but no preset endpoint (a custom URL)
+			// still needs the URL the stdin wizard asks for. applySetup probes
+			// the URL, so applying straight from the key prompt probed an empty
+			// base URL and reported every key as rejected; the URL stage chains
+			// on to the model stage itself. An option whose endpoint is known
+			// but whose model is not (Unsloth) skips straight to the model.
 			if m.setup.opt.BaseURL == "" {
 				m.setup.stage = setupURL
+				m.setup.buf = ""
+				return m, nil
+			}
+			if m.setup.opt.Model == "" {
+				m.setup.stage = setupModel
 				m.setup.buf = ""
 				return m, nil
 			}

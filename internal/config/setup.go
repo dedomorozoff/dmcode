@@ -85,7 +85,13 @@ func SetupOptions() []SetupOption {
 		{Label: i18n.T("GitHub Models — free with a GitHub token"), Signup: "https://github.com/settings/tokens", BaseURL: "https://models.github.ai/inference", Model: "openai/gpt-4.1-mini", EnvKey: "GITHUB_TOKEN", API: APIChat, Free: true},
 		{Label: i18n.T("Cerebras — free tier, no card, very fast"), Signup: "https://inference.cerebras.ai", BaseURL: "https://api.cerebras.ai/v1", Model: "qwen-3.8-27b", EnvKey: "CEREBRAS_API_KEY", API: APIChat, Free: true},
 		{Label: i18n.T("SambaNova — free key, fast OpenAI-compatible"), Signup: "https://cloud.sambanova.ai", BaseURL: "https://api.sambanova.ai/v1", Model: "Meta-Llama-3.3-70B-Instruct", EnvKey: "SAMBANOVA_API_KEY", API: APIChat, Free: true},
-		{Label: i18n.T("Unsloth (local) — key from Settings → API, URL and model from your console"), Signup: "https://unsloth.ai/docs/basics/api", EnvKey: "OPENAI_API_KEY", API: APIChat},
+		// The endpoint is the documented default of Unsloth Studio, a local
+		// server like Ollama or LM Studio (their quickstart runs it on port
+		// 8888); the key variable is the name Unsloth's own docs export, so
+		// configuring it cannot overwrite a working OPENAI_API_KEY another
+		// option wrote. The catalogue is whatever the user downloaded, so no
+		// model id is preset — the wizard asks the server what it serves.
+		{Label: i18n.T("Unsloth Studio (local) — key from Settings → API, the model comes from the server"), Signup: "https://unsloth.ai/docs/basics/api", BaseURL: "http://localhost:8888/v1", EnvKey: "UNSLOTH_API_KEY", API: APIChat, Free: true},
 
 		// Below the line: something here can bill. It is all still offered, and
 		// it is all still picked up automatically once its key is exported — the
@@ -303,18 +309,22 @@ func SetupWizardWith(r io.Reader, w io.Writer) (Provider, error) {
 		if bin != "" {
 			extras["DMCODE_LLAMA_SERVER"] = bin
 		}
-	} else if opt.BaseURL == "" {
-		fmt.Fprint(w, i18n.T("base URL (e.g. http://localhost:1234/v1): "))
-		urlLine, _ := reader.ReadString('\n')
-		opt.BaseURL = strings.TrimSpace(urlLine)
+	} else {
 		if opt.BaseURL == "" {
-			return Provider{}, fmt.Errorf("%s", i18n.T("no base URL entered"))
+			fmt.Fprint(w, i18n.T("base URL (e.g. http://localhost:1234/v1): "))
+			urlLine, _ := reader.ReadString('\n')
+			opt.BaseURL = strings.TrimSpace(urlLine)
+			if opt.BaseURL == "" {
+				return Provider{}, fmt.Errorf("%s", i18n.T("no base URL entered"))
+			}
 		}
-		fmt.Fprint(w, i18n.T("model: "))
-		mLine, _ := reader.ReadString('\n')
-		opt.Model = strings.TrimSpace(mLine)
 		if opt.Model == "" {
-			return Provider{}, fmt.Errorf("%s", i18n.T("no model entered"))
+			fmt.Fprint(w, i18n.T("model: "))
+			mLine, _ := reader.ReadString('\n')
+			opt.Model = strings.TrimSpace(mLine)
+			if opt.Model == "" {
+				return Provider{}, fmt.Errorf("%s", i18n.T("no model entered"))
+			}
 		}
 	}
 

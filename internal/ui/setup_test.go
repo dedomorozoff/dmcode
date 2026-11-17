@@ -215,12 +215,18 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 					t.Fatalf("row %d holds %q, want %q", i, got, want.Label)
 				}
 				d = d.type_("sk-test-123").enter()
-				// An option with no preset endpoint (Unsloth, the custom row)
-				// still has to be asked where it lives and what it serves:
-				// applySetup probes that URL, and committing an empty one
-				// probes nothing while reporting the key as rejected.
+				// An option with no preset endpoint (the custom row) still has
+				// to be asked where it lives: applySetup probes that URL, and
+				// committing an empty one probes nothing while reporting the
+				// key as rejected.
 				if want.BaseURL == "" {
-					d = d.type_("http://127.0.0.1:8888/v1").enter().type_("test-model").enter()
+					d = d.type_("http://127.0.0.1:8888/v1").enter()
+				}
+				// An option whose model is not preset (Unsloth) is asked for
+				// one; committing without a model would send an empty model
+				// field on every request.
+				if m.setup.opt.Model == "" {
+					d = d.type_("test-model").enter()
 				}
 				_, _ = m.Update(setupCheckMsg{
 					vars: config.SetupVars(m.setup.opt, "sk-test-123"),
@@ -232,11 +238,15 @@ func TestEverySetupOptionIsReachableAndPersists(t *testing.T) {
 			}
 
 			// What the wizard claims to offer has to be what it wrote to settings.json.
-			// An option with no preset endpoint was asked for its own, so the
-			// expectation is what the wizard just collected.
+			// An option with no preset endpoint was asked for its own, and an
+			// option with no preset model was asked for one, so the expectation
+			// is what the wizard just collected.
 			wantURL, wantModel := want.BaseURL, want.Model
 			if want.BaseURL == "" && !want.Keyless && !want.GGUF {
-				wantURL, wantModel = "http://127.0.0.1:8888/v1", "test-model"
+				wantURL = "http://127.0.0.1:8888/v1"
+			}
+			if want.Model == "" && !want.Keyless && !want.GGUF {
+				wantModel = "test-model"
 			}
 			st, err := settings.Load()
 			if err != nil {
@@ -293,14 +303,10 @@ func TestSetupKeyStageRejectsEmptyKey(t *testing.T) {
 	}
 }
 
-// TestUnslothAsksForURLAndModelInTheWizard drives the TUI wizard down the
-// Unsloth row, which carries a key but no preset endpoint. The stage machine
-// used to send every keyed row straight from the key prompt to applySetup, so
-// Unsloth was committed with an empty BaseURL — and /models then failed with
-// "unsupported protocol scheme", which read as a rejected key. The stdin
-// wizard asks for the URL and the model (TestUnslothPromptsForKeyAndEndpoint
-// in internal/config); this pins the same answers out of the TUI one.
-func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
+// TestUnslothGoesFromKeyToTheModelStage drives the TUI wizard down the Unsloth
+// row, whose endpoint is pinned to the documented localhost:8888 default: after
+// the key the next prompt is the model, and no URL stage sits between them.
+func TestUnslothGoesFromKeyToTheModelStage(t *testing.T) {
 	dir := inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
 
@@ -308,17 +314,13 @@ func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
 	row := mustRow(t, func(o config.SetupOption) bool {
 		return strings.Contains(o.Label, "Unsloth")
 	})
-	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
 		type_("sk-unsloth-abc").enter()
 
-	if m.setup.stage != setupURL {
-		t.Fatalf("after the key the wizard sits at stage %d, want the URL prompt", m.setup.stage)
-	}
-	d = d.type_("http://127.0.0.1:8888/v1").enter()
 	if m.setup.stage != setupModel {
-		t.Fatalf("after the URL the wizard sits at stage %d, want the model prompt", m.setup.stage)
+		t.Fatalf("after the key the wizard sits at stage %d, want the model prompt", m.setup.stage)
 	}
-	d = d.type_("qwen3-27b").enter()
+	setupKeys{m: m}.type_("qwen3-27b").enter()
 
 	// The model prompt's enter runs the live probe; the commit is fed the way
 	// the other tests feed it, so no request leaves the machine.
@@ -329,9 +331,28 @@ func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
 	if m.setup.open {
 		t.Fatal("the wizard stayed open after a complete Unsloth answer")
 	}
-	if m.prov.BaseURL != "http://127.0.0.1:8888/v1" || m.prov.Model != "qwen3-27b" {
-		t.Errorf("live provider is %q/%q, want the URL and model the wizard collected",
+	if m.prov.BaseURL != "http://localhost:8888/v1" || m.prov.Model != "qwen3-27b" {
+		t.Errorf("live provider is %q/%q, want the pinned URL and the typed model",
 			m.prov.BaseURL, m.prov.Model)
+	}
+}
+
+// TestTheCustomRowStillAsksForTheURL — pinning Unsloth's endpoint must not eat
+// the custom row's URL stage: "Your own OpenAI-compatible endpoint" still has
+// nowhere to call until the user says where.
+func TestTheCustomRowStillAsksForTheURL(t *testing.T) {
+	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Your own OpenAI-compatible endpoint")
+	})
+	setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-mine-123").enter()
+
+	if m.setup.stage != setupURL {
+		t.Fatalf("after the key the custom row sits at stage %d, want the URL prompt", m.setup.stage)
 	}
 }
 
@@ -340,7 +361,34 @@ func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
 // The key used to live only in the input buffer: the URL stage cleared it, the
 // model stage filled it with the model text, and the probe went out with the
 // model id in the key position — which is why the key had to be typed twice.
+// The custom row is the one that still walks all three stages.
 func TestTheWizardCarriesTheKeyToTheProbe(t *testing.T) {
+	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Your own OpenAI-compatible endpoint")
+	})
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-mine-123").enter().
+		type_("http://127.0.0.1:9999/v1").enter().
+		type_("test-model").enter()
+
+	msg := d.cmd()
+	check, ok := msg.(setupCheckMsg)
+	if !ok {
+		t.Fatalf("the model stage produced %T, want setupCheckMsg", msg)
+	}
+	if got := check.vars["OPENAI_API_KEY"]; got != "sk-mine-123" {
+		t.Errorf("the probe would send the key %q, want sk-mine-123", got)
+	}
+}
+
+// TestTheUnslothKeyReachesTheProbe pins the same thing for the row whose
+// stages the URL pin collapsed: the key typed once must be what the probe
+// carries, under the variable Unsloth's own docs name.
+func TestTheUnslothKeyReachesTheProbe(t *testing.T) {
 	dir := inTempDir(t)
 	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
 
@@ -350,7 +398,6 @@ func TestTheWizardCarriesTheKeyToTheProbe(t *testing.T) {
 	})
 	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
 		type_("sk-unsloth-abc").enter().
-		type_("http://127.0.0.1:8888/v1").enter().
 		type_("test-model").enter()
 
 	msg := d.cmd()
@@ -358,7 +405,7 @@ func TestTheWizardCarriesTheKeyToTheProbe(t *testing.T) {
 	if !ok {
 		t.Fatalf("the model stage produced %T, want setupCheckMsg", msg)
 	}
-	if got := check.vars["OPENAI_API_KEY"]; got != "sk-unsloth-abc" {
+	if got := check.vars["UNSLOTH_API_KEY"]; got != "sk-unsloth-abc" {
 		t.Errorf("the probe would send the key %q, want sk-unsloth-abc", got)
 	}
 }
