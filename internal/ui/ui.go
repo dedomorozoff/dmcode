@@ -725,6 +725,11 @@ type setupState struct {
 	// It is only set after a failed check, so a bad key is still one retry away
 	// from being saved on the first attempt.
 	force bool
+	// key is the answer the key stage collected. The chained stages (URL, model)
+	// reuse the input buffer, so a key kept there would be cleared by the next
+	// stage and the model text would arrive in its place — which is exactly why
+	// the probe used to reject a good key and ask for it a second time.
+	key string
 	// gguf is the file browser behind the GGUF path prompt. reset() wipes it
 	// along with the wizard, so a cancelled /setup never leaves the dialog up.
 	gguf ggufPickState
@@ -3605,6 +3610,9 @@ func (m *uiModel) setupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.statusText = i18n.T("no key entered")
 				return m, nil
 			}
+			// The key goes to state, not to the buffer: the URL and model stages
+			// below reuse the buffer for their own answers.
+			m.setup.key = strings.TrimSpace(m.setup.buf)
 			// An option that carries a key but no preset endpoint (Unsloth, a
 			// custom URL) still needs the URL and the model the stdin wizard
 			// asks for. applySetup probes the URL, so applying straight from
@@ -3814,7 +3822,7 @@ func (m *uiModel) ggufPickKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // configuration is unrecoverable without retyping it.
 func (m *uiModel) applySetup() tea.Cmd {
 	opt := m.setup.opt
-	vars := config.SetupVars(opt, strings.TrimSpace(m.setup.buf))
+	vars := config.SetupVars(opt, m.setup.key)
 
 	// A GGUF file is saved straight away and the server starts in the
 	// background: loading a model takes minutes, and the event loop must not

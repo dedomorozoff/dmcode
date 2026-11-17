@@ -335,6 +335,34 @@ func TestUnslothAsksForURLAndModelInTheWizard(t *testing.T) {
 	}
 }
 
+// TestTheWizardCarriesTheKeyToTheProbe drives the chained stages with the keys
+// a model would type and inspects the vars the probe is actually built from.
+// The key used to live only in the input buffer: the URL stage cleared it, the
+// model stage filled it with the model text, and the probe went out with the
+// model id in the key position — which is why the key had to be typed twice.
+func TestTheWizardCarriesTheKeyToTheProbe(t *testing.T) {
+	dir := inTempDir(t)
+	t.Setenv("DMCODE_SETTINGS_PATH", filepath.Join(dir, "settings.json"))
+
+	m := newSetupModel(t)
+	row := mustRow(t, func(o config.SetupOption) bool {
+		return strings.Contains(o.Label, "Unsloth")
+	})
+	d := setupKeys{m: m}.type_("/setup").enter().walkTo(row).enter().
+		type_("sk-unsloth-abc").enter().
+		type_("http://127.0.0.1:8888/v1").enter().
+		type_("test-model").enter()
+
+	msg := d.cmd()
+	check, ok := msg.(setupCheckMsg)
+	if !ok {
+		t.Fatalf("the model stage produced %T, want setupCheckMsg", msg)
+	}
+	if got := check.vars["OPENAI_API_KEY"]; got != "sk-unsloth-abc" {
+		t.Errorf("the probe would send the key %q, want sk-unsloth-abc", got)
+	}
+}
+
 // A keyed provider must be verified before settings.json is touched, so a wrong key
 // cannot replace a working configuration.
 func TestSetupVerifiesKeyBeforeWriting(t *testing.T) {
