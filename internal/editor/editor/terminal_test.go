@@ -1,6 +1,8 @@
 package editor
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -11,6 +13,39 @@ import (
 )
 
 func altT() tea.KeyPressMsg { return tea.KeyPressMsg{Code: 't', Mod: tea.ModAlt} }
+
+// testShell pins a shell the platform is guaranteed to carry. The tests must
+// not inherit $SHELL: a sandbox or CI image can point it at a binary it does
+// not have, and then "alt+t opens a terminal" would fail for a reason that has
+// nothing to do with the editor.
+func testShell(t *testing.T) {
+	t.Helper()
+	shell := "/bin/sh"
+	if runtime.GOOS == "windows" {
+		shell = os.Getenv("COMSPEC")
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+	}
+	t.Setenv("DMCODE_SHELL", shell)
+}
+
+// requireTerminalSession skips — rather than fails — when the platform will
+// not give dmcode a pseudo-terminal at all, and fails when the toggle never
+// asked for one. The only reason ensureShell leaves termSession nil is that
+// ptyterm.Start failed, and it records that with terminalFailPrefix: a
+// container without /dev/ptmx is not a broken alt+t, and what these tests
+// assert is the toggle. ptyterm's own test draws the same line.
+func requireTerminalSession(t *testing.T, m Model) {
+	t.Helper()
+	if m.termSession != nil {
+		return
+	}
+	if reason, ok := strings.CutPrefix(m.msg, terminalFailPrefix); ok {
+		t.Skipf("a live PTY is unavailable here: %s", reason)
+	}
+	t.Fatalf("the terminal did not open (msg=%q)", m.msg)
+}
 
 func TestTerminalShellSelection(t *testing.T) {
 	m := New()
@@ -63,12 +98,14 @@ func TestTerminalKeyEncoding(t *testing.T) {
 
 func TestTerminalToggleAndCommand(t *testing.T) {
 	m := New()
+	testShell(t)
 	m.width, m.height = 80, 24
 	next, cmd := m.Update(altT())
 	m = next.(Model)
 	defer m.killTerminal()
-	if !m.termOpen || m.termSession == nil || cmd == nil {
-		t.Fatal("Alt+T must open a live PTY")
+	requireTerminalSession(t, m)
+	if !m.termOpen || cmd == nil {
+		t.Fatal("Alt+T must open a live PTY and hand back its read commands")
 	}
 	if h := m.viewHeight(); h >= 24 {
 		t.Fatalf("editor did not shrink: %d", h)
@@ -96,6 +133,28 @@ func rowTexts(rows []terminalRow) []string {
 		out[i] = rows[i].text
 	}
 	return out
+}
+
+// TestTerminalStartFailureIsReported: a shell that cannot be started leaves
+// the reason on the status line rather than a panel that silently does
+// nothing. It is also the message the PTY-dependent tests read to skip
+// themselves, so clearing it here would turn "this machine has no PTY" into a
+// mystery failure there.
+func TestTerminalStartFailureIsReported(t *testing.T) {
+	m := New()
+	m.width, m.height = 80, 24
+	t.Setenv("DMCODE_SHELL", filepath.Join(t.TempDir(), "no-such-shell"))
+	next, cmd := m.Update(altT())
+	m = next.(Model)
+	defer m.killTerminal()
+
+	if m.termSession != nil || m.termOpen || cmd != nil {
+		t.Fatalf("a missing shell must not open a panel (open=%v session=%v cmd=%v)",
+			m.termOpen, m.termSession != nil, cmd != nil)
+	}
+	if !strings.HasPrefix(m.msg, terminalFailPrefix) {
+		t.Fatalf("msg = %q, want the reason prefixed with %q", m.msg, terminalFailPrefix)
+	}
 }
 
 func TestTerminalPanelRows(t *testing.T) {

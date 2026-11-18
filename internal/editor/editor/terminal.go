@@ -19,6 +19,13 @@ import (
 
 // Bottom terminal panel backed by a real PTY and a small ANSI screen emulator.
 
+// terminalFailPrefix opens every message about the terminal failing to start.
+// It is a constant because ensureShell writes the message and the tests read it
+// back to tell "this machine will not give dmcode a PTY" from "the toggle
+// stopped asking for one" — the two are different bugs and only one of them is
+// dmcode's.
+const terminalFailPrefix = "terminal: "
+
 var ansiRe = regexp.MustCompile("\x1b(?:\\[[0-9;?]*[ -/]*[@-~]|][^\x07]*(?:\x07|\x1b\\\\)|[@-Z\\\\-_])")
 
 func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
@@ -85,7 +92,7 @@ func (m *Model) ensureShell() {
 		Width: width, Height: height,
 	})
 	if err != nil {
-		m.msg = "terminal: " + err.Error()
+		m.msg = terminalFailPrefix + err.Error()
 		return
 	}
 	m.termGen++
@@ -147,12 +154,18 @@ func captureTerminalRows(term vt10x.Terminal) []terminalRow {
 func (m *Model) toggleTerminal() tea.Cmd {
 	if m.termOpen {
 		m.termOpen = false
+		m.termFocus = false
 		m.msg = ""
 		return nil
 	}
 	cmd := m.StartTerminal()
 	m.termFocus = m.termOpen
-	m.msg = ""
+	// ensureShell put the reason in m.msg when the platform would not give us a
+	// shell. Clearing it unconditionally is what made a terminal that could not
+	// open look like one that was never asked for.
+	if m.termSession != nil {
+		m.msg = ""
+	}
 	return cmd
 }
 
@@ -286,7 +299,7 @@ func (m *Model) forwardTerminalMouseEvent(button, x, y int, final byte) {
 func (m *Model) handleTerm(msg tea.KeyPressMsg) tea.Cmd {
 	if data := terminalKeyBytes(msg); len(data) > 0 && m.termSession != nil {
 		if _, err := m.termSession.Write(data); err != nil {
-			m.msg = "terminal: " + err.Error()
+			m.msg = terminalFailPrefix + err.Error()
 		}
 	}
 	return nil

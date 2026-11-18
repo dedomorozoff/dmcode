@@ -14,13 +14,15 @@ import (
 func TestChatModeTerminalWorks(t *testing.T) {
 	dir := t.TempDir()
 	m := New(dir)
+	testShell(t)
 	m.width, m.height = 80, 24
 	m.Chat = true
 
 	next, cmd := m.Update(altT())
 	m = next.(Model)
 	defer m.killTerminal()
-	if !m.termOpen || m.termSession == nil || cmd == nil {
+	requireTerminalSession(t, m)
+	if !m.termOpen || cmd == nil {
 		t.Fatal("alt+t must open a live PTY in chat mode")
 	}
 

@@ -126,6 +126,7 @@ func TestStatusIconClickTogglesPanels(t *testing.T) {
 	chdir(t, t.TempDir())
 	a := writeTemp(t, dir, "a.txt", "alpha\n")
 	m := New(a)
+	testShell(t)
 	m.width, m.height = 100, 24
 	// The terminal icon spawns a shell sitting in the temp dir; without a
 	// shutdown its process keeps Windows from removing the directory.
@@ -149,6 +150,7 @@ func TestStatusIconClickTogglesPanels(t *testing.T) {
 	// Terminal opens on its icon.
 	m.termOpen = false
 	click(actTerm)
+	requireTerminalSession(t, m)
 	if !m.termOpen {
 		t.Fatal("term icon must open the terminal")
 	}
