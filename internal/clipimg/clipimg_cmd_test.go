@@ -85,6 +85,25 @@ func TestLadderEmptyStdoutIsNoImageNotAFailure(t *testing.T) {
 	}
 }
 
+// TestLadderToolFailuresAreReportedWhenNothingSaidNoImage: every tool failing
+// to run at all is a broken clipboard rather than an empty one, and the reason
+// is what lets a user fix it. ErrNoImage here would silently fall back to the
+// text paste on a machine where the paste never had a chance.
+func TestLadderToolFailuresAreReportedWhenNothingSaidNoImage(t *testing.T) {
+	fakeTools(t, []imageCandidate{{name: "wl-paste", label: "wl-paste"}},
+		map[string]func(args ...string) ([]byte, error){
+			"wl-paste": func(...string) ([]byte, error) {
+				return nil, errors.New("wl-paste: failed to connect to a Wayland server")
+			},
+		},
+		map[string]bool{"wl-paste": true})
+
+	_, err := read()
+	if err == nil || errors.Is(err, ErrNoImage) {
+		t.Errorf("read err = %v, want the tool's own reason", err)
+	}
+}
+
 // TestLadderAbsentToolsAreNoImage: a machine with no clipboard tool is not a
 // machine with a broken paste — the UI falls through to the text paste on
 // ErrNoImage, which is what keeps ctrl+v typing as if nothing was added.

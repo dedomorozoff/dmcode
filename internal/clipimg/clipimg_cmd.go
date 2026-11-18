@@ -4,6 +4,7 @@ package clipimg
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"os"
@@ -102,28 +103,43 @@ func realCandidates() []imageCandidate {
 // empty stdout, a one-byte newline, a zero-length file — and each of those is
 // "no image here" rather than a failure worth reporting. Only bytes that
 // decode are a picture.
+//
+// A tool that exits non-zero is no picture either: both of this platform's
+// tools say "… image/png not available" on stderr when the selection holds
+// text, which is the ordinary ctrl+v-with-no-screenshot case. Reporting that
+// as a failure would turn the common case into an error message and skip the
+// text paste the user actually asked for. The tool's own reason is still
+// returned, but only when no candidate said "no picture" outright and none
+// handed over unreadable bytes — a machine where every clipboard tool is
+// broken should say so rather than behave as if the clipboard were empty.
 func read() (image.Image, error) {
-	var firstErr error
+	var toolErr error   // the first tool that could not answer at all
+	var decodeErr error // the first answer that was not an image
+	sawNoImage := false // a tool ran and said, one way or another, "no picture"
 	for _, c := range candidates() {
 		if !commandExists(c.name) {
 			continue
 		}
 		data, err := run(c)
-		if err == nil && len(bytes.TrimSpace(data)) == 0 {
-			err = ErrNoImage
-		}
 		if err != nil {
-			if firstErr == nil && err != ErrNoImage {
-				firstErr = err
+			if errors.Is(err, ErrNoImage) {
+				sawNoImage = true
+			} else if toolErr == nil {
+				toolErr = err
 			}
+			continue
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			sawNoImage = true
+			os.Remove(c.tempFile)
 			continue
 		}
 		img, _, err := image.Decode(bytes.NewReader(data))
 		if err != nil {
 			// The tool handed over bytes that are not a picture. Worth
 			// remembering, because a later candidate may still work.
-			if firstErr == nil {
-				firstErr = fmt.Errorf("the clipboard image is not something dmcode can read: %w", err)
+			if decodeErr == nil {
+				decodeErr = fmt.Errorf("the clipboard image is not something dmcode can read: %w", err)
 			}
 			os.Remove(c.tempFile)
 			continue
@@ -134,8 +150,17 @@ func read() (image.Image, error) {
 		os.Remove(c.tempFile)
 		return img, nil
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	// Unreadable bytes are the one answer that is neither "no picture" nor
+	// "no answer": the user pasted something and dmcode is about to ignore it,
+	// so it outranks both of the fallbacks below.
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if sawNoImage {
+		return nil, ErrNoImage
+	}
+	if toolErr != nil {
+		return nil, toolErr
 	}
 	return nil, ErrNoImage
 }
