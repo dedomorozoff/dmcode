@@ -1,3 +1,181 @@
+# dmCode v0.2.5
+
+v0.2.5 gives the agent a memory it can search, a way to load instructions on
+demand, and commands that do not have to finish before the turn can move on.
+It also makes the Linux and macOS clipboard work for pictures, makes citations
+in a reply something you can click, and — the reason this tag exists at all —
+unbreaks the cross-builds for every BSD in the release matrix.
+
+> ### ⚠️ Read this before trusting the new parts
+>
+> **Skills, local retrieval and `/compact` are tested, not driven by a live
+> model.** The tools, the index and the command have unit and wire-shape tests;
+> no live model has called `skill` or `rag_search`, and `/compact` has not been
+> driven through a real TUI turn against an endpoint.
+>
+> **The Linux and macOS clipboard ladder is unverified on real hardware.** The
+> `wl-paste` / `xclip` / `osascript` path is exercised through injected commands
+> and compiles for both platforms, but no real Wayland, X11 or macOS pasteboard
+> has ever answered it on a machine anyone watched.
+>
+> **A cited `path:line` being clickable is tested; a live model writing one is
+> not.** The click is driven end to end by tests that build a real frame and hit
+> the row, but no live session has done it, and whether a model writes
+> `path:line` when asked is a claim about the model, not about dmcode. The new
+> `read_file` paging contract (`offset_line` counts from one, results carry
+> `start_line` and `next_offset`) is the same story: tested, not measured against
+> a model learning it in one session.
+
+## Install
+
+```bash
+# macOS / Linux / BSD
+curl -fsSL https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/dedomorozoff/dmcode/main/install.ps1 | iex
+```
+
+Or from a checkout:
+
+```bash
+make install       # -> $(go env GOBIN), or GOPATH/bin
+```
+
+Or with Go 1.26+:
+
+```bash
+go install github.com/dedomorozoff/dmcode@v0.2.5
+```
+
+## What's new since v0.2.4
+
+### Skills, local retrieval, and `/compact`
+
+The agent can now load instructions when a task needs them, search its own
+workspace by meaning rather than by guessing a grep, and compress a long
+conversation on demand.
+
+- **`skill`** loads an OpenCode-compatible skill by id. Skills are discovered
+  from `.opencode/skills`, `.claude/skills`, `.agents/skills`, native
+  `.dmcode/skills` (workspace and home) and `~/.config/opencode/skills`; a skill
+  is a nested `SKILL.md` or a flat `.md`. The id is path-derived, project
+  sources override global ones, and `metadata.opencode/autoinvoke: false` /
+  `disable-model-invocation: true` keep a skill out of the advertised list while
+  leaving it loadable by id. `/skills` lists what is available.
+- **`rag_index` / `rag_search`** maintain a local BM25 index under
+  `~/.dmcode/rag` (override with `DMCODE_RAG_DIR`), one per workspace. `rag_index`
+  walks text files (and, with `include_sessions=true`, saved conversations);
+  chunks keep start/end lines so a hit can be opened and cited. `rag_search`
+  never rebuilds — a missing or stale index is reported with the instruction to
+  index first.
+- **`/compact`** summarizes all but the newest eight events and appends the
+  summary as a compaction event in the store. It uses the same summarizer ADK's
+  automatic path uses, needs no runner rebuild, and works even when automatic
+  compaction is off; `esc` cancels it.
+
+### A command can outlive the turn that started it
+
+`run_command` with `background=true` returns a handle at once instead of
+waiting. `command_output` answers whether it is still running, what it has
+printed, and how it ended. The process is not tied to the turn's context — the
+point is to start a build, do something else, and come back — but it is tied to
+dmcode, and a closed session takes down what it started. Output kept is the
+tail, with a count of what was dropped, because the failure in a long build is
+usually the last thing printed. The catastrophic-command gate applies to
+background commands too.
+
+### A place in a reply is something you can open
+
+A `path:line` in the agent's own prose is now marked in the transcript and
+clickable: a click opens the file at that line, the same way a change-block row
+already did. The citation is read out of the drawn row rather than the model's
+raw text, and the extension is what tells a file from a domain or a URL. The
+agent is asked for `path:line` in every mode.
+
+`read_file` now speaks the same language: results carry `start_line` and
+`next_offset`, and `offset_line` counts from one (like every other line number
+in dmcode) instead of acting as a zero-based skip. The transcript shows the
+range it is showing.
+
+### Pictures from the clipboard on Linux and macOS
+
+`ctrl+v` can now attach a clipboard picture on Linux (`wl-paste --type
+image/png`, then `xclip -selection clipboard -t image/png -o`) and on macOS
+(`osascript` writing PNG to a temp path this side chose). The first answer that
+actually decodes wins; an absent tool or an empty/"no picture" answer falls
+through to the text paste. WebP and BMP decode in the chat and in the editor
+alike.
+
+### Local models, compaction, and context that does not stop the session
+
+llama-server reports the slot context it actually runs with under `meta.n_ctx`;
+dmcode now reads it (falling back to `meta.n_ctx_train`), so a GGUF provider no
+longer carries a zero window and lose automatic compaction. Provider swaps and
+in-place runner rebuilds now apply the provider's window and compaction config,
+and the sidebar tracks the summary ADK writes to the store. If a turn outgrows
+the window, dmcode offers a context-bigger llama-server restart.
+
+### The question, the terminal, and the workspace
+
+- **`ask_user` is docked under the transcript** instead of replacing the frame,
+  so the reply it is about stays readable while you answer. Its height is
+  measured from the rendered box and comes out of the viewport.
+- **Changed files no longer all open when the editor opens.** A change-block row
+  in the transcript still opens its file at the line; a row in the sidebar's
+  CHANGES list opens that file on click.
+- **A cancelled turn kills the process tree it started.** `run_command` and the
+  editor's PTY are on the same seam, and a sub-agent's in-flight model call is
+  interrupted with the parent turn.
+- **A rewound prompt is removed from `~/.dmcode/history.jsonl` too**, not only
+  from the in-memory history.
+- **`run_command` refuses the catastrophic cases** (recursive delete of a root,
+  filesystem format, raw device write, force push, forced clean, hard reset, the
+  fork bomb) and names what to use instead; the shell is not a sandbox and the
+  gate reads the command word, not the text.
+
+### Setup and the wizards
+
+The `/setup` flow gained a model picker fed by what the endpoint actually
+serves, pinned the Unsloth endpoint and its key name, fixed presets the live
+audit caught (GitHub Models on chat-only, a retired Groq default, Cline's Claude
+id spelling), and now asks for whatever a chosen option is missing instead of
+skipping the URL/model stages. A key the endpoint already verified is not
+re-probed by the picker fallbacks.
+
+### Fixes
+
+- **Linux clipboard:** a tool that exits with "image/png not available" (a
+  text-only selection) is now treated as "no picture", so `ctrl+v` falls through
+  to the text paste instead of reporting an error. A machine where every
+  clipboard tool is broken still gets the tool's reason.
+- **BSD cross-builds:** the clipboard ladder's build tag named only
+  `linux || darwin`, leaving FreeBSD, OpenBSD and NetBSD (and every other GOOS)
+  without `read()`; the fallback is back with the exact complement tag. This is
+  what unblocked the release matrix.
+- **Terminal PTY tests:** the editor's PTY tests pin `/bin/sh` (`%COMSPEC%` on
+  Windows) instead of inheriting `$SHELL`, and skip only when a pseudo-terminal
+  is genuinely unavailable; a shell that fails to start now leaves its reason on
+  the status line.
+- **`build-<os>`** defaults the arch to the machine's own `GOARCH` when none is
+  given, so `make build-windows` on an amd64 host does the right thing.
+
+## Known limitations
+
+Unchanged from v0.2.4 unless noted: sending a picture to a model is still
+unverified end to end. Cancellation now reaches the process tree a turn or the
+editor's terminal started and interrupts a sub-agent's in-flight call, but other
+long-lived work outside those paths may still finish on its own schedule. The
+workspace boundary is lexical; the tools that open files re-check after following
+symlinks, and `grep` skips symlinks rather than reading through them. A rewind
+still does not rewrite the turn journal on disk across restarts (it is
+memory-only), and the resumed-session/rewind round trips against a live runner
+remain unverified. Skills, RAG and `/compact` have no live-model coverage; the
+Linux/macOS clipboard ladder has no real-clipboard coverage. See `AGENTS.md` for
+the full, maintained list.
+
 # dmCode v0.2.4
 
 v0.2.4 is a provider release. The agent gets better instruments — it can fetch a
